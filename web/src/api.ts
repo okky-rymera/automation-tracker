@@ -3,23 +3,54 @@ import { useEffect, useState } from 'react';
 export type LineState = 'library' | 'tested' | 'setup' | 'background' | 'never';
 export type FunctionState = LineState | 'unknown';
 
-/** Runnable PHP lines by state. runByTests counts library lines too. */
-export type LineCounts = Record<LineState | 'runnable' | 'runByTests', number>;
+/**
+ * Runnable PHP lines by state. runByTests counts library lines too.
+ * cypressOnly ("both" view only): "tested" lines that only Cypress tests ran, so the Playwright tests do not reach them yet.
+ */
+export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly', number>;
+
+/** Which coverage the app shows: one test tool, or both runs together. */
+export type View = 'playwright' | 'cypress' | 'both';
+
+export interface RunFreshness {
+  runCommit: string | null;
+  currentCommit: string | null;
+  stale: boolean | null;
+  reasons: string[];
+}
+
+export interface RunInfo {
+  label: string;
+  freshness: RunFreshness | null;
+  /** Test runs in the coverage run. */
+  tests: number;
+}
 export type FunctionCounts = Record<FunctionState | 'total', number>;
 
 export interface ProjectSummary {
   id: string;
   name: string;
   path: string;
-  coverageLabel: string | null;
-  coverageFreshness: { runCommit: string | null; currentCommit: string | null; stale: boolean | null; reasons: string[] } | null;
+  /** The view these numbers are for (null: the project has no coverage run). */
+  view: View | null;
+  views: View[];
+  runs: Record<Framework, RunInfo | null>;
+  /** Selected runs whose folder could not be read. */
+  unreadRuns: { framework: Framework; dir: string }[];
+  /** Both runs: same or different plugin commit, or unknown (a run has no commit). Null: not both runs. */
+  runsCommit: 'same' | 'different' | 'unknown' | null;
   files: { total: number; php: number; js: number };
+  /** Both runs together (or the one run that exists). */
   lines: LineCounts;
+  /** Each run alone. Null: no run for that tool. */
+  linesBy: Record<Framework, LineCounts | null>;
+  /** Code that the AI skill put in features. lines counts each line one time. */
+  mappedCode: { features: number; entries: number; lines: LineCounts | null; unmapped: LineCounts };
   functions: FunctionCounts;
   neverLoadedFiles: number;
   uncountedFiles: number;
   playwright: { tests: number; files: number; skipped: number; runTests: number; parseErrors: { file: string; error: string }[] };
-  cypress: { scenarios: number; files: number };
+  cypress: { scenarios: number; files: number; runTests: number };
   features: {
     features: number;
     withPlaywright: number;
@@ -83,6 +114,32 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   aiDraft: boolean;
   scopes: Scope[];
   links: FeatureLink[];
+  /** Mapped code: number of entries, and AI entries that no person checked. */
+  code: { entries: number; aiToCheck: number };
+}
+
+/** One piece of a feature's code: a whole file (function ''), or the functions with one name in a file. */
+export interface CodeEntry {
+  id: number;
+  featureId: number;
+  file: string;
+  function: string;
+  source: 'ai' | 'manual';
+  checked: boolean;
+  /** False: the file is not in the plugin repo now. */
+  inRepo: boolean;
+  /** False: the coverage run has no such file or function (code changed, or a new file). */
+  measured: boolean;
+  lines: LineCounts | null;
+}
+
+export interface FeatureCodeMap {
+  view: View | null;
+  features: { featureId: number; lines: LineCounts | null; entries: CodeEntry[] }[];
+  mapped: LineCounts | null;
+  /** Per file: the feature lines in no feature. */
+  unmapped: { file: string; lines: LineCounts }[];
+  unmappedTotal: LineCounts;
 }
 
 export interface FeatureGroup {
@@ -104,7 +161,9 @@ export interface FeatureData {
 }
 
 export interface FeatureCode {
-  linkedRunTests: number;
+  view: View | null;
+  /** Linked tests that are in the coverage run, per test tool. */
+  linkedRunTests: Record<Framework, number>;
   functions: { file: string; name: string; start: number; end: number; state: FunctionState; lines: Record<LineState, number>; tests: string[] }[];
 }
 
@@ -129,9 +188,11 @@ export interface FileDetail {
     end: number;
     state: FunctionState;
     lines: Record<LineState, number>;
-    tests: { id: string; title: string; file: string }[];
+    /** Feature lines that only Cypress tests ran ("both" view). */
+    cypressOnly: number;
+    tests: { id: string; title: string; file: string; framework: Framework | null }[];
   }[];
-  lines: Record<LineState | 'runByTests', number[]>;
+  lines: Record<LineState | 'runByTests' | 'cypressOnly', number[]>;
 }
 
 export interface PlaywrightTest {
@@ -160,6 +221,7 @@ export interface CypressScenario {
   steps: { keyword: string; text: string; background: boolean }[];
   examples: number;
   parseError?: string;
+  run: { runId: string; title: string; status: string; functions: number }[];
 }
 
 const inflight = new Map<string, { at: number; promise: Promise<unknown> }>();

@@ -1,13 +1,15 @@
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
-import { ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, type ProjectConfig } from './projects.ts';
+import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { EditError, edits, featureData } from './features.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
 import { listCypress } from './cypress.ts';
-import { loadCoverage, runFreshness } from './coverage.ts';
+import { availableViews, loadCoverage, resolveView, runFreshness } from './coverage.ts';
+import { runTestOwners } from './run-tests.ts';
+import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
@@ -31,24 +33,55 @@ app.use(express.json({ limit: '200kb' }));
 
 importProjectsJson();
 
+/** The run of each test tool: label, plugin commit check, and number of test runs. */
+function runInfo(p: ProjectConfig) {
+  return Object.fromEntries(
+    FRAMEWORKS.map((fw) => {
+      const cov = loadCoverage(p, fw);
+      return [fw, cov ? { label: cov.label, freshness: runFreshness(p, fw), tests: cov.tests.length } : null];
+    }),
+  );
+}
+
+const lineKeys = ['runnable', 'library', 'tested', 'setup', 'background', 'never', 'runByTests', 'cypressOnly'] as const;
+const lineTotals = (php: FileEntry[]) => Object.fromEntries(lineKeys.map((k) => [k, php.reduce((n, f) => n + f.lines[k], 0)]));
+
+/**
+ * The project page. The top numbers always use the two runs together (or the one run that exists).
+ * linesBy gives the numbers of each run alone, for the Playwright and Cypress cards.
+ */
 function summary(id: string) {
   const p = getProject(id)!;
-  const files = listFiles(p);
+  const view = resolveView(p, 'both');
+  const files = listFiles(p, view);
   const php = files.filter((f) => f.measured);
-  const sumLines = (k: keyof FileEntry['lines']) => php.reduce((n, f) => n + f.lines[k], 0);
   const sumFns = (k: keyof FileEntry['functions']) => php.reduce((n, f) => n + f.functions[k], 0);
-  const lineKeys = ['runnable', 'library', 'tested', 'setup', 'background', 'never', 'runByTests'] as const;
   const fnKeys = ['total', 'library', 'tested', 'setup', 'background', 'never', 'unknown'] as const;
   const pw = listPlaywright(p);
   const cy = listCypress(p);
+  const runs = runInfo(p);
+  const pwCommit = runs.playwright?.freshness?.runCommit;
+  const cyCommit = runs.cypress?.freshness?.runCommit;
   return {
     id: p.id,
     name: p.name,
     path: p.path,
-    coverageLabel: loadCoverage(p)?.label ?? null,
-    coverageFreshness: runFreshness(p),
+    view,
+    views: availableViews(p),
+    runs,
+    /** Selected runs whose folder could not be read (no report.json, or bad JSON). */
+    unreadRuns: FRAMEWORKS.filter((fw) => p.runs[fw] && !runs[fw]).map((fw) => ({ framework: fw, dir: p.runs[fw]!.dir })),
+    /**
+     * Both runs exist: "same" or "different" plugin commit, or "unknown" when a run has no commit.
+     * With different code, line numbers may not match. Null: not both runs.
+     */
+    runsCommit: !runs.playwright || !runs.cypress ? null : !pwCommit || !cyCommit ? 'unknown' : pwCommit === cyCommit ? 'same' : 'different',
     files: { total: files.length, php: files.filter((f) => f.lang === 'php').length, js: files.filter((f) => f.lang === 'js').length },
-    lines: Object.fromEntries(lineKeys.map((k) => [k, sumLines(k)])),
+    lines: lineTotals(php),
+    linesBy: Object.fromEntries(
+      FRAMEWORKS.map((fw) => [fw, view === fw ? lineTotals(php) : runs[fw] ? lineTotals(listFiles(p, fw).filter((f) => f.measured)) : null]),
+    ),
+    mappedCode: mappedCodeTotals(p, view),
     functions: Object.fromEntries(fnKeys.map((k) => [k, sumFns(k)])),
     neverLoadedFiles: php.filter((f) => !f.loaded).length,
     uncountedFiles: php.filter((f) => f.uncounted).length,
@@ -56,10 +89,10 @@ function summary(id: string) {
       tests: pw.length,
       files: new Set(pw.map((t) => t.file)).size,
       skipped: pw.filter((t) => t.skipped).length,
-      runTests: loadCoverage(p)?.tests.length ?? 0,
+      runTests: runs.playwright?.tests ?? 0,
       parseErrors: playwrightErrors.get(p.id) ?? [],
     },
-    cypress: { scenarios: cy.length, files: new Set(cy.map((s) => s.file)).size },
+    cypress: { scenarios: cy.length, files: new Set(cy.map((s) => s.file)).size, runTests: runs.cypress?.tests ?? 0 },
     features: featureSummary(p.id),
   };
 }
@@ -83,6 +116,9 @@ app.get('/api/projects', (_req, res) => {
   res.json(loadProjects().map((p) => summary(p.id)));
 });
 
+/** The coverage view asked in ?view= (playwright, cypress or both). resolveView picks a default. */
+const viewOf = (req: express.Request) => resolveView((req as any).project, req.query.view);
+
 app.use('/api/projects/:id', (req, res, next) => {
   const p = getProject(req.params.id);
   if (!p) return res.status(404).json({ error: 'Unknown project' });
@@ -91,13 +127,13 @@ app.use('/api/projects/:id', (req, res, next) => {
 });
 
 app.get('/api/projects/:id', (req, res) => res.json(summary(req.params.id)));
-app.get('/api/projects/:id/files', (req, res) => res.json(listFiles((req as any).project)));
+app.get('/api/projects/:id/files', (req, res) => res.json(listFiles((req as any).project, viewOf(req))));
 app.get('/api/projects/:id/file', (req, res) => {
   const p = (req as any).project;
   const rel = String(req.query.path ?? '');
   const full = safeRepoPath(p, rel);
   if (!full) return res.status(404).json({ error: 'File not found' });
-  res.json(fileDetail(p, rel, full));
+  res.json(fileDetail(p, rel, full, viewOf(req)));
 });
 app.get('/api/projects/:id/playwright', (req, res) => res.json(listPlaywright((req as any).project)));
 app.get('/api/projects/:id/cypress', (req, res) => res.json(listCypress((req as any).project)));
@@ -110,25 +146,38 @@ app.get('/api/projects/:id/features', (req, res) => {
   res.json(featureData(proj(req).id));
 });
 
-/** PHP functions that the feature's linked Playwright tests ran in the coverage run. */
+/**
+ * PHP functions that the feature's linked tests ran, in the coverage of the asked view.
+ * Each function lists the linked tests (PW-… and CY-…) that ran it. A function that only
+ * linked Cypress tests ran is code that the Playwright tests of this feature do not reach yet.
+ */
 app.get('/api/projects/:id/features/:fid/code', (req, res) => {
   const p = proj(req);
   const f = featureData(p.id).features.find((x: any) => x.id === Number(req.params.fid));
   if (!f) return res.status(404).json({ error: 'Unknown feature' });
-  const pw = new Map(listPlaywright(p).map((t) => [t.id, t]));
-  const runToTest = new Map<string, string>();
-  for (const l of f.links) for (const r of pw.get(l.testId)?.run ?? []) runToTest.set(r.runId, l.testId);
-  const cov = loadCoverage(p);
+  const view = viewOf(req);
+  const cov = view && loadCoverage(p, view);
+  const linked = new Set(f.links.map((l: any) => l.testId));
+  const runToTest = new Map([...runTestOwners(p)].filter(([, testId]) => linked.has(testId)));
+  const runTestIds = new Set(cov?.tests.map((t) => t.id) ?? []);
   const functions = [];
   for (const [file, list] of cov?.functionsByFile ?? []) {
     for (const fn of list) {
       if (fn.state === 'library') continue; // runs on every request: says nothing about one feature
-      const tests = [...new Set(fn.tests.map((t) => runToTest.get(t)).filter(Boolean))];
+      const tests = [...new Set(fn.tests.map((t) => runToTest.get(t)).filter(Boolean))] as string[];
       if (tests.length) functions.push({ file, name: fn.function, start: fn.start, end: fn.end, state: fn.state, lines: fn.lines, tests });
     }
   }
-  res.json({ linkedRunTests: runToTest.size, functions });
+  const inRun = new Set([...runToTest].filter(([runId]) => runTestIds.has(runId)).map(([, testId]) => testId));
+  res.json({
+    view,
+    linkedRunTests: { playwright: [...inRun].filter((t) => t.startsWith('PW-')).length, cypress: [...inRun].filter((t) => t.startsWith('CY-')).length },
+    functions,
+  });
 });
+
+/** Mapped code of every feature, with coverage from both runs together, and the code in no feature. */
+app.get('/api/projects/:id/feature-code', (req, res) => res.json(featureCodeCoverage(proj(req), resolveView(proj(req), 'both'))));
 
 const edit = (fn: (req: express.Request) => unknown) => (req: express.Request, res: express.Response) => {
   try {
@@ -159,6 +208,7 @@ app.patch('/api/projects/:id/scopes/:sid', edit((req) => edits.updateScope(P(req
 app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(req), req.params.sid)));
 app.post('/api/projects/:id/links', edit((req) => edits.addLink(P(req), req.body)));
 app.patch('/api/projects/:id/links/:lid', edit((req) => edits.updateLink(P(req), req.params.lid, req.body)));
+app.delete('/api/projects/:id/feature-code/:cid', edit((req) => edits.deleteFeatureCode(P(req), req.params.cid)));
 app.delete('/api/projects/:id/links/:lid', edit((req) => edits.deleteLink(P(req), req.params.lid)));
 
 // Any other error: answer with JSON, so the app can show the message.

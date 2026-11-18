@@ -91,7 +91,13 @@ export function featureData(projectId: string) {
   const itemsBy = byKey(items, (i) => i.feature_id);
   const labelsBy = byKey(labels, (l) => l.feature_id);
   const linksBy = byKey(links, (l) => l.feature_id);
+  const code = db
+    .prepare("SELECT feature_id, COUNT(*) AS n, SUM(source = 'ai' AND checked = 0) AS ai FROM feature_code WHERE project_id = ? AND removed = 0 GROUP BY feature_id")
+    .all(projectId) as any[];
+  const codeBy = new Map(code.map((r) => [r.feature_id, r]));
   for (const f of features) {
+    // Mapped code: number of entries, and how many the AI added that no person checked.
+    f.code = { entries: codeBy.get(f.id)?.n ?? 0, aiToCheck: codeBy.get(f.id)?.ai ?? 0 };
     f.aiFields = json(f.ai_fields);
     f.aiDraft = f.aiFields.length > 0;
     delete f.ai_fields;
@@ -264,6 +270,7 @@ export const edits = {
       db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE feature_id = ?').run(f);
       db.prepare("UPDATE scopes SET ai_fields = '[]' WHERE feature_id = ?").run(f);
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
+      db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
     });
   },
   deleteFeature(p: string, id: string) {
@@ -295,6 +302,23 @@ export const edits = {
       ).run(into, from);
       db.prepare('DELETE FROM links WHERE feature_id = ? AND test_id IN (SELECT test_id FROM links WHERE feature_id = ?)').run(from, into);
       db.prepare('UPDATE links SET feature_id = ? WHERE feature_id = ?').run(into, from);
+      // Mapped code: an active entry wins over one that a person removed. Then keep the target's entry,
+      // but it takes the person's work from the source entry (added by hand, or checked).
+      db.prepare(
+        `UPDATE feature_code SET
+           source = CASE WHEN (SELECT o.source FROM feature_code o WHERE o.feature_id = ? AND o.file = feature_code.file AND o.function = feature_code.function AND o.removed = 0) = 'manual' THEN 'manual' ELSE source END,
+           checked = MAX(checked, COALESCE((SELECT o.checked FROM feature_code o WHERE o.feature_id = ? AND o.file = feature_code.file AND o.function = feature_code.function AND o.removed = 0), 0))
+         WHERE feature_id = ? AND removed = 0`,
+      ).run(from, from, into);
+      db.prepare(
+        `DELETE FROM feature_code WHERE feature_id = ? AND removed = 1
+         AND file || char(0) || function IN (SELECT file || char(0) || function FROM feature_code WHERE feature_id = ? AND removed = 0)`,
+      ).run(into, from);
+      db.prepare(
+        `DELETE FROM feature_code WHERE feature_id = ?
+         AND file || char(0) || function IN (SELECT file || char(0) || function FROM feature_code WHERE feature_id = ?)`,
+      ).run(from, into);
+      db.prepare('UPDATE feature_code SET feature_id = ? WHERE feature_id = ?').run(into, from);
       db.prepare('DELETE FROM features WHERE id = ?').run(from);
     });
   },
@@ -386,6 +410,12 @@ export const edits = {
       for (const s of ids) add.run(l.id, s);
       db.prepare("UPDATE links SET source = 'manual' WHERE id = ?").run(l.id);
     });
+  },
+  /** Removes code from a feature. The row stays as a marker, so the AI skill does not add it again. */
+  deleteFeatureCode(p: string, id: string) {
+    const r = db.prepare('SELECT id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;
+    if (!r) throw new EditError('Unknown code entry');
+    db.prepare('UPDATE feature_code SET removed = 1 WHERE id = ?').run(r.id);
   },
   deleteLink(p: string, id: string) {
     const l = ownLink(p, id);

@@ -3,12 +3,14 @@
 
 Usage: python3 analyze.py <plugin-dir> [run-dir] [--exclude a,b,c]
 run-dir defaults to coverage-data/. It must hold raw/*.json and test-windows.json.
+test-windows.json comes from the Playwright reporter (coverage/test-window-reporter.cjs)
+or, for a Cypress run, from coverage/cypress-windows.py. Make one run per test tool.
 Writes report.json, lines.json and summary.txt into run-dir.
 
 Each request gets one kind:
   baseline    - plain page loads that test nothing (coverage/baseline.sh)
   test        - a page or call that the test itself makes
-  setup       - test data setup (Test Helper Plugin REST calls, login, loads outside tests)
+  setup       - test data setup (Test Helper Plugin or Cypress Helper Plugin REST calls, login, loads outside tests)
   background  - work the test did not ask for (WP-Cron, heartbeat, queue runners)
 
 Each runnable line gets one state:
@@ -44,7 +46,8 @@ def excluded(rel):
     parts = rel.split('/')[:-1]
     return any(p.startswith('.') or p in EXCLUDE for p in parts)
 
-SETUP_URI = re.compile(r'^/(wp-json/thp/|\?rest_route=/thp/|wp-login\.php)')
+# thp = Test Helper Plugin (Playwright), chp = Cypress Helper Plugin.
+SETUP_URI = re.compile(r'^/(wp-json/(thp|chp)/|\?rest_route=/(thp|chp)/|wp-login\.php)')
 BACKGROUND_URI = re.compile(r'^/wp-cron\.php')
 BACKGROUND_ACTIONS = {'heartbeat', 'as_async_request_queue_runner', 'wp-remove-post-lock'}
 STATES = ('library', 'tested', 'setup', 'background', 'never')

@@ -3,14 +3,15 @@ import path from 'node:path';
 import { ROOT, SOURCE_EXT, type ProjectConfig } from './projects.ts';
 import { db } from './db.ts';
 import { syncProject } from './scan.ts';
-import { loadCoverage, runTestPath, type FunctionState, type LineState } from './coverage.ts';
+import { loadCoverage, runTestPath, type FunctionState, type LineState, type View } from './coverage.ts';
 
 // Folders that the file list and coverage/analyze.py leave out. Hidden folders (.git, .github) are always left out.
 export const DEFAULT_EXCLUDE: string[] = JSON.parse(fs.readFileSync(path.join(ROOT, 'coverage', 'exclude-dirs.json'), 'utf8'));
 const LINE_STATES: LineState[] = ['library', 'tested', 'setup', 'background', 'never'];
 const FN_STATES: FunctionState[] = [...LINE_STATES, 'unknown'];
 
-export type LineCounts = Record<LineState | 'runnable' | 'runByTests', number>;
+/** cypressOnly: "tested" lines that only Cypress tests ran ("both" view only, else 0). */
+export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly', number>;
 
 export interface FileEntry {
   path: string;
@@ -45,11 +46,11 @@ export function walkRepo(project: ProjectConfig): string[] | null {
   return rels.sort();
 }
 
-/** Code files from the database, with coverage counts. */
-export function listFiles(project: ProjectConfig): FileEntry[] {
+/** Code files from the database, with coverage counts of one view (null: no coverage). */
+export function listFiles(project: ProjectConfig, view: View | null): FileEntry[] {
   syncProject(project);
   const rels = (db.prepare('SELECT path FROM source_files WHERE project_id = ? ORDER BY path').all(project.id) as any[]).map((r) => r.path as string);
-  const cov = loadCoverage(project);
+  const cov = view && loadCoverage(project, view);
 
   return rels.map((rel) => {
     const lang = rel.endsWith('.php') ? 'php' : 'js';
@@ -58,6 +59,7 @@ export function listFiles(project: ProjectConfig): FileEntry[] {
     const lines = Object.fromEntries(LINE_STATES.map((s) => [s, fl?.[s]?.length ?? 0])) as LineCounts;
     lines.runnable = LINE_STATES.reduce((n, s) => n + lines[s], 0);
     lines.runByTests = fl?.runByTests?.length ?? 0;
+    lines.cypressOnly = fl?.cypressOnly?.length ?? 0;
     const functions = Object.fromEntries(FN_STATES.map((s) => [s, fns.filter((f) => f.state === s).length])) as FileEntry['functions'];
     functions.total = fns.length;
     return {
@@ -72,8 +74,8 @@ export function listFiles(project: ProjectConfig): FileEntry[] {
   });
 }
 
-export function fileDetail(project: ProjectConfig, rel: string, full: string) {
-  const cov = loadCoverage(project);
+export function fileDetail(project: ProjectConfig, rel: string, full: string, view: View | null) {
+  const cov = view && loadCoverage(project, view);
   const source = fs.readFileSync(full, 'utf8');
   const testById = new Map((cov?.tests ?? []).map((t) => [t.id, t]));
   const functions = (cov?.functionsByFile.get(rel) ?? []).map((f) => ({
@@ -82,18 +84,19 @@ export function fileDetail(project: ProjectConfig, rel: string, full: string) {
     end: f.end,
     state: f.state,
     lines: f.lines,
+    cypressOnly: f.cypressOnly ?? 0,
     tests: f.tests.map((id) => {
       const t = testById.get(id);
-      return { id, title: t ? runTestPath(t).slice(-1)[0] : id, file: t?.file ?? '' };
+      return { id, title: t ? runTestPath(t).slice(-1)[0] : id, file: t?.file ?? '', framework: t?.framework ?? null };
     }),
   }));
-  const empty = { library: [], tested: [], setup: [], background: [], never: [], runByTests: [] };
+  const empty = { library: [], tested: [], setup: [], background: [], never: [], runByTests: [], cypressOnly: [] };
   return {
     path: rel,
     source,
     measured: rel.endsWith('.php') && !!cov?.files.has(rel),
     loaded: !!cov?.lines[rel] && !cov.neverLoaded.has(rel),
     functions,
-    lines: cov?.lines[rel] ?? empty,
+    lines: { cypressOnly: [], ...(cov?.lines[rel] ?? empty) },
   };
 }

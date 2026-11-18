@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { allPct, featurePct, featureTotal, useApi, type FileDetail, type FileEntry, type LineCounts, type LineState } from '../api';
-import { href } from '../router';
+import { allPct, featurePct, featureTotal, useApi, type FileDetail, type FileEntry, type LineCounts, type LineState, type View } from '../api';
+import { href, type Tab } from '../router';
 import { buildTree, leaves, Tree } from './Tree';
-import { CoverageBar, Empty, Legend, Loading, STATE_META, StateBadge, Swatch } from './ui';
+import { CoverageBar, CY_ONLY_META, Empty, Legend, Loading, STATE_META, StateBadge, Swatch } from './ui';
 
-const ZERO: LineCounts = { runnable: 0, library: 0, tested: 0, setup: 0, background: 0, never: 0, runByTests: 0 };
+const ZERO: LineCounts = { runnable: 0, library: 0, tested: 0, setup: 0, background: 0, never: 0, runByTests: 0, cypressOnly: 0 };
 
 function sumLines(files: FileEntry[]): LineCounts {
   const out = { ...ZERO };
@@ -23,11 +23,12 @@ function summaryText(files: FileEntry[]): string {
   return 'no code';
 }
 
-const sentence = (c: LineCounts) =>
-  `${c.tested} of ${featureTotal(c)} feature lines run by tests (${featurePct(c)}%) · ${c.setup + c.background} only in setup · ${c.never} never run · ${c.library} library lines left out`;
+export const sentence = (c: LineCounts) =>
+  `${c.tested} of ${featureTotal(c)} feature lines run by tests (${featurePct(c)}%)${c.cypressOnly ? `, ${c.cypressOnly} of them only by Cypress` : ''} · ${c.setup + c.background} only in setup · ${c.never} never run · ${c.library} library lines left out`;
 
-export function CodeTab({ project, sel }: { project: string; sel: string | null }) {
-  const { data: files, error } = useApi<FileEntry[]>(`/api/projects/${project}/files`);
+/** The file tree and code coverage of one coverage view, inside a tab (Playwright, Cypress). */
+export function CodeTab({ project, sel, view, tab }: { project: string; sel: string | null; view: View; tab: Tab }) {
+  const { data: files, error } = useApi<FileEntry[]>(`/api/projects/${project}/files?view=${view}`);
   const [query, setQuery] = useState('');
   const [hideJs, setHideJs] = useState(false);
 
@@ -40,7 +41,7 @@ export function CodeTab({ project, sel }: { project: string; sel: string | null 
   if (!files) return <Loading error={error} />;
   const selectedFile = sel && !sel.startsWith('dir:') ? files.find((f) => f.path === sel) : null;
   const missingFile = !!sel && !sel.startsWith('dir:') && !selectedFile;
-  const go = (key: string | null) => (location.hash = href({ project, tab: 'code', sel: key }));
+  const go = (key: string | null) => (location.hash = href({ project, tab, pane: 'code', sel: key }));
 
   return (
     <div className="flex h-full">
@@ -64,13 +65,13 @@ export function CodeTab({ project, sel }: { project: string; sel: string | null 
       </aside>
       <section className="min-w-0 flex-1 overflow-auto">
         {selectedFile ? (
-          <FileView project={project} file={selectedFile} />
+          <FileView project={project} file={selectedFile} view={view} />
         ) : missingFile ? (
           <Empty>
             The file <code className="font-mono">{sel}</code> is not in the project now. It may have been moved or deleted.
           </Empty>
         ) : (
-          <FolderView project={project} files={sel ? files.filter((f) => f.path.startsWith(sel.slice(4) + '/')) : files} folder={sel?.slice(4) ?? null} onOpen={go} />
+          <FolderView project={project} tab={tab} files={sel ? files.filter((f) => f.path.startsWith(sel.slice(4) + '/')) : files} folder={sel?.slice(4) ?? null} onOpen={go} />
         )}
       </section>
     </div>
@@ -90,7 +91,7 @@ function RowMeta({ files }: { files: FileEntry[] }) {
 }
 
 /** Overview of a folder (or the whole repo): subfolder table and a grid of files. */
-function FolderView({ project, files, folder, onOpen }: { project: string; files: FileEntry[]; folder: string | null; onOpen: (k: string) => void }) {
+function FolderView({ project, tab, files, folder, onOpen }: { project: string; tab: Tab; files: FileEntry[]; folder: string | null; onOpen: (k: string) => void }) {
   const c = sumLines(files);
   const depth = folder ? folder.split('/').length : 0;
   const groups = new Map<string, FileEntry[]>();
@@ -123,7 +124,7 @@ function FolderView({ project, files, folder, onOpen }: { project: string; files
           </div>
         )}
         <div className="mt-3">
-          <Legend />
+          <Legend view={c.cypressOnly ? 'both' : null} />
         </div>
         {unloaded.length > 0 && (
           <p className="mt-3 text-xs text-ink-2">
@@ -142,6 +143,7 @@ function FolderView({ project, files, folder, onOpen }: { project: string; files
               <th className="w-48 px-4 py-2 font-medium">Feature lines</th>
               <th className="w-20 px-2 py-2 text-right font-medium">Feature</th>
               <th className="w-20 px-2 py-2 text-right font-medium">All code</th>
+              {c.cypressOnly > 0 && <th className="w-24 px-2 py-2 text-right font-medium" title="Feature lines that only Cypress tests run">Cypress only</th>}
               <th className="w-20 px-2 py-2 text-right font-medium">Library</th>
               <th className="w-20 px-4 py-2 text-right font-medium">Files</th>
             </tr>
@@ -167,6 +169,11 @@ function FolderView({ project, files, folder, onOpen }: { project: string; files
                 <td className="px-4 py-2">{featureTotal(r.c) ? <CoverageBar c={r.c} height={6} /> : <span className="text-xs text-ink-3">{summaryText(r.fs)}</span>}</td>
                 <td className="px-2 py-2 text-right tabular-nums">{featureTotal(r.c) ? `${featurePct(r.c)}%` : '–'}</td>
                 <td className="px-2 py-2 text-right tabular-nums text-ink-2">{r.c.runnable ? `${allPct(r.c)}%` : '–'}</td>
+                {c.cypressOnly > 0 && (
+                  <td className="px-2 py-2 text-right tabular-nums" style={{ color: r.c.cypressOnly ? CY_ONLY_META.color : undefined }}>
+                    {r.c.cypressOnly || '–'}
+                  </td>
+                )}
                 <td className="px-2 py-2 text-right tabular-nums text-ink-2">{r.c.runnable ? r.c.library : '–'}</td>
                 <td className="px-4 py-2 text-right tabular-nums text-ink-2">{r.fs.length}</td>
               </tr>
@@ -188,8 +195,8 @@ function FolderView({ project, files, folder, onOpen }: { project: string; files
               return (
                 <a
                   key={f.path}
-                  href={href({ project, tab: 'code', sel: f.path })}
-                  title={`${f.path}\n${f.lines.tested} of ${ft} feature lines run by tests (${featurePct(f.lines)}%)\n${f.lines.never} never run · ${f.lines.library} library lines`}
+                  href={href({ project, tab, pane: 'code', sel: f.path })}
+                  title={`${f.path}\n${f.lines.tested} of ${ft} feature lines run by tests (${featurePct(f.lines)}%)${f.lines.cypressOnly ? `, ${f.lines.cypressOnly} only by Cypress` : ''}\n${f.lines.never} never run · ${f.lines.library} library lines`}
                   className="rounded-[3px] hover:outline-2 hover:outline-accent"
                   style={{
                     width: size,
@@ -212,8 +219,9 @@ function FolderView({ project, files, folder, onOpen }: { project: string; files
   );
 }
 
-function FileView({ project, file }: { project: string; file: FileEntry }) {
-  const { data, error } = useApi<FileDetail>(`/api/projects/${project}/file?path=${encodeURIComponent(file.path)}`);
+/** One file: its functions and its source, colored by the coverage of one view. */
+export function FileView({ project, file, view }: { project: string; file: FileEntry; view: View }) {
+  const { data, error } = useApi<FileDetail>(`/api/projects/${project}/file?path=${encodeURIComponent(file.path)}&view=${view}`);
   const [openFn, setOpenFn] = useState<string | null>(null);
   const codeRef = useRef<HTMLDivElement>(null);
   useEffect(() => setOpenFn(null), [file.path]);
@@ -223,6 +231,7 @@ function FileView({ project, file }: { project: string; file: FileEntry }) {
     if (data) for (const s of ['library', 'tested', 'setup', 'background', 'never'] as LineState[]) for (const n of data.lines[s] ?? []) m.set(n, s);
     return m;
   }, [data]);
+  const cyOnly = useMemo(() => new Set(data?.lines.cypressOnly ?? []), [data]);
   const fnStart = useMemo(() => new Map((data?.functions ?? []).map((f) => [f.start, f])), [data]);
 
   if (!data) return <Loading error={error} />;
@@ -270,17 +279,23 @@ function FileView({ project, file }: { project: string; file: FileEntry }) {
               const key = f.name + ':' + f.start;
               const isOpen = openFn === key;
               const feat = f.lines.tested + f.lines.setup + f.lines.background + f.lines.never;
+              // Every tested line of the function ran only in Cypress tests.
+              const onlyCy = f.state === 'tested' && f.cypressOnly > 0 && f.cypressOnly === f.lines.tested;
               return (
                 <li key={key} className="border-t border-line first:border-t-0">
                   <div className="flex items-center gap-3 px-4 py-1.5">
                     <span className="w-56 shrink-0">
-                      <StateBadge state={f.state} />
+                      <StateBadge state={f.state} cypressOnly={onlyCy} />
                     </span>
                     <button type="button" className="min-w-0 flex-1 truncate text-left font-mono text-xs hover:text-accent" onClick={() => jump(f.start)}>
                       {f.name}
                     </button>
-                    <span className="w-28 text-right text-xs tabular-nums text-ink-3" title="Feature lines run by tests / feature lines. Library lines are left out.">
+                    <span
+                      className="w-28 text-right text-xs tabular-nums text-ink-3"
+                      title={`Feature lines run by tests / feature lines. Library lines are left out.${f.cypressOnly ? ` ${f.cypressOnly} of the run lines ran only in Cypress tests.` : ''}`}
+                    >
                       {feat ? `${f.lines.tested}/${feat} lines` : f.lines.library ? `${f.lines.library} lib lines` : ''}
+                      {!onlyCy && f.cypressOnly > 0 && <span style={{ color: CY_ONLY_META.color }}> ◆{f.cypressOnly}</span>}
                     </span>
                     <span className="w-16 text-right text-xs tabular-nums text-ink-3">line {f.start}</span>
                     {f.tests.length > 0 ? (
@@ -295,6 +310,7 @@ function FileView({ project, file }: { project: string; file: FileEntry }) {
                     <ul className="bg-bg px-4 py-2 text-xs">
                       {f.tests.map((t) => (
                         <li key={t.id} className="py-0.5">
+                          {t.framework && <span className="mr-1.5 rounded bg-surface-2 px-1 text-[10px] uppercase text-ink-2">{t.framework === 'cypress' ? 'CY' : 'PW'}</span>}
                           <span className="text-ink">{t.title}</span> <span className="font-mono text-ink-3">{t.file}</span>
                         </li>
                       ))}
@@ -312,7 +328,8 @@ function FileView({ project, file }: { project: string; file: FileEntry }) {
           <span className="text-sm font-medium">Source</span>
           <span className="flex flex-wrap gap-3 text-xs text-ink-2">
             <Swatch color={STATE_META.library.color} label="library" />
-            <Swatch color={STATE_META.tested.color} label="ran in a test" />
+            <Swatch color={STATE_META.tested.color} label={cyOnly.size || view === 'both' ? 'ran in a Playwright test' : 'ran in a test'} />
+            {(cyOnly.size > 0 || view === 'both') && <Swatch color={CY_ONLY_META.color} label="ran only in Cypress tests" />}
             <Swatch color={STATE_META.setup.color} label="ran only in setup" />
             <Swatch color={STATE_META.never.color} label="never ran" />
             <Swatch color="transparent" outline label="no color: not runnable code" />
@@ -323,16 +340,17 @@ function FileView({ project, file }: { project: string; file: FileEntry }) {
             const n = i + 1;
             const st = lineState.get(n);
             const kind = st === 'background' ? 'setup' : st;
+            const meta = cyOnly.has(n) ? CY_ONLY_META : kind ? STATE_META[kind] : null;
             const fn = fnStart.get(n);
             return (
               <div
                 key={n}
                 data-line={n}
                 className="flex whitespace-pre"
-                style={{ background: kind ? STATE_META[kind].tint : undefined }}
-                title={fn ? `${fn.name}: ${STATE_META[fn.state].label}` : st ? STATE_META[st].label : undefined}
+                style={{ background: meta?.tint }}
+                title={fn ? `${fn.name}: ${STATE_META[fn.state].label}` : st ? (cyOnly.has(n) ? CY_ONLY_META.label : STATE_META[st].label) : undefined}
               >
-                <span className="w-1 shrink-0" style={{ background: kind ? STATE_META[kind].color : undefined }} />
+                <span className="w-1 shrink-0" style={{ background: meta?.color }} />
                 <span className="w-12 shrink-0 select-none pr-3 text-right text-ink-3">{n}</span>
                 <span className="pr-4">{text || ' '}</span>
               </div>

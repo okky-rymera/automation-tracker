@@ -31,6 +31,10 @@
       "links": [
         { "testId": "CY-1a2b3c4d", "scopes": ["…title of a scope above…", "S-14"] },
         { "testId": "PW-9f8e7d6c" }
+      ],
+      "code": [
+        { "file": "includes/class-example-prices.php", "functions": ["Example_Prices::filter_price_html"] },
+        { "file": "includes/class-example-price-settings.php" }
       ]
     }
   ]
@@ -66,6 +70,12 @@
   feature). Leave it out only when the test checks the feature in general.
 - To add only links, send a feature with just `id` and `links`.
 - `group`: found by title, or made new.
+- `code`: the plugin code of the feature. `file` is relative to the repo root
+  and must exist. `functions` (optional) are names exactly as `code` or
+  `test-code` list them, for example `Class_Name::method` or
+  `Class_Name::{closure}`. A name that is in the file more than one time (closures)
+  holds all of them. No `functions` = the whole file. Entries are only added; an
+  entry that a person removed is not added again (the report says so).
 
 ## Fields: what to write
 

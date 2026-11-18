@@ -20,6 +20,8 @@
   --good-tint: color-mix(in oklab, var(--good) 16%, transparent);
   --warn-tint: color-mix(in oklab, var(--warn) 22%, transparent);
   --bad-tint: color-mix(in oklab, var(--bad) 9%, transparent);
+  --cy: #8a4fd8;        /* run only by Cypress tests: still to convert to Playwright */
+  --cy-tint: color-mix(in oklab, var(--cy) 14%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -39,6 +41,8 @@
     --lib-tint: color-mix(in oklab, var(--lib) 20%, transparent);
     --good-tint: color-mix(in oklab, var(--good) 22%, transparent);
     --bad-tint: color-mix(in oklab, var(--bad) 16%, transparent);
+    --cy: #a77ae8;
+    --cy-tint: color-mix(in oklab, var(--cy) 22%, transparent);
   }
 }
 :root[data-theme="dark"] {
@@ -56,6 +60,8 @@
   --lib-tint: color-mix(in oklab, var(--lib) 20%, transparent);
   --good-tint: color-mix(in oklab, var(--good) 22%, transparent);
   --bad-tint: color-mix(in oklab, var(--bad) 16%, transparent);
+  --cy: #a77ae8;
+  --cy-tint: color-mix(in oklab, var(--cy) 22%, transparent);
 }
 
 @theme inline {

@@ -6,10 +6,11 @@
  * and marks the unit as processed, in one transaction.
  *
  *   npm run -s map -- status   <project>
- *   npm run -s map -- next     <project> playwright|cypress|code
+ *   npm run -s map -- next     <project> [playwright|cypress|code]   (no kind: Playwright, then Cypress, then code)
  *   npm run -s map -- features <project>
  *   npm run -s map -- feature  <project> <feature id> [--all]
  *   npm run -s map -- code     <project> <repo file>
+ *   npm run -s map -- test-code <project> playwright|cypress <test file ref>
  *   npm run -s map -- apply    <project> <payload.json>
  *   npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  (--files is needed for code)
  *   npm run -s map -- reset    <project> <kind> <ref>
@@ -20,6 +21,7 @@
  *  - Labels, list items, scopes and link scopes are only added.
  *  - A link that a person removed is never added again.
  *  - Links made here have source "ai", so the app can show them as AI links.
+ *  - Mapped code (feature_code) is only added. Code that a person removed is never added again.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -28,8 +30,9 @@ import { db, json, now, tx } from './db.ts';
 import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { EditError, ITEM_KINDS, LABEL_KINDS, PRIORITIES, labelValue, labelsInUse } from './features.ts';
-import { loadCoverage } from './coverage.ts';
-import { listPlaywright } from './playwright.ts';
+import { loadCoverage, resolveView } from './coverage.ts';
+import { runTestOwners } from './run-tests.ts';
+import { functionNames } from './feature-code.ts';
 
 type Kind = 'playwright' | 'cypress' | 'code';
 const KINDS: Kind[] = ['playwright', 'cypress', 'code'];
@@ -144,8 +147,18 @@ function status(p: ProjectConfig) {
   const covered = new Set(code.flatMap((u) => u.files).filter((f) => phpSet.has(f)));
   res.code = { areas: code.length, phpFiles: php, phpFilesInAreas: covered.size, changed: code.filter((u) => u.hash !== hashFiles(p, u.files)).map((u) => u.ref) };
   const f = db.prepare("SELECT COUNT(*) AS n, SUM(ai_fields <> '[]') AS ai FROM features WHERE project_id = ?").get(p.id) as any;
-  res.features = { total: f.n, aiDraft: f.ai ?? 0 };
+  const noCode = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.removed = 0)').get(p.id) as any).n;
+  res.features = { total: f.n, aiDraft: f.ai ?? 0, withoutCode: noCode };
+  res.order = 'Playwright files first, then Cypress files, then code areas. "next <project>" with no kind follows this order.';
   out(res);
+}
+
+/** The order of the work: Playwright files first, then Cypress files, then the code that is left. */
+function nextAny(p: ProjectConfig) {
+  for (const kind of ['playwright', 'cypress'] as const) {
+    if (testFiles(p, kind).some((f) => f.state === 'changed' || f.state === 'new')) return next(p, kind);
+  }
+  return nextCode(p);
 }
 
 function next(p: ProjectConfig, kind: Kind) {
@@ -182,7 +195,8 @@ function next(p: ProjectConfig, kind: Kind) {
 function nextCode(p: ProjectConfig) {
   const inAreas = new Set(units(p.id, 'code').flatMap((u) => u.files));
   const php = (db.prepare("SELECT path FROM source_files WHERE project_id = ? AND lang = 'php' ORDER BY path").all(p.id) as any[]).map((r) => r.path as string);
-  const cov = loadCoverage(p);
+  const view = resolveView(p, 'both');
+  const cov = view && loadCoverage(p, view);
   const list = php
     .filter((f) => !inAreas.has(f))
     .map((f) => {
@@ -193,7 +207,7 @@ function nextCode(p: ProjectConfig) {
     .sort((a, b) => b.notTested - a.notTested || a.file.localeCompare(b.file));
   out({
     kind: 'code',
-    coverageRun: p.coverageRun ?? null,
+    coverage: cov?.label ?? null,
     message: list.length
       ? 'Pick one plugin feature or settings area. Read the files it needs, then name the area as the unit ref.'
       : 'Every PHP file is in a processed code area.',
@@ -202,16 +216,16 @@ function nextCode(p: ProjectConfig) {
   });
 }
 
-/** Functions in one repo file, with their coverage state and the Playwright tests that ran them. */
+/** Functions in one repo file, with their coverage state and the tests (Playwright and Cypress) that ran them. */
 function code(p: ProjectConfig, file: string | undefined) {
   if (!file || !safeRepoPath(p, file)) fail('Give a file path relative to the plugin repo.');
-  const cov = loadCoverage(p);
-  const runToTest = new Map<string, string>();
-  for (const t of listPlaywright(p)) for (const r of t.run ?? []) runToTest.set(r.runId, t.id);
+  const view = resolveView(p, 'both');
+  const cov = view && loadCoverage(p, view);
+  const runToTest = runTestOwners(p);
   const fns = cov?.functionsByFile.get(file) ?? [];
   out({
     file,
-    coverageRun: p.coverageRun ?? null,
+    coverage: cov?.label ?? null,
     functions: fns.map((fn) => {
       const tests = [...new Set(fn.tests.map((t) => runToTest.get(t)).filter(Boolean))] as string[];
       // Library code runs on every request, so its test list says nothing about one feature.
@@ -224,6 +238,77 @@ function code(p: ProjectConfig, file: string | undefined) {
       };
     }),
   });
+}
+
+/**
+ * A hint for the "code" field of a test file's features: the plugin functions that the tests
+ * of one test file ran (library code left out). otherTests = tests in other files that ran the
+ * function too: a high number means shared code, not code of this feature alone.
+ */
+function testCode(p: ProjectConfig, kind: Kind, ref: string | undefined) {
+  if (kind === 'code' || !ref) fail('Usage: test-code <project> playwright|cypress <test file ref from "next">');
+  const ids = new Set((db.prepare('SELECT id FROM tests WHERE project_id = ? AND framework = ? AND file = ? AND removed_at IS NULL').all(p.id, kind, ref) as any[]).map((r) => r.id));
+  if (!ids.size) fail(`No ${kind} file "${ref}" in the last scan. Use the ref that "next" gave.`);
+  const view = resolveView(p, 'both');
+  const cov = view && loadCoverage(p, view);
+  const owners = runTestOwners(p);
+  const ranAny = cov?.tests.some((t) => ids.has(owners.get(t.id) ?? ''));
+  const files: { file: string; functions: { name: string; lines: string; state: string; tests: number; otherTests: number }[] }[] = [];
+  for (const [file, fns] of cov?.functionsByFile ?? []) {
+    const list = [];
+    for (const fn of fns) {
+      if (fn.state === 'library') continue;
+      const tests = new Set(fn.tests.map((t) => owners.get(t)).filter(Boolean) as string[]);
+      const mine = [...tests].filter((t) => ids.has(t)).length;
+      if (mine) list.push({ name: fn.function, lines: `${fn.start}-${fn.end}`, state: fn.state, tests: mine, otherTests: tests.size - mine });
+    }
+    if (list.length) files.push({ file, functions: list.sort((a, b) => a.otherTests - b.otherTests || b.tests - a.tests) });
+  }
+  files.sort((a, b) => b.functions.length - a.functions.length || a.file.localeCompare(b.file));
+  out({
+    kind,
+    ref,
+    coverage: cov?.label ?? null,
+    testsInRun: !!ranAny,
+    note: !cov
+      ? 'The project has no coverage run. Find the code by reading it.'
+      : !ranAny
+        ? `The ${kind} tests of this file are not in the coverage run. Find the code by reading it.`
+        : 'A hint only. Setup through REST (Cypress) and shared helpers also show here. Put in a feature only the code that does the feature.',
+    files,
+  });
+}
+
+/** Mapped code from a payload: { file, functions? }. No functions = the whole file. */
+interface CodeIn {
+  file: string;
+  functions?: string[];
+}
+
+function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], report: string[]) {
+  for (const e of entries) {
+    const file = str(e?.file, 500);
+    const full = file && repoFile(p, file);
+    if (!full || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw new EditError(`code: no file "${file}" in the plugin repo. Give paths relative to the repo root`);
+    const fns = list<string>(e.functions, 'code.functions').map((x) => str(x, 300)).filter(Boolean);
+    if (fns.length) {
+      // Names must match the coverage run, so the app can find the lines.
+      const known = functionNames(p, file);
+      const bad = known ? fns.filter((n) => !known.has(n)) : [];
+      if (bad.length) throw new EditError(`code: ${file} has no function ${bad.map((b) => `"${b}"`).join(', ')} in the coverage run. Use the names that "code" lists`);
+    }
+    for (const fn of fns.length ? fns : ['']) {
+      const cur = db.prepare('SELECT id, removed FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
+      const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
+      if (cur?.removed) {
+        report.push(`F-${fid} code ${what}: a person removed it. Not added again.`);
+        continue;
+      }
+      if (cur) continue;
+      db.prepare("INSERT INTO feature_code (project_id, feature_id, file, function, source) VALUES (?, ?, ?, ?, 'ai')").run(p.id, fid, file, fn);
+      report.push(`F-${fid} code: added ${what}.`);
+    }
+  }
 }
 
 const SCOPE_RE = /^S-?(\d+)$/i;
@@ -285,6 +370,9 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
       testId: l.testId, title: l.title, framework: l.framework, source: l.source, removed: !!l.removed, scopes: scopeNames(l.id),
     })),
     linkCount: links.length,
+    code: (db.prepare('SELECT file, function, source, removed FROM feature_code WHERE feature_id = ? ORDER BY file, function').all(f.id) as any[]).map((c) => ({
+      file: c.file, function: c.function || null, source: c.source, removed: !!c.removed,
+    })),
     ...(all || links.length <= 25 ? {} : { note: 'At most 25 links shown. Add --all to see every link.' }),
   });
 }
@@ -314,6 +402,8 @@ interface FeatureIn {
   removeItems?: number[];
   scopes?: { id?: number | string; title: string; description?: string }[];
   links?: LinkIn[];
+  /** Plugin code of the feature: a whole file, or functions in it. */
+  code?: CodeIn[];
 }
 interface Payload {
   unit: { kind: Kind; ref: string; files?: string[]; note?: string };
@@ -371,6 +461,7 @@ function apply(p: ProjectConfig, file: string | undefined) {
           scopeIds.set(str(s.title).toLowerCase(), sid);
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
+        writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
       }
       db.prepare(
         `INSERT INTO processed_units (project_id, kind, ref, status, files, hash, features, note, processed_at)
@@ -598,10 +689,11 @@ importProjectsJson();
 const [cmd, projectId, ...args] = process.argv.slice(2);
 const commands: Record<string, () => void> = {
   status: () => status(projectOf(projectId)),
-  next: () => next(projectOf(projectId), kindOf(args[0])),
+  next: () => (args[0] ? next(projectOf(projectId), kindOf(args[0])) : nextAny(projectOf(projectId))),
   features: () => features(projectOf(projectId)),
   feature: () => feature(projectOf(projectId), args[0], args.includes('--all')),
   code: () => code(projectOf(projectId), args[0]),
+  'test-code': () => testCode(projectOf(projectId), kindOf(args[0]), args[1]),
   apply: () => apply(projectOf(projectId), args[0]),
   skip: () => {
     const at = args.indexOf('--files');
@@ -611,7 +703,7 @@ const commands: Record<string, () => void> = {
   reset: () => reset(projectOf(projectId), kindOf(args[0]), args[1]),
 };
 if (!commands[cmd]) {
-  console.log('Commands: status, next, features, feature, code, apply, skip, reset. See server/map.ts.');
+  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset. See server/map.ts.');
   process.exit(cmd ? 1 : 0);
 }
 // A fresh scan first for the commands that use test IDs and files, so they match the repo now.

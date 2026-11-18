@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { featurePct, featureTotal, type FunctionState, type LineCounts } from '../api';
+import { featurePct, featureTotal, type FunctionState, type LineCounts, type View } from '../api';
 
 export const STATE_META: Record<FunctionState | 'none', { label: string; icon: string; color: string; tint: string }> = {
   library: { label: 'Library (runs on every request)', icon: '▣', color: 'var(--lib)', tint: 'var(--lib-tint)' },
@@ -11,8 +11,13 @@ export const STATE_META: Record<FunctionState | 'none', { label: string; icon: s
   none: { label: 'Not measured', icon: '–', color: 'var(--none)', tint: 'transparent' },
 };
 
-export function StateBadge({ state }: { state: FunctionState | 'none' }) {
-  const m = STATE_META[state];
+/** "Both" view: lines or functions that only Cypress tests ran. They are what the Playwright tests still need to reach. */
+export const CY_ONLY_META = { label: 'Run only by Cypress', icon: '◆', color: 'var(--cy)', tint: 'var(--cy-tint)' };
+
+export const VIEW_LABEL: Record<View, string> = { playwright: 'Playwright', cypress: 'Cypress', both: 'Playwright + Cypress' };
+
+export function StateBadge({ state, cypressOnly = false, label }: { state: FunctionState | 'none'; cypressOnly?: boolean; label?: string }) {
+  const m = { ...(cypressOnly ? CY_ONLY_META : STATE_META[state]), ...(label ? { label } : {}) };
   return (
     <span className="inline-flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-xs text-ink-2" style={{ background: m.tint }}>
       <span style={{ color: m.color }} aria-hidden>
@@ -25,19 +30,22 @@ export function StateBadge({ state }: { state: FunctionState | 'none' }) {
 
 /**
  * Stacked bar of runnable lines: tested / setup only / never run, with a 2px gap.
+ * In the "both" view the tested part splits: run by Playwright (green) and run only by Cypress (purple).
  * withLibrary adds the library lines in front (the "all code" view).
  */
 export function CoverageBar({ c, height = 8, withLibrary = false, className = '' }: { c: LineCounts; height?: number; withLibrary?: boolean; className?: string }) {
   const parts = [
     ...(withLibrary ? [{ n: c.library, color: 'var(--lib)' }] : []),
-    { n: c.tested, color: 'var(--good)' },
+    { n: c.tested - c.cypressOnly, color: 'var(--good)' },
+    { n: c.cypressOnly, color: 'var(--cy)' },
     { n: c.setup + c.background, color: 'var(--warn)' },
     { n: c.never, color: 'var(--bad)' },
   ].filter((p) => p.n > 0);
   const ft = featureTotal(c);
+  const cy = c.cypressOnly ? ` (${c.cypressOnly} only by Cypress)` : '';
   const title = withLibrary
-    ? `${c.runnable} runnable lines: ${c.library} library · ${c.tested} feature lines run by tests · ${c.setup + c.background} setup only · ${c.never} never run`
-    : `${c.tested} of ${ft} feature lines run by tests (${featurePct(c)}%) · ${c.setup + c.background} setup only · ${c.never} never run`;
+    ? `${c.runnable} runnable lines: ${c.library} library · ${c.tested} feature lines run by tests${cy} · ${c.setup + c.background} setup only · ${c.never} never run`
+    : `${c.tested} of ${ft} feature lines run by tests (${featurePct(c)}%)${cy} · ${c.setup + c.background} setup only · ${c.never} never run`;
   const empty = withLibrary ? c.runnable === 0 : ft === 0;
   return (
     <div className={`flex w-full gap-[2px] ${className}`} style={{ height }} title={title} role="img" aria-label={title}>
@@ -76,12 +84,14 @@ export function Swatch({ color, label, outline }: { color: string; label: string
   );
 }
 
-export function Legend() {
+export function Legend({ view }: { view?: View | null }) {
+  const both = view === 'both';
   return (
     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-2">
-      {(['library', 'tested', 'setup', 'never', 'none'] as const).map((s) => (
-        <Swatch key={s} color={STATE_META[s].color} label={STATE_META[s].label} />
-      ))}
+      {(['library', 'tested', 'setup', 'never', 'none'] as const).flatMap((s) => [
+        <Swatch key={s} color={STATE_META[s].color} label={s === 'tested' && both ? 'Run by Playwright tests' : STATE_META[s].label} />,
+        ...(s === 'tested' && both ? [<Swatch key="cy" color={CY_ONLY_META.color} label={`${CY_ONLY_META.label} (not by Playwright yet)`} />] : []),
+      ])}
     </div>
   );
 }

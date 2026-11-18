@@ -17,7 +17,7 @@ import {
   type Scope,
 } from '../api';
 import { href } from '../router';
-import { Empty, Loading, StateBadge, Tag } from './ui';
+import { CY_ONLY_META, Empty, Loading, StateBadge, Tag } from './ui';
 
 // Display IDs. The number is the database ID, so it stays when the title changes.
 export const featureCode = (id: number) => `F-${id}`;
@@ -32,10 +32,10 @@ const ITEM_FIELDS: ItemField[] = ['rules', 'outOfScope', 'where', 'questions'];
 /** True when the skill wrote something in the feature that no person checked yet. */
 const aiLink = (l: FeatureLink) => l.source === 'ai' && !l.checked;
 const needsReview = (f: Feature) =>
-  f.aiDraft || f.scopes.some((s) => s.aiDraft) || ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) || f.links.some(aiLink);
+  f.aiDraft || f.scopes.some((s) => s.aiDraft) || ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) || f.links.some(aiLink) || f.code.aiToCheck > 0;
 
 /** Runs a change and shows the error text if the API refuses it. */
-async function act(fn: () => Promise<unknown>) {
+export async function act(fn: () => Promise<unknown>) {
   try {
     await fn();
   } catch (e) {
@@ -155,7 +155,7 @@ function Counts({ f }: { f: Feature }) {
   );
 }
 
-function SideItem({ active, onClick, meta, children }: { active: boolean; onClick: () => void; meta?: ReactNode; children: ReactNode }) {
+export function SideItem({ active, onClick, meta, children }: { active: boolean; onClick: () => void; meta?: ReactNode; children: ReactNode }) {
   return (
     <button
       type="button"
@@ -657,6 +657,7 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
         </div>
       </Section>
 
+      <MappedCodeNote project={project} f={f} />
       <FeatureCodeView project={project} f={f} />
 
       <Section title="Other actions">
@@ -1030,48 +1031,99 @@ function ScopeSelect({ project, features, testId }: { project: string; features:
   );
 }
 
-/** PHP functions that the feature's Playwright tests ran in the coverage run. */
+/**
+ * PHP functions that the feature's linked tests ran, in the coverage view chosen at the top.
+ * In the "both" view, a function that only the linked Cypress tests ran is code that the
+ * feature's Playwright tests do not reach yet: a test to convert.
+ */
 function FeatureCodeView({ project, f }: { project: string; f: Feature }) {
   const { data } = useApi<FeatureCode>(`/api/projects/${project}/features/${f.id}/code`);
   const pwCount = live(f.links, 'playwright').length;
+  const cyCount = live(f.links, 'cypress').length;
+  const tools = (data?.view === 'both' ? ['playwright', 'cypress'] : data?.view ? [data.view] : []) as ('playwright' | 'cypress')[];
+  const linkedInView = tools.reduce((n, t) => n + (t === 'playwright' ? pwCount : cyCount), 0);
+  const inRun = data ? tools.reduce((n, t) => n + data.linkedRunTests[t], 0) : 0;
+  const onlyCy = (fn: FeatureCode['functions'][0]) => fn.tests.every((t) => t.startsWith('CY-'));
   const byFile = useMemo(() => {
     const m = new Map<string, FeatureCode['functions']>();
     for (const fn of data?.functions ?? []) m.set(fn.file, [...(m.get(fn.file) ?? []), fn]);
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [data]);
+  const cyOnlyCount = data?.view === 'both' ? (data.functions ?? []).filter(onlyCy).length : 0;
+  const toolText = tools.map((t) => (t === 'playwright' ? 'Playwright' : 'Cypress')).join(' and ');
   return (
-    <Section title={`Code run by this feature’s Playwright tests${data ? ` (${data.functions.length} functions)` : ''}`}>
-      {!pwCount ? (
-        <div className="text-sm text-ink-3">
-          No Playwright test links to this feature, so the coverage run cannot show its code. Cypress has no coverage run yet.
-        </div>
-      ) : !data ? (
+    <Section title={`Code run by this feature’s tests${data ? ` (${data.functions.length} functions)` : ''}`}>
+      {!data ? (
         <div className="text-sm text-ink-3">Loading…</div>
-      ) : data.linkedRunTests === 0 ? (
-        <div className="text-sm text-ink-3">The linked Playwright tests were not in the coverage run.</div>
+      ) : !data.view ? (
+        <div className="text-sm text-ink-3">The project has no coverage run, so the code of this feature cannot be shown.</div>
+      ) : !linkedInView ? (
+        <div className="text-sm text-ink-3">No {toolText} test links to this feature, so the coverage cannot show the code its tests run.</div>
+      ) : inRun === 0 ? (
+        <div className="text-sm text-ink-3">The linked {toolText} tests were not in the coverage run.</div>
       ) : (
         <div className="space-y-2 text-sm">
-          <div className="text-xs text-ink-3">Library functions are not in this list. They run on every request, so they say nothing about one feature.</div>
+          <div className="text-xs text-ink-3">
+            Coverage from {toolText}. Library functions are not in this list. They run on every request, so they say nothing about one feature.
+          </div>
+          {data.view === 'both' && (
+            <div className="text-xs text-ink-2">
+              {cyOnlyCount ? (
+                <>
+                  <span style={{ color: CY_ONLY_META.color }}>{CY_ONLY_META.icon}</span> {cyOnlyCount} function{cyOnlyCount > 1 ? 's' : ''} ran only in the linked
+                  Cypress tests. The feature’s Playwright tests do not reach {cyOnlyCount > 1 ? 'them' : 'it'} yet.
+                </>
+              ) : (
+                'Every function that the linked Cypress tests ran is also run by a linked Playwright test.'
+              )}
+            </div>
+          )}
           {byFile.map(([file, fns]) => (
             <div key={file}>
-              <a href={href({ project, tab: 'code', sel: file })} className="font-mono text-xs hover:underline">
+              <a href={href({ project, tab: 'features', pane: 'code', sel: file })} className="font-mono text-xs hover:underline">
                 {file}
               </a>
               <ul className="ml-3">
-                {fns.map((fn) => (
-                  <li key={fn.name + fn.start} className="flex items-center gap-2 py-0.5">
-                    <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                      {fn.name} <span className="text-ink-3">:{fn.start}</span>
-                    </span>
-                    <span className="text-xs text-ink-3">{fn.tests.length === 1 ? '1 test' : `${fn.tests.length} tests`}</span>
-                    <StateBadge state={fn.state} />
-                  </li>
-                ))}
+                {fns.map((fn) => {
+                  const pw = fn.tests.filter((t) => t.startsWith('PW-')).length;
+                  const cy = fn.tests.length - pw;
+                  return (
+                    <li key={fn.name + fn.start} className="flex items-center gap-2 py-0.5">
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                        {fn.name} <span className="text-ink-3">:{fn.start}</span>
+                      </span>
+                      <span className="text-xs text-ink-3" title={fn.tests.join(', ')}>
+                        {[pw ? `${pw} Playwright` : '', cy ? `${cy} Cypress` : ''].filter(Boolean).join(' · ')} {fn.tests.length === 1 ? 'test' : 'tests'}
+                      </span>
+                      {data.view === 'both' && onlyCy(fn) ? (
+                        <StateBadge state={fn.state} cypressOnly label="Only linked Cypress tests" />
+                      ) : (
+                        <StateBadge state={fn.state} />
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** The code that the AI skill put in the feature: a count, and a link to "Code by feature". */
+function MappedCodeNote({ project, f }: { project: string; f: Feature }) {
+  return (
+    <Section title={`Code in this feature (${f.code.entries})`}>
+      <div className="text-sm text-ink-2">
+        {f.code.entries
+          ? `${f.code.entries} file${f.code.entries > 1 ? 's or functions' : ' or function'} of plugin code${f.code.aiToCheck ? `, ${f.code.aiToCheck} added by AI and not checked yet` : ''}. `
+          : 'No plugin code is in this feature yet. The AI skill adds it when it maps the feature. '}
+        <a href={href({ project, tab: 'features', pane: 'code', sel: `f:${f.id}` })} className="text-accent hover:underline">
+          See how much of it the tests run
+        </a>
+      </div>
     </Section>
   );
 }

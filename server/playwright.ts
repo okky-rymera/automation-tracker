@@ -207,7 +207,7 @@ export function parsePlaywrightRepo(project: ProjectConfig): PlaywrightScan | nu
   return { tests: out, errors };
 }
 
-/** Playwright tests of the project from the database, matched to the coverage run. */
+/** Playwright tests of the project from the database, matched to the Playwright coverage run. */
 export function listPlaywright(project: ProjectConfig): PlaywrightTest[] {
   syncProject(project);
   const rows = db
@@ -216,7 +216,7 @@ export function listPlaywright(project: ProjectConfig): PlaywrightTest[] {
 
   // Match tests to tests in the coverage run by "file > describe > title".
   // A title built in a loop holds "${…}"; it matches each runtime title by pattern.
-  const cov = loadCoverage(project);
+  const cov = loadCoverage(project, 'playwright');
   const runTests = (cov?.tests ?? []).map((t) => ({ key: runTestPath(t).join(' > '), t }));
   const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

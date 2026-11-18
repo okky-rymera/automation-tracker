@@ -1,6 +1,6 @@
 ---
 name: map-features
-description: Builds the feature list in the automation tracker one small unit at a time. It takes one Playwright spec file, one Cypress .feature file, or one plugin code/settings area, studies it (reads the code, runs the test, or tries the feature with playwright-cli), then writes the feature, description, scope (its scenarios), rules, out of scope, roles and other fields into the tracker database and links each existing test to the scopes it checks. It records which files and code areas are done, so the next run continues where the last one stopped. Use this skill whenever the user wants to fill, grow or check the feature list or feature matrix, map tests to features, find which feature a test file or code file belongs to, or says things like "do the next Cypress file", "map the next feature", "continue the feature mapping", "what features does this spec cover", or "process the settings page" — even if they do not say "skill" or "feature list".
+description: Builds the feature list in the automation tracker one small unit at a time. It takes one Playwright spec file, one Cypress .feature file, or one plugin code/settings area, studies it (reads the code, runs the test, or tries the feature with playwright-cli), then writes the feature, description, scope (its scenarios), rules, out of scope, roles and other fields into the tracker database, links each existing test to the scopes it checks, and puts the plugin code (files and functions) that does the feature in it, so the app can show code coverage by feature. It works in this order: Playwright files, then Cypress files, then the code that is left. It records which files and code areas are done, so the next run continues where the last one stopped. Use this skill whenever the user wants to fill, grow or check the feature list or feature matrix, map tests to features, find which feature a test file or code file belongs to, or says things like "do the next Cypress file", "map the next feature", "continue the feature mapping", "what features does this spec cover", or "process the settings page" — even if they do not say "skill" or "feature list".
 ---
 
 # Map features, one unit at a time
@@ -29,10 +29,11 @@ repo root (`/home/chili/Works/Projects/automation-tracker`). Output is JSON.
 
 ```bash
 npm run -s map -- status   <project>                    # progress
-npm run -s map -- next     <project> playwright|cypress|code
+npm run -s map -- next     <project> [playwright|cypress|code]  # no kind: Playwright, then Cypress, then code
 npm run -s map -- features <project>                    # compact feature list
 npm run -s map -- feature  <project> <id>               # one feature, all fields and links
 npm run -s map -- code     <project> <repo file>        # functions, coverage state, tests that ran them
+npm run -s map -- test-code <project> playwright|cypress <ref>  # functions the tests of one test file ran (a hint)
 npm run -s map -- apply    <project> <payload.json>     # write + mark the unit done (one transaction)
 npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  # code needs --files
 npm run -s map -- reset    <project> <kind> <ref>       # process that unit again next time
@@ -45,7 +46,8 @@ calls). The tool keeps the rules that protect people's work:
 
 - It does not change or remove text that a person wrote or checked. It can fill empty fields. Each field
   has its own AI mark, so filling an empty field does not give the right to change the other fields.
-- Roles, needs, list items, scopes and the scopes of a link are only added.
+- Roles, needs, list items, scopes, the scopes of a link and the code of a feature are only added.
+- It does not add again code that a person removed from a feature.
 - It does not add again a link that a person removed, and it does not change a link that a person made.
 - It marks what it writes as "AI draft" and its links as "linked by AI", so the app shows them for review.
 
@@ -62,20 +64,25 @@ about these items: the person may want your suggestion.
 - If the user named a file or area, use it. For a test file, the unit `ref` is the
   path that `next` and the tests table use (relative to the Playwright or Cypress
   folder), not the repo path. Run `next` for that kind to see the format.
-- Otherwise run `next <project> <kind>`. It gives first a file that changed
+- Otherwise run `next <project>` with no kind. It keeps this order: all
+  Playwright spec files first, then all Cypress `.feature` files, then the
+  plugin code that no unit holds yet. Do not change the order, unless the user
+  names a kind. For one kind, run `next <project> <kind>`.
+- In each kind, `next` gives first a file that changed
   since it was processed (`state: "changed"`), then a new file. For a changed
   file, look at `previous.features` and at tests with `newSinceLastTime: true`:
   often you only add the new tests to the features that exist.
 - For `code`, `next` gives candidate PHP files with the most code that no
-  Playwright test ran. Choose **one plugin feature or settings area** (for
+  test ran. Choose **one plugin feature or settings area** (for
   example "Settings > Prices > Hide wholesale price column"), not one file. The
   area name is the `ref`. To choose well:
   - Skip big helper files (many small functions for many features). Their code
     gets mapped through the areas that use it.
-  - The coverage data comes from Playwright only. An area with no Playwright
-    coverage can still have many Cypress tests. Run `features` first: a feature
-    with many Cypress links (CY) already covers that area well, so a different
-    area is a better use of the run.
+  - The coverage data comes from the Playwright run and the Cypress run, when
+    the project has both. With only a Playwright run, an area with no coverage
+    can still have many Cypress tests. Run `features` first: a feature with many
+    Cypress links (CY) already covers that area well, so a different area is a
+    better use of the run.
   - Prefer one screen, one settings section, or one REST route: about 1–6 files.
   - A file can be in more than one area (a shared menu or order file). A file in
     any done area leaves the `next` candidate list.
@@ -93,8 +100,14 @@ not only a copy of test titles.
   `@rymera-web-co/automated-test-helper`. If its `node_modules` folder is not
   installed, do not search the disk for it: judge the step from its words, and
   put real doubts in `questions`.
+- **For test files**: run `test-code <project> <kind> <ref>`. It lists the
+  plugin functions that the tests of the file ran. Use it as a hint for the
+  feature's code (step 4), not as the answer: shared helpers and test setup
+  show there too (`otherTests` > 0 often means shared code). Cypress tests that
+  make their data through the REST API make the list longer. If the tests are
+  not in a coverage run, find the code by reading it.
 - **For code areas**: run `code <project> <file>` for each main file. It shows
-  each function's coverage state and the Playwright tests that ran it. These
+  each function's coverage state and the tests (PW-… and CY-…) that ran it. These
   tests are candidates to link. The states:
   - `tested`: a test ran it while it did its checks.
   - `setup`: only the test setup ran it (log in, make products).
@@ -160,6 +173,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | questions | List: what you could not confirm |
 | scopes | The separate things it does, like test scenarios, each with a visible result |
 | links | Each test, with the scopes it checks |
+| code | The plugin files or functions that do the feature |
 
 Link every test in the unit that checks a feature, **to the scopes it checks**.
 A link with no scope says only "this test is about the feature", which tells a
@@ -184,6 +198,22 @@ Points to know:
   is gone), say so in the report and leave it out. If the whole file has no
   feature, run `skip` with the reason.
 
+**Put the code of the feature in `code`.** The app uses it to show code
+coverage by feature (Features tab > "Code by feature"). Give:
+
+- `{ "file": "includes/class-x.php" }` when the whole file does this feature.
+- `{ "file": "includes/class-x.php", "functions": ["Class_X::method"] }` when
+  only some functions do it. Use the function names exactly as `code` or
+  `test-code` lists them. The tool refuses a name that the coverage run does not know.
+- Put in only code that does the feature: its settings, screens, hooks, REST
+  routes and the logic behind them. Leave out shared helpers, plugin start-up
+  code and test setup. One function can be in more than one feature when it
+  really does each of them.
+- For a test file, start from `test-code`, then read the code to check it.
+  For a code area, use the files of the area.
+- The tool only adds code. If code you added before is wrong, say so in the
+  report: a person removes it in the app.
+
 If `apply` fails, nothing was saved. Read the error, fix the payload, run it again.
 
 ### 5. Report and stop
@@ -193,6 +223,7 @@ Tell the user, in plain words:
 - which unit you processed, and how you checked it (read, ran the test, tried it)
 - the features you made or added to, with their IDs (F-12), and the scopes (S-4)
 - which tests you linked, and which you did not link and why
+- the code you put in each feature (files and functions)
 - open questions, and any person's text that the tool kept
 - the progress (`status`): for example "Cypress: 5 of 82 files done"
 

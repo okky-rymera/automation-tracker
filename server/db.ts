@@ -24,7 +24,7 @@ const MIGRATIONS: string[] = [
     playwright_dir TEXT,
     cypress_dir TEXT,
     exclude_dirs TEXT,              -- JSON array, or NULL for the default list
-    coverage_run_id INTEGER,        -- run shown in the app
+    coverage_run_id INTEGER,        -- run shown in the app (step 6: the Playwright run)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -272,6 +272,32 @@ const MIGRATIONS: string[] = [
   ALTER TABLE scopes DROP COLUMN ai_draft;
   -- checked = 1: a person checked an AI link ("Mark as checked"). The "linked by AI" mark goes.
   ALTER TABLE links ADD COLUMN checked INTEGER NOT NULL DEFAULT 0;
+  `,
+
+  // 6: one coverage run per test tool. projects.coverage_run_id is now the Playwright run,
+  //    and projects.cypress_run_id is the Cypress run. Old runs are Playwright runs.
+  `
+  ALTER TABLE coverage_runs ADD COLUMN framework TEXT NOT NULL DEFAULT 'playwright';  -- playwright | cypress
+  ALTER TABLE projects ADD COLUMN cypress_run_id INTEGER;
+  `,
+
+  // 7: the plugin code of each feature: a whole file, or one function in a file (by name, as the
+  //    coverage run names it). The AI skill adds rows (source "ai"); a person removes them.
+  //    A removed row stays with removed = 1, so the skill does not add it again.
+  //    No foreign key to source_files: a scan rebuilds that table.
+  `
+  CREATE TABLE feature_code (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    file TEXT NOT NULL,               -- relative to the plugin repo
+    function TEXT NOT NULL DEFAULT '', -- '' = the whole file
+    source TEXT NOT NULL DEFAULT 'ai', -- ai | manual
+    checked INTEGER NOT NULL DEFAULT 0,
+    removed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (feature_id, file, function)
+  );
+  CREATE INDEX feature_code_project ON feature_code(project_id);
   `,
 ];
 

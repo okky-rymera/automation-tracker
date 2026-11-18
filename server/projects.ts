@@ -4,6 +4,19 @@ import { db, json, tx } from './db.ts';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 
+export type Framework = 'playwright' | 'cypress';
+export const FRAMEWORKS: Framework[] = ['playwright', 'cypress'];
+
+/** A coverage run selected for one test tool. */
+export interface RunRef {
+  /** Database ID of the run. */
+  id: number;
+  /** Run folder (holds report.json and lines.json), relative to this tool. */
+  dir: string;
+  /** Text shown in the UI that says where the coverage numbers come from. */
+  label?: string;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
@@ -13,12 +26,8 @@ export interface ProjectConfig {
   playwrightDir?: string;
   /** Cypress .feature folder, relative to the repo. */
   cypressDir?: string;
-  /** Database ID of the coverage run shown in the app. */
-  coverageRunId?: number;
-  /** Coverage run folder (holds report.json and lines.json), relative to this tool. */
-  coverageRun?: string;
-  /** Text shown in the UI that says where the coverage numbers come from. */
-  coverageLabel?: string;
+  /** The coverage run of each test tool that has one. */
+  runs: Partial<Record<Framework, RunRef>>;
   /** Folders to leave out of the file list (folder names, at any depth). */
   excludeDirs?: string[];
 }
@@ -32,13 +41,19 @@ const fromRow = (r: Row): ProjectConfig => ({
   playwrightDir: r.playwright_dir ?? undefined,
   cypressDir: r.cypress_dir ?? undefined,
   excludeDirs: r.exclude_dirs ? json(r.exclude_dirs) : undefined,
-  coverageRunId: r.run_id ?? undefined,
-  coverageRun: r.run_dir ?? undefined,
-  coverageLabel: r.run_label ?? undefined,
+  runs: {
+    ...(r.pw_id ? { playwright: { id: r.pw_id, dir: r.pw_dir, label: r.pw_label ?? undefined } } : {}),
+    ...(r.cy_id ? { cypress: { id: r.cy_id, dir: r.cy_dir, label: r.cy_label ?? undefined } } : {}),
+  },
 });
 
-const SELECT = `SELECT p.*, r.id AS run_id, r.dir AS run_dir, r.label AS run_label
-  FROM projects p LEFT JOIN coverage_runs r ON r.id = p.coverage_run_id`;
+const SELECT = `SELECT p.*, pr.id AS pw_id, pr.dir AS pw_dir, pr.label AS pw_label, cr.id AS cy_id, cr.dir AS cy_dir, cr.label AS cy_label
+  FROM projects p
+  LEFT JOIN coverage_runs pr ON pr.id = p.coverage_run_id
+  LEFT JOIN coverage_runs cr ON cr.id = p.cypress_run_id`;
+
+/** Column in projects that holds the selected run of each test tool. */
+export const RUN_COLUMN: Record<Framework, string> = { playwright: 'coverage_run_id', cypress: 'cypress_run_id' };
 
 export function loadProjects(): ProjectConfig[] {
   return (db.prepare(`${SELECT} ORDER BY p.name`).all() as Row[]).map(fromRow);
@@ -49,10 +64,17 @@ export function getProject(id: string): ProjectConfig | undefined {
   return r ? fromRow(r) : undefined;
 }
 
-/** Adds a coverage run folder to a project (or finds it) and returns its ID. */
-export function addCoverageRun(projectId: string, dir: string, label?: string): number {
-  db.prepare(`INSERT INTO coverage_runs (project_id, dir, label) VALUES (?, ?, ?)
-    ON CONFLICT (project_id, dir) DO UPDATE SET label = COALESCE(excluded.label, label)`).run(projectId, dir, label ?? null);
+/**
+ * Adds a coverage run folder to a project (or finds it) and returns its ID.
+ * A run folder holds the run of one test tool, so a folder of the other tool is refused.
+ */
+export function addCoverageRun(projectId: string, dir: string, framework: Framework, label?: string): number {
+  const have = db.prepare('SELECT framework FROM coverage_runs WHERE project_id = ? AND dir = ?').get(projectId, dir) as Row | undefined;
+  if (have && have.framework !== framework) {
+    throw new Error(`The run folder ${dir} is the ${have.framework} run of ${projectId}. Make a separate run folder for each test tool.`);
+  }
+  db.prepare(`INSERT INTO coverage_runs (project_id, dir, framework, label) VALUES (?, ?, ?, ?)
+    ON CONFLICT (project_id, dir) DO UPDATE SET label = COALESCE(excluded.label, label)`).run(projectId, dir, framework, label ?? null);
   return (db.prepare('SELECT id FROM coverage_runs WHERE project_id = ? AND dir = ?').get(projectId, dir) as Row).id;
 }
 
@@ -64,15 +86,25 @@ export function importProjectsJson() {
   const file = path.join(ROOT, 'projects.json');
   const count = (db.prepare('SELECT COUNT(*) AS n FROM projects').get() as Row).n;
   if (count > 0 || !fs.existsSync(file)) return;
-  const list = JSON.parse(fs.readFileSync(file, 'utf8')) as (ProjectConfig & { coverageRun?: string })[];
+  type JsonProject = Omit<ProjectConfig, 'runs'> & { coverageRun?: string; coverageLabel?: string; cypressRun?: string; cypressLabel?: string };
+  const list = JSON.parse(fs.readFileSync(file, 'utf8')) as JsonProject[];
   tx(() => {
     for (const p of list) {
       db.prepare('INSERT INTO projects (id, name, path, playwright_dir, cypress_dir, exclude_dirs) VALUES (?, ?, ?, ?, ?, ?)').run(
         p.id, p.name, p.path, p.playwrightDir ?? null, p.cypressDir ?? null, p.excludeDirs ? JSON.stringify(p.excludeDirs) : null,
       );
       if (p.coverageRun) {
-        const runId = addCoverageRun(p.id, p.coverageRun, p.coverageLabel);
+        const runId = addCoverageRun(p.id, p.coverageRun, 'playwright', p.coverageLabel);
         db.prepare('UPDATE projects SET coverage_run_id = ? WHERE id = ?').run(runId, p.id);
+      }
+      if (p.cypressRun) {
+        // A bad Cypress run (the same folder as the Playwright run) must not stop the start: skip it and say why.
+        try {
+          const runId = addCoverageRun(p.id, p.cypressRun, 'cypress', p.cypressLabel);
+          db.prepare('UPDATE projects SET cypress_run_id = ? WHERE id = ?').run(runId, p.id);
+        } catch (e) {
+          console.error(`projects.json, project "${p.id}": Cypress run not set. ${(e as Error).message}`);
+        }
       }
     }
   });

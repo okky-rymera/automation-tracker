@@ -23,6 +23,8 @@ export function CypressTab({ project, sel }: { project: string; sel: string | nu
 
   if (!data) return <Loading error={error} />;
   const scenario = data.find((s) => s.id === sel);
+  // Marks only make sense when the project has a Cypress coverage run.
+  const hasRun = data.some((s) => s.run.length > 0);
 
   return (
     <div className="flex h-full">
@@ -47,7 +49,10 @@ export function CypressTab({ project, sel }: { project: string; sel: string | nu
             onSelect={(n) => n.item && (location.hash = href({ project, tab: 'cypress', sel: n.key }))}
             renderMeta={(n) =>
               n.item ? (
-                n.item.examples > 0 ? <span className="text-xs text-ink-3">{n.item.examples} rows</span> : null
+                <span className="flex items-center gap-2">
+                  {n.item.examples > 0 && <span className="text-xs text-ink-3">{n.item.examples} rows</span>}
+                  {hasRun && <RunMark s={n.item} />}
+                </span>
               ) : (
                 <span className="text-xs tabular-nums text-ink-3">{leaves(n).length}</span>
               )
@@ -60,6 +65,14 @@ export function CypressTab({ project, sel }: { project: string; sel: string | nu
       </section>
     </div>
   );
+}
+
+/** Result of the scenario in the Cypress coverage run. */
+function RunMark({ s }: { s: CypressScenario }) {
+  if (!s.run.length) return <span className="text-xs text-ink-3">not in run</span>;
+  if (s.run.some((r) => r.status !== 'passed' && r.status !== 'skipped')) return <span className="text-xs" style={{ color: 'var(--bad)' }}>✕ failed</span>;
+  if (s.run.every((r) => r.status === 'skipped')) return <span className="text-xs text-ink-3">skipped in run</span>;
+  return <span className="text-xs" style={{ color: 'var(--good)' }}>{s.run.some((r) => r.status === 'skipped') ? '✓ some skipped' : '✓'}</span>;
 }
 
 function ScenarioDetail({ project, s }: { project: string; s: CypressScenario }) {
@@ -100,6 +113,25 @@ function ScenarioDetail({ project, s }: { project: string; s: CypressScenario })
           ))}
         </ol>
         {s.examples > 0 && <div className="mt-2 text-xs text-ink-2">Runs once for each of {s.examples} example rows.</div>}
+      </div>
+
+      <div>
+        <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-ink-3">Last Cypress coverage run</div>
+        {s.run.length ? (
+          <table className="w-full text-sm">
+            <tbody>
+              {s.run.map((r) => (
+                <tr key={r.runId} className="border-t border-line">
+                  <td className="py-1.5 pr-3">{r.title}</td>
+                  <td className="py-1.5 pr-3 text-xs">{r.status}</td>
+                  <td className="py-1.5 text-right text-xs tabular-nums text-ink-2">{r.functions} PHP functions run</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="text-sm text-ink-3">This scenario was not in the Cypress coverage run, or the project has no Cypress run.</div>
+        )}
       </div>
     </div>
   );
