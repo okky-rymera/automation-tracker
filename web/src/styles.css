@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+/* Color tokens. Status colors carry coverage state and always come with a text label. */
+:root {
+  color-scheme: light;
+  --bg: #f6f6f4;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: #e2e1dc;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --text-3: #7a7973;
+  --accent: #2a78d6;
+  --good: #0ca30c;      /* run by tests */
+  --warn: #fab219;      /* run only in test setup */
+  --bad: #d03b3b;       /* never run */
+  --none: #c9c8c2;      /* not measured */
+  --lib: #2a78d6;       /* library code: runs on every request */
+  --lib-tint: color-mix(in oklab, var(--lib) 13%, transparent);
+  --good-tint: color-mix(in oklab, var(--good) 16%, transparent);
+  --warn-tint: color-mix(in oklab, var(--warn) 22%, transparent);
+  --bad-tint: color-mix(in oklab, var(--bad) 9%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface: #1a1a19;
+    --surface-2: #242422;
+    --border: #33332f;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --text-3: #8e8d85;
+    --accent: #3987e5;
+    --none: #4a4945;
+  --lib: #3987e5;
+  --lib-tint: color-mix(in oklab, var(--lib) 20%, transparent);
+    --lib: #3987e5;
+    --lib-tint: color-mix(in oklab, var(--lib) 20%, transparent);
+    --good-tint: color-mix(in oklab, var(--good) 22%, transparent);
+    --bad-tint: color-mix(in oklab, var(--bad) 16%, transparent);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211;
+  --surface: #1a1a19;
+  --surface-2: #242422;
+  --border: #33332f;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --text-3: #8e8d85;
+  --accent: #3987e5;
+  --none: #4a4945;
+  --lib: #3987e5;
+  --lib-tint: color-mix(in oklab, var(--lib) 20%, transparent);
+  --good-tint: color-mix(in oklab, var(--good) 22%, transparent);
+  --bad-tint: color-mix(in oklab, var(--bad) 16%, transparent);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-2);
+  --color-ink-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-none: var(--none);
+  --color-lib: var(--lib);
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 14px; }

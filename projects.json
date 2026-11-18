@@ -1,0 +1,11 @@
+[
+  {
+    "id": "wwp",
+    "name": "WooCommerce Wholesale Prices",
+    "path": "/home/chili/Works/wp-plugins/woocommerce-wholesale-prices",
+    "playwrightDir": "tests/Playwright/specs",
+    "cypressDir": "tests/Cypress/cypress/tests",
+    "coverageRun": "data/projects/wwp/runs/2026-11-18-playwright-lines",
+    "coverageLabel": "Playwright run with line coverage and baseline, 13 spec files, 18 Nov 2026"
+  }
+]

@@ -1,0 +1,5 @@
+node_modules
+dist
+coverage-data
+# Live database and coverage run files: local data, not code.
+data/
