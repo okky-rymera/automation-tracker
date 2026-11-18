@@ -64,17 +64,17 @@ function summary(id: string) {
   };
 }
 
-/** Features and how many abilities have a Playwright test, a Cypress scenario, both or none. */
+/** Features and how many scopes have a Playwright test, a Cypress scenario, both or none. */
 function featureSummary(id: string) {
   const d = featureData(id);
-  const abilities = d.features.flatMap((f: any) => f.abilities.map((a: any) => f.links.filter((l: any) => l.abilityId === a.id && !l.missing)));
+  const scopes = d.features.flatMap((f: any) => f.scopes.map((s: any) => f.links.filter((l: any) => l.scopeIds.includes(s.id) && !l.missing)));
   const has = (ls: any[], fw: string) => ls.some((l) => l.framework === fw);
   return {
     features: d.features.length,
     withPlaywright: d.features.filter((f: any) => has(f.links.filter((l: any) => !l.missing), 'playwright')).length,
     withCypress: d.features.filter((f: any) => has(f.links.filter((l: any) => !l.missing), 'cypress')).length,
-    abilities: abilities.length,
-    abilitiesBoth: abilities.filter((ls: any[]) => has(ls, 'playwright') && has(ls, 'cypress')).length,
+    scopes: scopes.length,
+    scopesBoth: scopes.filter((ls: any[]) => has(ls, 'playwright') && has(ls, 'cypress')).length,
     unlinkedTests: d.unlinked,
   };
 }
@@ -148,11 +148,15 @@ app.post('/api/projects/:id/features', edit((req) => edits.addFeature(P(req), re
 app.patch('/api/projects/:id/features/:fid', edit((req) => edits.updateFeature(P(req), req.params.fid, req.body)));
 app.delete('/api/projects/:id/features/:fid', edit((req) => edits.deleteFeature(P(req), req.params.fid)));
 app.post('/api/projects/:id/features/:fid/merge', edit((req) => edits.mergeFeature(P(req), req.params.fid, req.body)));
-app.post('/api/projects/:id/features/:fid/tags', edit((req) => edits.addTag(P(req), req.params.fid, req.body)));
-app.delete('/api/projects/:id/features/:fid/tags/:tag', edit((req) => edits.deleteTag(P(req), req.params.fid, req.params.tag)));
-app.post('/api/projects/:id/features/:fid/abilities', edit((req) => edits.addAbility(P(req), req.params.fid, req.body)));
-app.patch('/api/projects/:id/abilities/:aid', edit((req) => edits.updateAbility(P(req), req.params.aid, req.body)));
-app.delete('/api/projects/:id/abilities/:aid', edit((req) => edits.deleteAbility(P(req), req.params.aid)));
+app.post('/api/projects/:id/features/:fid/check', edit((req) => edits.checkFeature(P(req), req.params.fid)));
+app.post('/api/projects/:id/features/:fid/labels', edit((req) => edits.addLabel(P(req), req.params.fid, req.body)));
+app.delete('/api/projects/:id/features/:fid/labels/:kind/:value', edit((req) => edits.deleteLabel(P(req), req.params.fid, req.params)));
+app.post('/api/projects/:id/features/:fid/items', edit((req) => edits.addItem(P(req), req.params.fid, req.body)));
+app.patch('/api/projects/:id/items/:iid', edit((req) => edits.updateItem(P(req), req.params.iid, req.body)));
+app.delete('/api/projects/:id/items/:iid', edit((req) => edits.deleteItem(P(req), req.params.iid)));
+app.post('/api/projects/:id/features/:fid/scopes', edit((req) => edits.addScope(P(req), req.params.fid, req.body)));
+app.patch('/api/projects/:id/scopes/:sid', edit((req) => edits.updateScope(P(req), req.params.sid, req.body)));
+app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(req), req.params.sid)));
 app.post('/api/projects/:id/links', edit((req) => edits.addLink(P(req), req.body)));
 app.patch('/api/projects/:id/links/:lid', edit((req) => edits.updateLink(P(req), req.params.lid, req.body)));
 app.delete('/api/projects/:id/links/:lid', edit((req) => edits.deleteLink(P(req), req.params.lid)));

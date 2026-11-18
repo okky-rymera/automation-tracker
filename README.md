@@ -8,7 +8,7 @@ All data is in one SQLite file: `data/tracker.db`.
 
 - Projects, code files, Playwright tests and Cypress scenarios. The app scans the plugin repo again when the last scan is older than 5 seconds.
 - Coverage runs. The app imports a run folder again when `report.json` or `lines.json` changes.
-- Features, abilities and links to tests. People type these in the app.
+- Features, scopes and links to tests. People type these in the app, or the AI skill writes a draft.
 
 WARNING: The database holds the only copy of the feature list and the links. Make a backup copy of `data/tracker.db` before large changes.
 
@@ -32,14 +32,33 @@ One project is one plugin. The first start copies `projects.json` into the datab
 
 ## Feature list
 
-The "Features" tab holds the feature list: groups, features and abilities. An ability is one thing a user can do with the feature.
+The "Features" tab holds the feature list: groups and features. A feature has:
 
-- A test with the tag `@feature:<name>` links to the feature that owns the tag name `<name>`. The first scan makes one feature for each tag name in the tests.
-- A tag name that is new after the first scan does not make a feature. The tab lists it under "Feature tags with no feature".
-- You can also link a test by hand, and put each link on an ability.
-- An ability with a Playwright test and a Cypress scenario shows "In both".
-- When you remove a link that came from a tag, a scan does not add it again.
-- Feature IDs (`F-…`) and ability IDs (`A-…`) are numbers. A new title keeps the ID.
+- a title, a description, a group and a priority
+- user roles and needs: short names that features share. Type to see the names that other features use. A name that no feature uses is gone.
+- lists: where it is, rules, out of scope, open questions. Each list item is one sentence that you can change or remove.
+- a scope: the separate things the feature does, like the scenarios of a test
+
+Links:
+
+- Each test links to a feature and to the scopes it checks. On a scope, click "+ Link a test". On a test page, use "Link to a scope".
+- A test can check more than one scope.
+- People make the links, or the AI skill makes them. `@feature:` tags in the tests do not make links.
+- When you remove a link, the AI skill does not add it again.
+- A scope with a Playwright test and a Cypress scenario shows "In both".
+- Feature IDs (`F-…`) and scope IDs (`S-…`) are numbers. A new title keeps the ID.
+
+### Fill the list with the AI skill
+
+The Claude Code skill `map-features` (in `.claude/skills/`) writes a first draft of the list. It does one unit at a time: one Playwright spec file, one Cypress `.feature` file, or one plugin code area. Start Claude Code in this folder and say, for example, "map the next cypress file for wwp".
+
+- The skill reads the tests and the plugin code. It can also run the test or try the feature in a browser.
+- It adds to the features that exist before it makes new ones, and it links each test to the scopes it checks.
+- Text it writes shows "AI draft" in the app. Its links show "linked by AI". Click "Mark as checked", or change the text, to remove the mark.
+- It does not change or remove text that a person wrote or checked. It does not add again a link that a person removed, and it does not change a link that a person made.
+- It records each unit it did. A unit shows again when its files change.
+
+The skill writes through `npm run -s map -- <command>` (see `server/map.ts`). To see the progress: `npm run -s map -- status <project>`.
 
 ## Make coverage data
 

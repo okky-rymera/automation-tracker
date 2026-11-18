@@ -2,7 +2,7 @@
  * The SQLite database (data/tracker.db). It holds all data of the tool:
  *  - projects, and the files and tests found in each plugin repo (rebuilt by a scan)
  *  - imported coverage runs (rebuilt from the run folders)
- *  - features, abilities and links to tests (typed by people: the only copy)
+ *  - features, scopes, lists, labels and links to tests (typed by people or the AI skill: the only copy)
  *
  * Schema changes go in MIGRATIONS. Never edit an old step: add a new one.
  * PRAGMA user_version holds the number of steps that ran.
@@ -128,7 +128,7 @@ const MIGRATIONS: string[] = [
     sort INTEGER NOT NULL DEFAULT 0
   );
 
-  -- Test to feature (and optional ability). No foreign key to tests on purpose:
+  -- Test to feature (step 3 moves the abilities to link_abilities). No foreign key to tests on purpose:
   -- a scan can mark a test removed, and the link must stay.
   --   source  = tag (made from a feature tag) or manual (made or changed by a person)
   --   removed = 1 when a person removed a tag link (a scan must not add it again)
@@ -150,6 +150,128 @@ const MIGRATIONS: string[] = [
     project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     seeded_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  `,
+
+  // 2: more feature fields, AI draft marks, and the units the feature-mapping skill did.
+  //   ai_draft = 1: the skill wrote or changed the row, and no person checked it yet.
+  `
+  ALTER TABLE features ADD COLUMN out_of_scope TEXT NOT NULL DEFAULT '';
+  ALTER TABLE features ADD COLUMN user_roles TEXT NOT NULL DEFAULT '';
+  ALTER TABLE features ADD COLUMN location TEXT NOT NULL DEFAULT '';      -- where in the UI or settings
+  ALTER TABLE features ADD COLUMN dependencies TEXT NOT NULL DEFAULT '';  -- settings, plugins, other features
+  ALTER TABLE features ADD COLUMN business_rules TEXT NOT NULL DEFAULT '';
+  ALTER TABLE features ADD COLUMN open_questions TEXT NOT NULL DEFAULT '';
+  ALTER TABLE features ADD COLUMN priority TEXT NOT NULL DEFAULT '';      -- high | medium | low | ''
+  ALTER TABLE features ADD COLUMN ai_draft INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE abilities ADD COLUMN ai_draft INTEGER NOT NULL DEFAULT 0;
+
+  -- One row for each test file or code area the skill processed.
+  -- No foreign key to source_files or tests: a scan rebuilds those.
+  CREATE TABLE processed_units (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,             -- playwright | cypress | code
+    ref TEXT NOT NULL,              -- test file path, or a code area name
+    status TEXT NOT NULL,           -- done | skipped
+    files TEXT NOT NULL DEFAULT '[]',     -- JSON: repo files the unit read
+    hash TEXT NOT NULL DEFAULT '',        -- of those files at that time
+    features TEXT NOT NULL DEFAULT '[]',  -- JSON: feature IDs it wrote to
+    note TEXT NOT NULL DEFAULT '',
+    processed_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, kind, ref)
+  );
+  `,
+
+  // 3: a link can hold more than one ability (a test often checks several).
+  //    The links table is rebuilt without ability_id; link_abilities holds the abilities.
+  //    No table points at links before this step, so the rebuild is safe.
+  `
+  CREATE TABLE link_abilities_tmp AS SELECT id AS link_id, ability_id FROM links WHERE ability_id IS NOT NULL;
+  CREATE TABLE links_new (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    test_id TEXT NOT NULL,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    removed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (project_id, test_id, feature_id)
+  );
+  INSERT INTO links_new (id, project_id, test_id, feature_id, source, removed, created_at)
+    SELECT id, project_id, test_id, feature_id, source, removed, created_at FROM links;
+  DROP TABLE links;
+  ALTER TABLE links_new RENAME TO links;
+  CREATE INDEX links_feature ON links(feature_id);
+  CREATE TABLE link_abilities (
+    link_id INTEGER NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+    ability_id INTEGER NOT NULL REFERENCES abilities(id) ON DELETE CASCADE,
+    PRIMARY KEY (link_id, ability_id)
+  );
+  CREATE INDEX link_abilities_ability ON link_abilities(ability_id);
+  INSERT INTO link_abilities SELECT link_id, ability_id FROM link_abilities_tmp;
+  DROP TABLE link_abilities_tmp;
+  `,
+
+  // 4: abilities are now "scopes" (like the scenarios in tests). Lists and labels
+  //    replace the free text fields. Tag links go: people or the AI skill make links.
+  `
+  ALTER TABLE abilities RENAME TO scopes;
+  ALTER TABLE link_abilities RENAME TO link_scopes;
+  ALTER TABLE link_scopes RENAME COLUMN ability_id TO scope_id;
+  DROP INDEX link_abilities_ability;
+  CREATE INDEX link_scopes_scope ON link_scopes(scope_id);
+
+  -- Lists of sentences on a feature.
+  CREATE TABLE feature_items (
+    id INTEGER PRIMARY KEY,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,              -- rule | out_of_scope | where | question
+    text TEXT NOT NULL,
+    sort INTEGER NOT NULL DEFAULT 0,
+    ai_draft INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX feature_items_feature ON feature_items(feature_id, kind, sort);
+
+  -- Short values that repeat across features. A value exists while one feature uses it.
+  CREATE TABLE feature_labels (
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,              -- role | needs
+    value TEXT NOT NULL COLLATE NOCASE,
+    PRIMARY KEY (feature_id, kind, value)
+  );
+
+  -- Move the old text fields: each non-empty field becomes one item or label.
+  INSERT INTO feature_items (feature_id, kind, text, ai_draft) SELECT id, 'rule', business_rules, ai_draft FROM features WHERE business_rules <> '';
+  INSERT INTO feature_items (feature_id, kind, text, ai_draft) SELECT id, 'out_of_scope', out_of_scope, ai_draft FROM features WHERE out_of_scope <> '';
+  INSERT INTO feature_items (feature_id, kind, text, ai_draft) SELECT id, 'where', location, ai_draft FROM features WHERE location <> '';
+  INSERT INTO feature_items (feature_id, kind, text, ai_draft) SELECT id, 'question', open_questions, ai_draft FROM features WHERE open_questions <> '';
+  INSERT INTO feature_labels (feature_id, kind, value) SELECT id, 'role', user_roles FROM features WHERE user_roles <> '';
+  INSERT INTO feature_labels (feature_id, kind, value) SELECT id, 'needs', dependencies FROM features WHERE dependencies <> '';
+  ALTER TABLE features DROP COLUMN out_of_scope;
+  ALTER TABLE features DROP COLUMN user_roles;
+  ALTER TABLE features DROP COLUMN location;
+  ALTER TABLE features DROP COLUMN dependencies;
+  ALTER TABLE features DROP COLUMN business_rules;
+  ALTER TABLE features DROP COLUMN open_questions;
+
+  -- No more automatic links from @feature: tags: people or the AI skill make every link.
+  -- Old tag links stay, marked as AI links, so a person reviews them.
+  DROP TABLE feature_tags;
+  DROP TABLE feature_seeds;
+  UPDATE links SET source = 'ai' WHERE source = 'tag';
+  `,
+
+  // 5: the "AI draft" mark is kept for each field, not for the whole row.
+  //    ai_fields = JSON list of the fields the AI skill wrote and no person checked yet.
+  //    So filling one empty field does not give the skill the right to change the others.
+  `
+  ALTER TABLE features ADD COLUMN ai_fields TEXT NOT NULL DEFAULT '[]';
+  UPDATE features SET ai_fields = '["title","description","priority","group"]' WHERE ai_draft = 1;
+  ALTER TABLE features DROP COLUMN ai_draft;
+  ALTER TABLE scopes ADD COLUMN ai_fields TEXT NOT NULL DEFAULT '[]';
+  UPDATE scopes SET ai_fields = '["title","description"]' WHERE ai_draft = 1;
+  ALTER TABLE scopes DROP COLUMN ai_draft;
+  -- checked = 1: a person checked an AI link ("Mark as checked"). The "linked by AI" mark goes.
+  ALTER TABLE links ADD COLUMN checked INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 

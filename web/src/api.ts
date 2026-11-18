@@ -24,8 +24,8 @@ export interface ProjectSummary {
     features: number;
     withPlaywright: number;
     withCypress: number;
-    abilities: number;
-    abilitiesBoth: number;
+    scopes: number;
+    scopesBoth: number;
     unlinkedTests: { playwright: number; cypress: number };
   };
 }
@@ -35,8 +35,12 @@ export type Framework = 'playwright' | 'cypress';
 export interface FeatureLink {
   id: number;
   testId: string;
-  abilityId: number | null;
-  source: 'tag' | 'manual';
+  /** Scopes of the feature that this test checks (none = the feature in general). */
+  scopeIds: number[];
+  /** manual = a person, ai = the feature-mapping skill. */
+  source: 'manual' | 'ai';
+  /** A person checked this AI link ("Mark as checked"). */
+  checked: boolean;
   framework: Framework;
   title: string | null;
   file: string | null;
@@ -44,21 +48,40 @@ export interface FeatureLink {
   missing: boolean;
 }
 
-export interface Ability {
+export interface Scope {
   id: number;
   title: string;
   description: string;
   sort: number;
+  /** Fields the skill wrote that no person checked yet. */
+  aiFields: string[];
+  aiDraft: boolean;
 }
 
-export interface Feature {
+/** One sentence in a feature list (rules, out of scope, where, open questions). */
+export interface FeatureItem {
+  id: number;
+  text: string;
+  aiDraft: boolean;
+}
+
+export type ItemField = 'rules' | 'outOfScope' | 'where' | 'questions';
+export type LabelField = 'roles' | 'needs';
+/** API kind names of the list and label fields. */
+export const ITEM_KIND: Record<ItemField, string> = { rules: 'rule', outOfScope: 'out_of_scope', where: 'where', questions: 'question' };
+export const LABEL_KIND: Record<LabelField, string> = { roles: 'role', needs: 'needs' };
+
+export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelField, string[]> {
   id: number;
   groupId: number | null;
   title: string;
   description: string;
+  priority: '' | 'high' | 'medium' | 'low';
   sort: number;
-  tags: string[];
-  abilities: Ability[];
+  /** Fields (title, description, priority, group) the skill wrote that no person checked yet. */
+  aiFields: string[];
+  aiDraft: boolean;
+  scopes: Scope[];
   links: FeatureLink[];
 }
 
@@ -72,9 +95,12 @@ export interface FeatureGroup {
 export interface FeatureData {
   groups: FeatureGroup[];
   features: Feature[];
-  unknownTags: { tag: string; playwright: number; cypress: number }[];
+  /** Label values in use in the project, most used first. */
+  labels: Record<LabelField, { value: string; count: number }[]>;
   unlinked: Record<Framework, number>;
   tests: Record<Framework, number>;
+  /** Units the feature-mapping skill processed. */
+  processed: { kind: string; status: string; count: number }[];
 }
 
 export interface FeatureCode {

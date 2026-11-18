@@ -5,6 +5,7 @@
  * Runs again when the last scan is older than SCAN_TTL_MS, so code changes show
  * up within a few seconds without a manual step.
  * A test that is gone is not deleted: it gets removed_at, so its links stay.
+ * A scan never makes links: people or the AI skill make them.
  */
 import { db, now, tx } from './db.ts';
 import type { ProjectConfig } from './projects.ts';
@@ -12,7 +13,6 @@ import { SCAN_TTL_MS } from './cache.ts';
 import { parsePlaywrightRepo } from './playwright.ts';
 import { parseCypressRepo } from './cypress.ts';
 import { walkRepo } from './files.ts';
-import { seedFeaturesFromTags, syncTagLinks } from './features.ts';
 
 const lastScan = new Map<string, number>();
 
@@ -57,8 +57,5 @@ export function syncProject(project: ProjectConfig, force = false) {
     };
     save('playwright', pw?.tests ?? null, pw?.errors.map((e) => e.file));
     save('cypress', cy, cy?.filter((s) => s.parseError).map((s) => s.file));
-
-    seedFeaturesFromTags(project.id);
-    syncTagLinks(project.id);
   });
 }

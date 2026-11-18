@@ -8,7 +8,8 @@
     "build": "vite build",
     "start": "vite build && NODE_ENV=production NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/index.ts",
     "project": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/cli.ts",
-    "check-parsers": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/check-parsers.ts"
+    "check-parsers": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/check-parsers.ts",
+    "map": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/map.ts"
   },
   "dependencies": {
     "@babel/parser": "^8.1.2",
