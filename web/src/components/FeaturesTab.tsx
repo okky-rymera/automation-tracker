@@ -20,7 +20,7 @@ import {
   screenshotUrl,
 } from '../api';
 import { href } from '../router';
-import { CY_ONLY_META, Empty, Loading, StateBadge, Tag } from './ui';
+import { CY_ONLY_META, Empty, Loading, Tag } from './ui';
 
 // Display IDs. The number is the database ID, so it stays when the title changes.
 export const featureCode = (id: number) => `F-${id}`;
@@ -1291,81 +1291,54 @@ function ScopeSelect({ project, features, testId }: { project: string; features:
 }
 
 /**
- * PHP functions that the feature's linked tests ran, in the coverage view chosen at the top.
- * In the "both" view, a function that only the linked Cypress tests ran is code that the
- * feature's Playwright tests do not reach yet: a test to convert.
+ * Functions that only the feature's linked Cypress tests run, and no linked Playwright test.
+ * Each one is code to reach when the Cypress tests move to Playwright.
+ * Shown only when the server loads a coverage run with both tools (it picks "both" when both
+ * runs exist) and the feature has linked tests of both tools in that run. Without tests of
+ * both tools in the run, a "Playwright does not reach it" report would be false.
  */
 function FeatureCodeView({ project, f }: { project: string; f: Feature }) {
   const { data } = useApi<FeatureCode>(`/api/projects/${project}/features/${f.id}/code`);
-  const pwCount = live(f.links, 'playwright').length;
-  const cyCount = live(f.links, 'cypress').length;
-  const tools = (data?.view === 'both' ? ['playwright', 'cypress'] : data?.view ? [data.view] : []) as ('playwright' | 'cypress')[];
-  const linkedInView = tools.reduce((n, t) => n + (t === 'playwright' ? pwCount : cyCount), 0);
-  const inRun = data ? tools.reduce((n, t) => n + data.linkedRunTests[t], 0) : 0;
-  const onlyCy = (fn: FeatureCode['functions'][0]) => fn.tests.every((t) => t.startsWith('CY-'));
-  const byFile = useMemo(() => {
-    const m = new Map<string, FeatureCode['functions']>();
-    for (const fn of data?.functions ?? []) m.set(fn.file, [...(m.get(fn.file) ?? []), fn]);
-    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [data]);
-  const cyOnlyCount = data?.view === 'both' ? (data.functions ?? []).filter(onlyCy).length : 0;
-  const toolText = tools.map((t) => (t === 'playwright' ? 'Playwright' : 'Cypress')).join(' and ');
+  if (data?.view !== 'both' || !data.linkedRunTests.cypress || !data.linkedRunTests.playwright) return null;
+  const cyOnly = data.functions.filter((fn) => fn.tests.every((t) => t.startsWith('CY-')));
+  const byFile = new Map<string, typeof cyOnly>();
+  for (const fn of cyOnly) byFile.set(fn.file, [...(byFile.get(fn.file) ?? []), fn]);
+  const files = [...byFile.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   return (
-    <Section title={`Code run by this feature’s tests${data ? ` (${data.functions.length} functions)` : ''}`}>
-      {!data ? (
-        <div className="text-sm text-ink-3">Loading…</div>
-      ) : !data.view ? (
-        <div className="text-sm text-ink-3">The project has no coverage run, so the code of this feature cannot be shown.</div>
-      ) : !linkedInView ? (
-        <div className="text-sm text-ink-3">No {toolText} test links to this feature, so the coverage cannot show the code its tests run.</div>
-      ) : inRun === 0 ? (
-        <div className="text-sm text-ink-3">The linked {toolText} tests were not in the coverage run.</div>
+    <Section title="Code only Cypress tests reach">
+      {!cyOnly.length ? (
+        <div className="text-sm text-ink-2">Every function that the linked Cypress tests run is also run by a linked Playwright test.</div>
       ) : (
-        <div className="space-y-2 text-sm">
-          <div className="text-xs text-ink-3">
-            Coverage from {toolText}. Library functions are not in this list. They run on every request, so they say nothing about one feature.
+        <details className="text-sm">
+          <summary className="cursor-pointer text-ink-2">
+            <span style={{ color: CY_ONLY_META.color }}>{CY_ONLY_META.icon}</span>{' '}
+            {cyOnly.length === 1 ? '1 function runs' : `${cyOnly.length} functions run`} only in the linked Cypress tests. The feature’s Playwright
+            tests do not reach {cyOnly.length === 1 ? 'it' : 'them'} yet.
+          </summary>
+          <div className="mt-1 space-y-1">
+            {files.map(([file, fns]) => (
+              <div key={file}>
+                <a href={href({ project, tab: 'features', pane: 'code', sel: file })} title={file} className="block truncate font-mono text-xs hover:underline">
+                  {file}
+                </a>
+                <ul className="ml-3">
+                  {fns
+                    .sort((a, b) => a.start - b.start)
+                    .map((fn) => (
+                      <li key={fn.name + fn.start} className="flex items-center gap-2 py-0.5">
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                          {fn.name} <span className="text-ink-3">:{fn.start}</span>
+                        </span>
+                        <span className="text-xs text-ink-3" title={fn.tests.join(', ')}>
+                          {fn.tests.length} Cypress {fn.tests.length === 1 ? 'test' : 'tests'}
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            ))}
           </div>
-          {data.view === 'both' && (
-            <div className="text-xs text-ink-2">
-              {cyOnlyCount ? (
-                <>
-                  <span style={{ color: CY_ONLY_META.color }}>{CY_ONLY_META.icon}</span> {cyOnlyCount} function{cyOnlyCount > 1 ? 's' : ''} ran only in the linked
-                  Cypress tests. The feature’s Playwright tests do not reach {cyOnlyCount > 1 ? 'them' : 'it'} yet.
-                </>
-              ) : (
-                'Every function that the linked Cypress tests ran is also run by a linked Playwright test.'
-              )}
-            </div>
-          )}
-          {byFile.map(([file, fns]) => (
-            <div key={file}>
-              <a href={href({ project, tab: 'features', pane: 'code', sel: file })} className="font-mono text-xs hover:underline">
-                {file}
-              </a>
-              <ul className="ml-3">
-                {fns.map((fn) => {
-                  const pw = fn.tests.filter((t) => t.startsWith('PW-')).length;
-                  const cy = fn.tests.length - pw;
-                  return (
-                    <li key={fn.name + fn.start} className="flex items-center gap-2 py-0.5">
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                        {fn.name} <span className="text-ink-3">:{fn.start}</span>
-                      </span>
-                      <span className="text-xs text-ink-3" title={fn.tests.join(', ')}>
-                        {[pw ? `${pw} Playwright` : '', cy ? `${cy} Cypress` : ''].filter(Boolean).join(' · ')} {fn.tests.length === 1 ? 'test' : 'tests'}
-                      </span>
-                      {data.view === 'both' && onlyCy(fn) ? (
-                        <StateBadge state={fn.state} cypressOnly label="Only linked Cypress tests" />
-                      ) : (
-                        <StateBadge state={fn.state} />
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </div>
+        </details>
       )}
     </Section>
   );

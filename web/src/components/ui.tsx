@@ -16,8 +16,8 @@ export const CY_ONLY_META = { label: 'Run only by Cypress', icon: '◆', color: 
 
 export const VIEW_LABEL: Record<View, string> = { playwright: 'Playwright', cypress: 'Cypress', both: 'Playwright + Cypress' };
 
-export function StateBadge({ state, cypressOnly = false, label }: { state: FunctionState | 'none'; cypressOnly?: boolean; label?: string }) {
-  const m = { ...(cypressOnly ? CY_ONLY_META : STATE_META[state]), ...(label ? { label } : {}) };
+export function StateBadge({ state, cypressOnly = false }: { state: FunctionState | 'none'; cypressOnly?: boolean }) {
+  const m = cypressOnly ? CY_ONLY_META : STATE_META[state];
   return (
     <span className="inline-flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-xs text-ink-2" style={{ background: m.tint }}>
       <span style={{ color: m.color }} aria-hidden>
