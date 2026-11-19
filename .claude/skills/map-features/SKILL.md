@@ -50,6 +50,10 @@ calls). The tool keeps the rules that protect people's work:
 - It does not add again code that a person removed from a feature.
 - It does not add again a screenshot that a person deleted (it matches by caption).
 - It does not add again a link that a person removed, and it does not change a link that a person made.
+- It does not add again a scope that a person deleted or moved to another feature (it matches by title or S-id).
+  The report says so, and the tool skips the requirements, links and screenshots of that scope in the payload.
+  Do not send the scope again. If the moved scope belongs in this unit, send it under its new feature.
+- A scope that a person renamed is still found by its old title, so the tool does not make a copy.
 - It marks what it writes as "AI draft" and its links as "linked by AI", so the app shows them for review.
 
 Links come only from people and from this skill. `@feature:` tags in the tests

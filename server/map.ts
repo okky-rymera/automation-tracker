@@ -14,6 +14,7 @@
  *   npm run -s map -- apply    <project> <payload.json>
  *   npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  (--files is needed for code)
  *   npm run -s map -- reset    <project> <kind> <ref>
+ *   npm run -s map -- move-scope <project> <scope id> <feature id>   (a person's edit: see edits.moveScope)
  *
  * Output is JSON, so the skill can read it. Rules that protect people's work:
  *  - Text that a person wrote or checked is never replaced or removed. Empty fields can be filled.
@@ -31,7 +32,7 @@ import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
 import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash } from './features.ts';
+import { EditError, edits, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -508,11 +509,12 @@ function apply(p: ProjectConfig, file: string | undefined) {
         // Remove first: a payload that removes an item and adds the same text again keeps the text.
         removeItems(fid, list<number>(inF.removeItems, 'removeItems'), report);
         for (const [key, kind] of Object.entries(ITEM_KINDS)) writeItems(fid, kind, list<ItemIn>((inF as any)[key], key), report);
-        const scopeIds = new Map<string, number>();
+        const scopeIds = new Map<string, number | null>();
         for (const s of list<ScopeIn>(inF.scopes, 'scopes')) {
           const sid = writeScope(fid, s, report);
           scopeIds.set(str(s.title).toLowerCase(), sid);
-          writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
+          if (s.id !== undefined) scopeIds.set(String(s.id).trim().toLowerCase(), sid);
+          if (sid !== null) writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
@@ -649,19 +651,64 @@ function removeItems(fid: number, ids: number[], report: string[]) {
   }
 }
 
-function writeScope(fid: number, s: { id?: number | string; title: string; description?: string }, report: string[]): number {
+/**
+ * A scope that the skill names (by S-id or title) and that is not live in feature fid, but has an old
+ * title or ID there (scope_titles_gone: a person deleted, moved or renamed it).
+ *  - renamed, or moved back: { id } of the scope in fid, so the skill writes to it
+ *  - moved to another feature or deleted: { skip } with the reason for the report
+ *  - unknown: null
+ */
+function goneScope(fid: number, key: { id?: number | null; title?: string }): { id: number } | { skip: string } | null {
+  const row = (
+    key.id
+      ? db.prepare('SELECT * FROM scope_titles_gone WHERE feature_id = ? AND scope_id = ? LIMIT 1').get(fid, key.id)
+      : db
+          .prepare(
+            `SELECT g.* FROM scope_titles_gone g LEFT JOIN scopes s ON s.id = g.scope_id
+             WHERE g.feature_id = ? AND g.title_key = lower(trim(?)) ORDER BY (s.feature_id = g.feature_id) DESC, g.created_at DESC LIMIT 1`,
+          )
+          .get(fid, key.title ?? '')
+  ) as any;
+  if (!row) return null;
+  const now = db.prepare('SELECT feature_id, title FROM scopes WHERE id = ?').get(row.scope_id) as any;
+  if (now?.feature_id === fid) return { id: row.scope_id };
+  return {
+    skip: now
+      ? `a person moved scope S-${row.scope_id} to F-${now.feature_id}, where it is "${now.title}"`
+      : `a person deleted scope S-${row.scope_id}`,
+  };
+}
+
+/**
+ * Adds or fills one scope. Returns its ID, or null when a person deleted the scope or moved it to
+ * another feature: the skill does not make it again here (goneScope).
+ */
+function writeScope(fid: number, s: { id?: number | string; title: string; description?: string }, report: string[]): number | null {
   const title = str(s.title, 2000);
   if (!title) throw new EditError(`A scope of F-${fid} has no title`);
   const sid = s.id !== undefined ? Number(SCOPE_RE.exec(String(s.id))?.[1] ?? s.id) : null;
   let row: any = sid
     ? db.prepare('SELECT * FROM scopes WHERE id = ? AND feature_id = ?').get(sid, fid)
     : db.prepare('SELECT * FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, title);
-  if (sid && !row) throw new EditError(`No scope S-${sid} in feature F-${fid}`);
+  if (!row) {
+    const gone = goneScope(fid, { id: sid, title });
+    if (gone && 'skip' in gone) {
+      report.push(`F-${fid} scope "${title}": ${gone.skip}. Not added again. Its requirements, links and screenshots in this payload were skipped.`);
+      return null;
+    }
+    if (gone) row = db.prepare('SELECT * FROM scopes WHERE id = ?').get(gone.id);
+  }
+  if (sid && !row) {
+    const now = db.prepare('SELECT feature_id FROM scopes WHERE id = ?').get(sid) as any;
+    throw new EditError(
+      now ? `S-${sid} is in F-${now.feature_id} now, not in F-${fid}. Send it under F-${now.feature_id}` : `No scope S-${sid} in feature F-${fid}`,
+    );
+  }
   if (!row) {
     const n = (db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM scopes WHERE feature_id = ?').get(fid) as any).n;
     const desc = str(s.description);
     const id = db
-      .prepare('INSERT INTO scopes (feature_id, title, description, sort, ai_fields) VALUES (?, ?, ?, ?, ?)')
+      .prepare(`INSERT INTO scopes (id, feature_id, title, description, sort, ai_fields) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?, ?)`)
       .run(fid, title, desc, n, JSON.stringify(desc ? ['description', 'title'] : ['title'])).lastInsertRowid;
     report.push(`F-${fid}: new scope S-${id} "${title}".`);
     return Number(id);
@@ -682,20 +729,27 @@ function addScopeTags(table: 'link_scopes' | 'screenshot_scopes', id: number, sc
   for (const s of scopeIds) add.run(id, s);
 }
 
-/** Scope IDs of feature fid from titles (of this payload or the feature) or S-ids. */
-function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<string, number>, what: string): number[] {
+/**
+ * Scope IDs of feature fid from titles (of this payload or the feature) or S-ids.
+ * A scope that a person deleted or moved away is left out, with a line in the report.
+ */
+function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<string, number | null>, what: string, report: string[]): number[] {
   const ids = keys
     .map((k) => String(k).trim())
     .filter(Boolean)
     .map((key) => {
+      if (scopeIds.has(key.toLowerCase())) return scopeIds.get(key.toLowerCase())!;
       const byId = SCOPE_RE.exec(key);
       const found = byId
         ? (db.prepare('SELECT id FROM scopes WHERE id = ? AND feature_id = ?').get(Number(byId[1]), fid) as any)?.id
-        : scopeIds.get(key.toLowerCase()) ?? (db.prepare('SELECT id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any)?.id;
-      if (!found) throw new EditError(`${what}: scope "${key}" is not in F-${fid}`);
-      return found as number;
+        : (db.prepare('SELECT id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any)?.id;
+      if (found) return found as number;
+      const gone = goneScope(fid, byId ? { id: Number(byId[1]) } : { title: key });
+      if (gone && 'id' in gone) return gone.id;
+      if (gone) return void report.push(`${what}: scope "${key}" left out: ${gone.skip}.`), null;
+      throw new EditError(`${what}: scope "${key}" is not in F-${fid}`);
     });
-  return [...new Set(ids)];
+  return [...new Set(ids.filter((id): id is number => id !== null))];
 }
 
 /**
@@ -704,11 +758,13 @@ function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<str
  * after a person changed the caption. For an AI screenshot that no person checked, missing scope tags
  * are added; else they are only suggested. The image file is read only for a new screenshot.
  */
-function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map<string, number>, report: string[]) {
+function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map<string, number | null>, report: string[]) {
   const caption = str(x?.caption, 500);
   if (!caption) throw new EditError(`A screenshot of F-${fid} has no caption. Say what it shows`);
   const key = captionKey(caption);
-  const want = resolveScopes(fid, list<string | number>(x.scopes, `scopes of screenshot "${caption}"`), scopeIds, `Screenshot "${caption}"`);
+  const keys = list<string | number>(x.scopes, `scopes of screenshot "${caption}"`);
+  const want = resolveScopes(fid, keys, scopeIds, `Screenshot "${caption}"`, report);
+  if (keys.length && !want.length) return void report.push(`F-${fid} screenshot "${caption}": not added, because a person deleted or moved all its scopes.`);
   const label = `F-${fid} screenshot "${caption}"`;
 
   const cur = db.prepare('SELECT * FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1').get(fid, key) as any;
@@ -747,12 +803,16 @@ function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map
   report.push(`${label}: added${want.length ? ` with ${names(want)}` : ' (no scope)'}.`);
 }
 
-function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<string, number>, report: string[]) {
+function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<string, number | null>, report: string[]) {
   const testId = str(l.testId, 100);
   if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL').get(p.id, testId))
     throw new EditError(`Unknown test ${testId}. Use the test IDs that "next" or "code" gave`);
   const keys = [...list<string | number>(l.scopes, `scopes of ${testId}`), ...(l.scope !== undefined && l.scope !== null ? [l.scope] : [])];
-  const want = resolveScopes(fid, keys, scopeIds, `Link ${testId}`);
+  const want = resolveScopes(fid, keys, scopeIds, `Link ${testId}`, report);
+  if (keys.length && !want.length) {
+    report.push(`${testId} -> F-${fid}: link not added or changed, because a person deleted or moved all its scopes. Link it by hand if it still belongs here.`);
+    return;
+  }
   const addScopes = (linkId: number, ids: number[]) => addScopeTags('link_scopes', linkId, ids);
 
   const cur = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p.id, testId, fid) as any;
@@ -825,9 +885,18 @@ const commands: Record<string, () => void> = {
     skip(projectOf(projectId), kindOf(args[0]), args[1], args.slice(2).join(' '), files);
   },
   reset: () => reset(projectOf(projectId), kindOf(args[0]), args[1]),
+  // A person's edit, not a skill step: same code as the "Move to feature" select in the app.
+  'move-scope': () => {
+    if (!args[0] || !args[1]) fail('Usage: move-scope <project> <scope id> <feature id>');
+    try {
+      out(edits.moveScope(projectOf(projectId).id, args[0].replace(/^S-/i, ''), { featureId: args[1].replace(/^F-/i, '') }));
+    } catch (e) {
+      fail(e instanceof Error ? e.message : String(e));
+    }
+  },
 };
 if (!commands[cmd]) {
-  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset. See server/map.ts.');
+  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset, move-scope. See server/map.ts.');
   process.exit(cmd ? 1 : 0);
 }
 // A fresh scan first for the commands that use test IDs and files, so they match the repo now.

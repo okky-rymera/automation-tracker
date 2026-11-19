@@ -209,6 +209,7 @@ app.patch('/api/projects/:id/items/:iid', edit((req) => edits.updateItem(P(req),
 app.delete('/api/projects/:id/items/:iid', edit((req) => edits.deleteItem(P(req), req.params.iid)));
 app.post('/api/projects/:id/features/:fid/scopes', edit((req) => edits.addScope(P(req), req.params.fid, req.body)));
 app.patch('/api/projects/:id/scopes/:sid', edit((req) => edits.updateScope(P(req), req.params.sid, req.body)));
+app.post('/api/projects/:id/scopes/:sid/move', edit((req) => edits.moveScope(P(req), req.params.sid, req.body)));
 app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(req), req.params.sid)));
 app.post('/api/projects/:id/links', edit((req) => edits.addLink(P(req), req.body)));
 app.patch('/api/projects/:id/links/:lid', edit((req) => edits.updateLink(P(req), req.params.lid, req.body)));

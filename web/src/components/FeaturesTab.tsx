@@ -647,7 +647,7 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
         )}
         <div className="space-y-3">
           {f.scopes.map((s) => (
-            <ScopeCard key={s.id} project={project} f={f} s={s} links={byScope(s.id)} />
+            <ScopeCard key={s.id} project={project} f={f} s={s} links={byScope(s.id)} features={data.features} />
           ))}
         </div>
         <form className="mt-3 flex gap-2" onSubmit={(e) => (e.preventDefault(), addScope())}>
@@ -737,7 +737,7 @@ function Pill({ tone, children }: { tone: 'good' | 'warn' | 'bad'; children: Rea
 }
 
 /** One scope: its text, its automation state, its linked tests, and a picker to link one more. */
-function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: Scope; links: FeatureLink[] }) {
+function ScopeCard({ project, f, s, links, features }: { project: string; f: Feature; s: Scope; links: FeatureLink[]; features: Feature[] }) {
   const base = `/api/projects/${project}`;
   const url = `${base}/scopes/${s.id}`;
   const [picking, setPicking] = useState(false);
@@ -797,6 +797,32 @@ function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: S
           <Button onClick={() => setPicking(true)}>+ Link a test</Button>
         )}
         {!picking && <AddScreenshotButton uploader={uploader} label="+ Screenshot" />}
+        {!picking && (
+          <select
+            value=""
+            aria-label={`Move scope ${scopeCode(s.id)} to another feature`}
+            onChange={(e) => {
+              const to = features.find((x) => x.id === Number(e.target.value));
+              if (
+                to &&
+                confirm(
+                  `Move scope “${s.title}” to “${to.title}”? Its requirements, test links and the screenshots that show only this scope go with it.`,
+                )
+              )
+                act(() => mutate('POST', `${url}/move`, { featureId: to.id }));
+            }}
+            className="ml-auto max-w-[14rem] rounded-md border border-line bg-bg px-2 py-1 text-xs text-ink-2"
+          >
+            <option value="">Move to feature…</option>
+            {features
+              .filter((x) => x.id !== f.id)
+              .map((x) => (
+                <option key={x.id} value={x.id}>
+                  {featureCode(x.id)} {x.title}
+                </option>
+              ))}
+          </select>
+        )}
       </div>
     </div>
   );

@@ -212,6 +212,19 @@ function ownScope(projectId: string, id: unknown): { id: number; featureId: numb
   if (!r) throw new EditError('Scope not found in this project');
   return { id: r.id, featureId: r.feature_id };
 }
+/**
+ * Remembers an old title of a scope on a feature: a person deleted the scope, moved it away, or
+ * renamed it. The AI skill finds scopes by title, so without this it makes the scope again (map.ts goneScope).
+ */
+function buryScope(featureId: number, scopeId: number, title: string) {
+  db.prepare('INSERT OR IGNORE INTO scope_titles_gone (feature_id, scope_id, title_key) VALUES (?, ?, lower(trim(?)))').run(featureId, scopeId, title);
+}
+/**
+ * SQL for the ID of a new scope. SQLite gives a new row the ID of the last deleted row, but an S-id must
+ * name one scope only: people use it, and scope_titles_gone remembers the IDs of deleted scopes.
+ */
+export const NEW_SCOPE_ID =
+  '(SELECT MAX(COALESCE((SELECT MAX(id) FROM scopes), 0), COALESCE((SELECT MAX(scope_id) FROM scope_titles_gone), 0)) + 1)';
 /** Scope ID in feature featureId, or an EditError. */
 export function scopeOf(projectId: string, featureId: number, id: unknown): number {
   const s = ownScope(projectId, id);
@@ -457,6 +470,8 @@ export const edits = {
       ).run(from, into);
       const shotBase = nextSort('screenshots', 'feature_id = ?', into);
       db.prepare('UPDATE screenshots SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, shotBase, from);
+      // The deleted and moved scopes of the source stay remembered, on the target.
+      db.prepare('UPDATE OR IGNORE scope_titles_gone SET feature_id = ? WHERE feature_id = ?').run(into, from);
       db.prepare('DELETE FROM features WHERE id = ?').run(from);
     });
   },
@@ -509,16 +524,21 @@ export const edits = {
   // Scopes.
   addScope(p: string, id: string, b: any) {
     const f = own('features', p, id);
-    const r = db.prepare('INSERT INTO scopes (feature_id, title, description, sort) VALUES (?, ?, ?, ?)').run(
+    const r = db.prepare(`INSERT INTO scopes (id, feature_id, title, description, sort) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?)`).run(
       f, need(b.title, 'Title'), text(b.description), nextSort('scopes', 'feature_id = ?', f),
     );
     return { id: Number(r.lastInsertRowid) };
   },
   updateScope(p: string, id: string, b: any) {
-    const s = ownScope(p, id).id;
+    const sc = ownScope(p, id);
+    const s = sc.id;
     const title = 'title' in b ? need(b.title, 'Title') : null;
     tx(() => {
-      if (title !== null) db.prepare('UPDATE scopes SET title = ? WHERE id = ?').run(title, s);
+      if (title !== null) {
+        const before = (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s) as any).title as string;
+        if (before.trim().toLowerCase() !== title.toLowerCase()) buryScope(sc.featureId, s, before);
+        db.prepare('UPDATE scopes SET title = ? WHERE id = ?').run(title, s);
+      }
       if ('description' in b) db.prepare('UPDATE scopes SET description = ? WHERE id = ?').run(text(b.description), s);
       if ('sort' in b) db.prepare('UPDATE scopes SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s);
       // b.check = true: the person checked the scope without a change. Its requirements are checked too.
@@ -526,8 +546,110 @@ export const edits = {
       if (b.check) db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE scope_id = ?').run(s);
     });
   },
+  /**
+   * Moves a scope to another feature of the project. Body: { featureId }.
+   * - The scope goes to the end of the target's scope list. It keeps its ID, text and AI marks.
+   *   The target must not have a scope with the same title. The old feature remembers the title (buryScope).
+   * - Its requirements go with it. A requirement that the target feature has already goes:
+   *   the feature requirement applies to every scope.
+   * - Each test link to the scope goes to the target feature. A link that a person removed
+   *   from the target comes back, as in addLink. When the old link has no scope left, it is
+   *   marked removed, so the AI skill does not link the test to the old feature again.
+   * - A screenshot that shows only this scope goes with it. A screenshot that shows other
+   *   scopes too stays, and loses only this scope's tag.
+   */
+  moveScope(p: string, id: string, b: any) {
+    const s = ownScope(p, id);
+    const from = s.featureId;
+    const to = own('features', p, b.featureId);
+    if (to === from) throw new EditError('The scope is in this feature already');
+    const title = (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s.id) as any).title as string;
+    // Two scopes with one title: the AI skill finds scopes by title, so it could write to the wrong one.
+    if (db.prepare('SELECT 1 FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(to, title))
+      throw new EditError('The target feature has a scope with this title already. Rename one of them first');
+    tx(() => {
+      buryScope(from, s.id, title);
+      db.prepare('UPDATE scopes SET feature_id = ?, sort = ? WHERE id = ?').run(to, nextSort('scopes', 'feature_id = ?', to), s.id);
+      db.prepare('UPDATE feature_items SET feature_id = ? WHERE scope_id = ?').run(to, s.id);
+      // A scope requirement that the target has as a feature requirement goes. A person's check on it stays.
+      const same = `SELECT 1 FROM feature_items o WHERE o.feature_id = ? AND o.kind = ? AND o.scope_id = ?
+        AND lower(o.text) = lower(feature_items.text)`;
+      db.prepare(`UPDATE feature_items SET ai_draft = 0 WHERE feature_id = ? AND kind = ? AND scope_id IS NULL AND ai_draft = 1
+        AND EXISTS (${same} AND o.ai_draft = 0)`).run(to, SCOPE_ITEM_KIND, to, SCOPE_ITEM_KIND, s.id);
+      db.prepare(
+        `DELETE FROM feature_items WHERE scope_id = ? AND kind = ? AND EXISTS (SELECT 1 FROM feature_items o
+           WHERE o.feature_id = ? AND o.kind = feature_items.kind AND o.scope_id IS NULL AND lower(o.text) = lower(feature_items.text))`,
+      ).run(s.id, SCOPE_ITEM_KIND, to);
+
+      // Test links. A person's work (a manual link, a check) wins over an AI link to the same test.
+      const upsertLink = db.prepare(
+        `INSERT INTO links (project_id, test_id, feature_id, source, checked) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (project_id, test_id, feature_id) DO UPDATE SET
+           source = CASE WHEN removed = 1 OR excluded.source = 'manual' THEN 'manual' ELSE source END,
+           checked = MAX(checked, excluded.checked), removed = 0
+         RETURNING id`,
+      );
+      const untag = db.prepare('DELETE FROM link_scopes WHERE link_id = ? AND scope_id = ?');
+      const tag = db.prepare('INSERT OR IGNORE INTO link_scopes (link_id, scope_id) VALUES (?, ?)');
+      const hasScope = db.prepare('SELECT 1 FROM link_scopes WHERE link_id = ?');
+      const removeLink = db.prepare('UPDATE links SET removed = 1 WHERE id = ?');
+      const old = db
+        .prepare('SELECT l.* FROM links l JOIN link_scopes ls ON ls.link_id = l.id WHERE ls.scope_id = ? AND l.feature_id = ? AND l.removed = 0')
+        .all(s.id, from) as any[];
+      for (const l of old) {
+        const keep = upsertLink.get(p, l.test_id, to, l.source, l.checked) as any;
+        untag.run(l.id, s.id);
+        tag.run(keep.id, s.id);
+        if (!hasScope.get(l.id)) removeLink.run(l.id); // marker: the skill does not link the test to the old feature again
+      }
+
+      // Screenshots that show only this scope move. The others stay and lose this scope's tag.
+      const shots = db
+        .prepare(
+          `SELECT sh.*, (SELECT COUNT(*) FROM screenshot_scopes o WHERE o.screenshot_id = sh.id) AS n
+           FROM screenshots sh JOIN screenshot_scopes ss ON ss.screenshot_id = sh.id
+           WHERE ss.scope_id = ? AND sh.feature_id = ? AND sh.removed = 0`,
+        )
+        .all(s.id, from) as any[];
+      const findKey = db.prepare('SELECT id, removed FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1');
+      const otherWithKey = db.prepare('SELECT 1 FROM screenshots WHERE feature_id = ? AND match_key = ? AND id <> ?');
+      const marker = db.prepare(
+        "INSERT INTO screenshots (project_id, feature_id, caption, mime, sort, source, removed, match_key) VALUES (?, ?, ?, ?, 0, 'ai', 1, ?)",
+      );
+      const untagShot = db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ? AND scope_id = ?');
+      const tagShot = db.prepare('INSERT OR IGNORE INTO screenshot_scopes (screenshot_id, scope_id) VALUES (?, ?)');
+      const addCheck = db.prepare('UPDATE screenshots SET checked = MAX(checked, ?) WHERE id = ?');
+      const dropShot = db.prepare('DELETE FROM screenshots WHERE id = ?');
+      const moveShot = db.prepare('UPDATE screenshots SET feature_id = ?, sort = ? WHERE id = ?');
+      let sort = nextSort('screenshots', 'feature_id = ?', to);
+      for (const sh of shots) {
+        if (sh.n > 1) {
+          untagShot.run(sh.id, s.id);
+          continue;
+        }
+        const key: string | null = sh.match_key;
+        // An AI screenshot leaves a deleted marker on the old feature, so the skill does not add it there again.
+        if (key && !otherWithKey.get(from, key, sh.id)) marker.run(p, from, sh.caption, sh.mime, key);
+        const dup = key ? (findKey.get(to, key) as any) : null;
+        if (dup && !dup.removed) {
+          // The target has the same AI screenshot: keep that one, with this scope's tag and the "checked" mark.
+          tagShot.run(dup.id, s.id);
+          addCheck.run(sh.checked, dup.id);
+          dropShot.run(sh.id);
+          continue;
+        }
+        if (dup) dropShot.run(dup.id); // a live screenshot wins over a deleted marker, as in mergeFeature
+        moveShot.run(to, sort++, sh.id);
+      }
+    });
+    return { featureId: to };
+  },
   deleteScope(p: string, id: string) {
-    db.prepare('DELETE FROM scopes WHERE id = ?').run(ownScope(p, id).id); // its tests stay linked to the feature
+    const s = ownScope(p, id);
+    tx(() => {
+      buryScope(s.featureId, s.id, (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s.id) as any).title);
+      db.prepare('DELETE FROM scopes WHERE id = ?').run(s.id); // its tests stay linked to the feature
+    });
   },
 
   /**

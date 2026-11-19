@@ -364,6 +364,38 @@ const MIGRATIONS: string[] = [
   `
   UPDATE feature_items SET kind = 'note', ai_draft = 1 WHERE kind = 'rule';
   `,
+
+  // 12: scopes that a person deleted or moved to another feature. The AI skill finds scopes by title,
+  //     so without this it makes the scope again on the old feature. One row per feature and title.
+  //     moved_to = NULL: deleted. A person who adds the title to the feature again clears the row.
+  `
+  CREATE TABLE scope_tombstones (
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    title_key TEXT NOT NULL,          -- lower(trim(title))
+    scope_id INTEGER NOT NULL,        -- no foreign key: a deleted scope is gone
+    moved_to INTEGER REFERENCES features(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (feature_id, title_key)
+  );
+  CREATE INDEX scope_tombstones_scope ON scope_tombstones(scope_id);
+  `,
+
+  // 13: one row per old title of each scope, so a second delete of the same title keeps the first.
+  //     Also for a rename. No moved_to: the scope's feature now says where it went (or that it is gone),
+  //     also after a merge. A live scope with the title wins, so a person who adds it again needs no clear.
+  `
+  CREATE TABLE scope_titles_gone (
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    scope_id INTEGER NOT NULL,        -- no foreign key: a deleted scope is gone
+    title_key TEXT NOT NULL,          -- lower(trim(title))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (feature_id, scope_id, title_key)
+  );
+  CREATE INDEX scope_titles_gone_title ON scope_titles_gone(feature_id, title_key);
+  INSERT INTO scope_titles_gone (feature_id, scope_id, title_key, created_at)
+    SELECT feature_id, scope_id, title_key, created_at FROM scope_tombstones;
+  DROP TABLE scope_tombstones;
+  `,
 ];
 
 function open(): DatabaseSync {

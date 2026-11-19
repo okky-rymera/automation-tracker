@@ -49,6 +49,10 @@ Links:
 - When you remove a link, the AI skill does not add it again.
 - A scope with a Playwright test and a Cypress scenario shows "In both".
 - Feature IDs (`F-…`) and scope IDs (`S-…`) are numbers. A new title keeps the ID.
+- To move a scope to another feature, use "Move to feature…" on the scope. Its requirements, test links and the screenshots that show only this scope go with it. The scope keeps its ID.
+- The AI skill does not add again a scope that a person deleted or moved to another feature. To get such a scope back, add it with the same title. When you rename a scope, the skill still finds it by its old title.
+- A target feature cannot get two scopes with the same title. Rename one of them before the move.
+- A new scope never gets the ID of a deleted scope.
 
 ### Screenshots
 
