@@ -220,6 +220,146 @@ function TestLink({ project, t }: { project: string; t: TestRef }) {
   );
 }
 
+/** Types of GET /api/projects/:id/ai-updates (server/ai-update.ts). */
+interface AiUpdateRow {
+  id: number;
+  featureId: number;
+  syncId: number | null;
+  fromCommit: string;
+  toCommit: string;
+  model: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'waiting' | 'running' | 'no-change' | 'applied' | 'proposed' | 'failed';
+  costUsd: number | null;
+  durationMs: number | null;
+  summary: string;
+  applyReport: string[] | null;
+  error: string | null;
+}
+interface AiState {
+  running: boolean;
+  rows: AiUpdateRow[];
+  totalUsd: number;
+  count: number;
+  defaults: { model: string; budgetUsd: number };
+  /** Why the last update did not start (it wrote no rows). */
+  error: string | null;
+}
+
+const AI_STATUS: Record<AiUpdateRow['status'], [string, string]> = {
+  waiting: ['waiting for its turn', 'var(--text-2)'],
+  running: ['checking…', 'var(--text-2)'],
+  'no-change': ['no change needed', 'var(--good)'],
+  applied: ['saved as AI draft', 'var(--good)'],
+  proposed: ['proposal only, not saved', 'var(--warn)'],
+  failed: ['failed', 'var(--bad)'],
+};
+const usd = (n: number | null) => (n === null ? '' : `$${n.toFixed(2)}`);
+
+/**
+ * AI update: headless Claude checks each feature to review and saves its changes as AI draft.
+ * Shows each check with its cost, and a button to start one for the last sync.
+ */
+function AiUpdates({ project, canStart }: { project: string; canStart: boolean }) {
+  const [tick, setTick] = useState(0);
+  const { data } = useApi<AiState>(`/api/projects/${project}/ai-updates?t=${tick}`);
+  const [s, setS] = useState<AiState | null>(null);
+  useEffect(() => {
+    if (data) setS(data);
+  }, [data]);
+  const [model, setModel] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const running = !!s?.running;
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setTick((n) => n + 1), 3000);
+    return () => {
+      clearInterval(t);
+      reloadAll();
+    };
+  }, [running]);
+  if (!s) return null;
+  const start = async () => {
+    setError(null);
+    try {
+      await mutate('POST', `/api/projects/${project}/ai-update`, { model: model ?? s.defaults.model }, { quiet: true });
+      setTick((n) => n + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <details className="mt-2" open={running || s.rows.length > 0}>
+      <summary className="cursor-pointer font-medium">
+        AI updates ({s.count}){s.count > 0 && <span className="font-normal text-ink-3"> · {usd(s.totalUsd)} in total</span>}
+      </summary>
+      <div className="mt-1 pl-4">
+        <p className="mb-1 text-ink-3">
+          Claude reads the changed code and checks each feature to review. It saves its changes as AI draft. It never changes text that a person wrote or checked:
+          then it adds a question.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {running ? (
+            <span>Checking features…</span>
+          ) : (
+            <>
+              <label className="inline-flex items-center gap-1 text-ink-3">
+                Model
+                <select value={model ?? s.defaults.model} onChange={(e) => setModel(e.target.value)} className="rounded border border-line bg-bg px-1 py-0.5">
+                  <option value="sonnet">Sonnet (uses less of the plan)</option>
+                  <option value="opus">Opus (more detail)</option>
+                </select>
+              </label>
+              <button
+                onClick={start}
+                disabled={!canStart}
+                className="rounded-md border border-line px-2 py-0.5 hover:bg-surface-2 disabled:opacity-50"
+                title={canStart ? `At most ${usd(s.defaults.budgetUsd)} for each feature` : 'The last sync has no features to review'}
+              >
+                Check the features to review with AI
+              </button>
+            </>
+          )}
+        </div>
+        {(error ?? s.error) && <div className="mt-1" style={{ color: 'var(--bad)' }}>{error ?? s.error}</div>}
+        <ul className="mt-2 space-y-1.5">
+          {s.rows.map((u) => {
+            const [text, color] = AI_STATUS[u.status] ?? [u.status, 'var(--text-2)'];
+            return (
+              <li key={u.id}>
+                <div>
+                  <a href={href({ project, tab: 'features', sel: `f:${u.featureId}` })} className="font-medium hover:underline">
+                    F-{u.featureId}
+                  </a>{' '}
+                  <span style={{ color }}>{text}</span>
+                  <span className="text-ink-3">
+                    {' '}
+                    · {u.model} · {usd(u.costUsd)}
+                    {u.durationMs !== null && ` · ${Math.round(u.durationMs / 1000)} s`} · {when(u.startedAt)} · <code>{short(u.fromCommit)}</code> → <code>{short(u.toCommit)}</code>
+                  </span>
+                </div>
+                {u.summary && <div className="text-ink-2">{u.summary}</div>}
+                {u.error && <div style={{ color: 'var(--bad)' }}>{u.error}</div>}
+                {u.applyReport && u.applyReport.length > 0 && (
+                  <details>
+                    <summary className="cursor-pointer text-ink-3">What was saved and kept ({u.applyReport.length})</summary>
+                    <ul className="list-disc pl-5 text-ink-2">
+                      {u.applyReport.map((x, i) => (
+                        <li key={i}>{x}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </details>
+  );
+}
+
 function Report({ project, last }: { project: string; last: NonNullable<SyncState['last']> }) {
   const r = last.report;
   const [moved, setMoved] = useState<Record<string, string>>({});
@@ -269,6 +409,7 @@ function Report({ project, last }: { project: string; last: NonNullable<SyncStat
               ))}
             </ul>
           </Section>
+          <AiUpdates project={project} canStart={last.status !== 'running' && r.review.length > 0} />
           <Section title="Likely renamed tests" count={r.renames.length}>
             <p className="mb-1 text-ink-3">A new title or file gives a test a new ID. Its links stay on the old ID. Move them to the new test if it is the same test.</p>
             <ul className="space-y-1.5">

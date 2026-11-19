@@ -426,6 +426,37 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX syncs_project ON syncs(project_id, id);
   `,
+  // 15: AI updates: one row for each feature that headless Claude checked after a code change
+  //     (server/ai-update.ts). It keeps the answer, the cost, and what the save kept or changed.
+  `
+  CREATE TABLE ai_updates (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    feature_id INTEGER NOT NULL,      -- no foreign key: the row stays when the feature is deleted
+    sync_id INTEGER,                  -- the sync whose change report started it, or NULL (command line)
+    from_commit TEXT NOT NULL,
+    to_commit TEXT NOT NULL,
+    model TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,             -- running | no-change | applied | proposed | failed
+    cost_usd REAL,
+    duration_ms INTEGER,
+    summary TEXT NOT NULL DEFAULT '',
+    proposal TEXT,                    -- JSON answer of the model
+    apply_report TEXT,                -- JSON lines of "map apply": what it saved and what it kept
+    error TEXT
+  );
+  CREATE INDEX ai_updates_project ON ai_updates(project_id, id);
+  `,
+  // 16: who runs an AI update, so that each process (server or command line) sees a running update,
+  //     and a later process can mark an update as stopped and end its claude run.
+  //     New status "waiting": a feature that waits for its turn in a running update.
+  `
+  ALTER TABLE ai_updates ADD COLUMN owner_pid INTEGER;   -- the process that runs the update
+  ALTER TABLE ai_updates ADD COLUMN claude_pid INTEGER;  -- the claude run of this feature, while it runs
+  UPDATE ai_updates SET status = 'failed', error = 'The update stopped before the end' WHERE status = 'running';
+  `,
 ];
 
 function open(): DatabaseSync {

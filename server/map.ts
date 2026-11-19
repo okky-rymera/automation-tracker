@@ -11,7 +11,7 @@
  *   npm run -s map -- feature  <project> <feature id> [--all]
  *   npm run -s map -- code     <project> <repo file>
  *   npm run -s map -- test-code <project> playwright|cypress <test file ref>
- *   npm run -s map -- apply    <project> <payload.json>
+ *   npm run -s map -- apply    <project> <payload.json>   (unit kind "update": an AI update, see server/ai-update.ts)
  *   npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  (--files is needed for code)
  *   npm run -s map -- reset    <project> <kind> <ref>
  *   npm run -s map -- move-scope <project> <scope id> <feature id>   (a person's edit: see edits.moveScope)
@@ -452,7 +452,8 @@ interface ShotIn {
   scopes?: (string | number)[];
 }
 interface Payload {
-  unit: { kind: Kind; ref: string; files?: string[]; note?: string };
+  /** kind "update": an AI update after a code change (server/ai-update.ts). It is not a unit of the mapping order. */
+  unit: { kind: Kind | 'update'; ref: string; files?: string[]; note?: string };
   features: FeatureIn[];
 }
 
@@ -472,14 +473,17 @@ function apply(p: ProjectConfig, file: string | undefined) {
     fail(`Cannot read ${file}: ${(e as Error).message}`);
   }
   const unit = body.unit ?? ({} as Payload['unit']);
-  const kind = kindOf(unit.kind);
+  // An update is not in KINDS, so next, skip, reset and status do not see it.
+  const update = unit.kind === 'update';
+  const kind = update ? 'update' : kindOf(unit.kind);
   const ref = str(unit.ref, 500);
   if (!ref) fail('unit.ref is empty');
   if (!Array.isArray(body.features) || !body.features.length) fail('features is empty. Use the skip command for a unit with no feature.');
 
   // Files the unit read: the test file, or the code files of the area.
   let files = (unit.files ?? []).map((f) => str(f, 500)).filter(Boolean);
-  if (kind !== 'code') {
+  if (kind === 'update') files = [];
+  else if (kind !== 'code') {
     if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND framework = ? AND file = ? AND removed_at IS NULL').get(p.id, kind, ref))
       fail(`No ${kind} file "${ref}" in the last scan. Use the ref that "next" gave.`);
     files = [...new Set([testRepoPath(p, kind, ref), ...files])];
@@ -520,7 +524,7 @@ function apply(p: ProjectConfig, file: string | undefined) {
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
         for (const x of list<ShotIn>(inF.screenshots, 'screenshots')) writeScreenshot(p, fid, x, scopeIds, report);
       }
-      db.prepare(
+      if (!update) db.prepare(
         `INSERT INTO processed_units (project_id, kind, ref, status, files, hash, features, note, processed_at)
          VALUES (?, ?, ?, 'done', ?, ?, ?, ?, ?)
          ON CONFLICT (project_id, kind, ref) DO UPDATE SET status = 'done', files = excluded.files, hash = excluded.hash,

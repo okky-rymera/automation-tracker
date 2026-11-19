@@ -71,7 +71,7 @@ const SETPRIV = (() => {
 })();
 
 /** A command that the running sync started. Cancel stops its whole process group. */
-interface Job {
+export interface Job {
   syncId: number;
   child: ReturnType<typeof spawn> | null;
   cancelled: boolean;
@@ -95,6 +95,8 @@ export interface RunOptions {
   /** Each output line. The sync log gets them too, unless quiet. */
   onLine?: (line: string) => void;
   quiet?: boolean;
+  /** Text for the command's standard input. Without it, the input is empty. */
+  input?: string;
 }
 
 /**
@@ -105,8 +107,14 @@ export function run(job: Job, cmd: string, args: string[], o: RunOptions): Promi
   return new Promise((resolve, reject) => {
     if (job.cancelled) return reject(new SyncError('Cancelled'));
     const [c, a] = SETPRIV ? [SETPRIV, ['--no-new-privs', '--', cmd, ...args]] : [cmd, args];
-    const child = spawn(c, a, { cwd: o.cwd, env: o.env ?? childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const child = spawn(c, a, { cwd: o.cwd, env: o.env ?? childEnv(), stdio: [o.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], detached: true });
     job.child = child;
+    if (o.input !== undefined) {
+      // A command that stops before it reads all its input gives EPIPE. Without a handler, that
+      // error would stop the whole server. The exit code and output still show what went wrong.
+      child.stdin!.on('error', () => {});
+      child.stdin!.end(o.input);
+    }
     let out = '';
     let partial = '';
     const take = (buf: Buffer) => {
@@ -195,6 +203,15 @@ const toRow = (r: any): SyncRow => ({
 });
 
 /** The last sync of a project, and the live test progress while tests run. */
+/** True when a process (server or command line) runs a sync of the project now. */
+export function syncRunning(projectId: string): boolean {
+  markInterrupted(projectId);
+  return !!db.prepare("SELECT 1 FROM syncs WHERE project_id = ? AND status = 'running'").get(projectId);
+}
+
+/** True when the process is alive. For the AI update rows too (server/ai-update.ts). */
+export const processAlive = (pid: number | null) => alive(pid);
+
 export function syncState(projectId: string) {
   markInterrupted(projectId);
   const p = getProject(projectId)!;
@@ -240,6 +257,10 @@ export function startSync(projectId: string, mode: TestMode = 'auto', onLog?: (l
   markInterrupted(projectId);
   const busy = db.prepare("SELECT id FROM syncs WHERE project_id = ? AND status = 'running'").get(projectId) as any;
   if (busy) throw new SyncError(`A sync of ${projectId} is running now (sync ${busy.id})`);
+  // An AI update reads the copy: the sync must not change it in the middle. Any process can run
+  // one (server or command line), so the check reads the database, not a list in memory.
+  const ai = db.prepare("SELECT owner_pid FROM ai_updates WHERE project_id = ? AND status IN ('running', 'waiting')").all(projectId) as any[];
+  if (ai.some((r) => alive(r.owner_pid))) throw new SyncError('An AI update runs now. Sync when it ends.');
   const syncId = Number(
     db.prepare("INSERT INTO syncs (project_id, started_at, status, step, owner_pid) VALUES (?, ?, 'running', 'check', ?)").run(projectId, now(), process.pid).lastInsertRowid,
   );

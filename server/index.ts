@@ -11,6 +11,7 @@ import { availableViews, loadCoverage, resolveView, runFreshness } from './cover
 import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
+import { aiUpdateState, AiUpdateError, startAiUpdate } from './ai-update.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
@@ -211,6 +212,19 @@ app.post('/api/projects/:id/sync', syncEdit((req) => {
   return { syncId: startSync(P(req), mode).syncId };
 }));
 app.post('/api/projects/:id/sync/cancel', syncEdit((req) => cancelSync(P(req))));
+// ---- AI update after a sync (server/ai-update.ts) ----
+app.get('/api/projects/:id/ai-updates', (req, res) => res.json(aiUpdateState(P(req))));
+app.post('/api/projects/:id/ai-update', (req, res) => {
+  try {
+    const model = ['sonnet', 'opus', 'haiku'].includes(req.body?.model) ? req.body.model : undefined;
+    const budget = Number(req.body?.budgetUsd);
+    res.json(startAiUpdate(proj(req), { model, budgetUsd: budget > 0 && budget <= 10 ? budget : undefined }));
+  } catch (e) {
+    if (e instanceof AiUpdateError) return res.status(409).json({ error: e.message });
+    console.error(e);
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
 app.post('/api/projects/:id/rescan', edit((req) => syncProject(proj(req), true)));
 app.post('/api/projects/:id/groups', edit((req) => edits.addGroup(P(req), req.body)));
 app.patch('/api/projects/:id/groups/:gid', edit((req) => edits.updateGroup(P(req), req.params.gid, req.body)));

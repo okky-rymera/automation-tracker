@@ -9,12 +9,15 @@
  *   npm run project -- changes <id> <old commit> <new commit> [--json]
  *   npm run project -- set-sync <id> [--branch <branch>] [--site <local site URL>] [--off]
  *   npm run project -- sync <id> [--tests auto|always|never]
+ *   npm run project -- ai-update <id> [--from <commit> --to <commit>] [--feature 1,2] [--model opus] [--budget 1] [--bare] [--no-apply]
+ *     (no --from/--to: the commits of the last sync that saved a change report)
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { db } from './db.ts';
 import { changeReport, reportText } from './changes.ts';
 import { startSync, type TestMode } from './sync.ts';
+import { aiUpdate, DEFAULTS } from './ai-update.ts';
 import { LOCAL_SITE } from './test-run.ts';
 import { addCoverageRun, FRAMEWORKS, importProjectsJson, loadProjects, ROOT, RUN_COLUMN, writeCoverageConfig, type Framework } from './projects.ts';
 
@@ -108,6 +111,29 @@ if (cmd === 'add') {
   if (r.report) console.log(reportText(r.report));
   console.log(`Sync ${syncId}: ${r.status}${r.error ? ' - ' + r.error : ''}`);
   if (r.status !== 'done') process.exitCode = 1;
+} else if (cmd === 'ai-update') {
+  // Headless Claude checks the features that a change marks for review (server/ai-update.ts).
+  const from = opt('from');
+  const to = opt('to');
+  const features = (opt('feature') ?? '').split(',').map((x) => Number(x.replace(/^F-/i, ''))).filter(Boolean);
+  const model = opt('model') ?? DEFAULTS.model;
+  const budget = Number(opt('budget') ?? DEFAULTS.budgetUsd);
+  const bare = args.includes('--bare');
+  const noApply = args.includes('--no-apply');
+  const [id] = args.filter((a) => !a.startsWith('--'));
+  const p = loadProjects().find((x) => x.id === id);
+  if (!p || !(budget > 0) || !!from !== !!to) throw new Error('Usage: ai-update <id> [--from <commit> --to <commit>] [--feature 1,2] [--model opus] [--budget 1] [--bare] [--no-apply]');
+  let range = from && to ? { from, to, syncId: null as number | null } : null;
+  if (!range) {
+    const s = db.prepare('SELECT id, from_commit, to_commit FROM syncs WHERE project_id = ? AND report IS NOT NULL ORDER BY id DESC LIMIT 1').get(id) as any;
+    if (!s) throw new Error(`No sync of ${id} with a change report. Give --from and --to.`);
+    range = { from: s.from_commit, to: s.to_commit, syncId: s.id };
+  }
+  const rows = await aiUpdate(p, { ...range, features, model, budgetUsd: budget, auth: bare ? 'bare' : 'login', apply: !noApply, onLine: (l) => console.log(l) });
+  const total = rows.reduce((n, r) => n + (r.costUsd ?? 0), 0);
+  console.log(`${rows.length} features checked, $${total.toFixed(2)} in total.`);
+  for (const r of rows) for (const line of r.applyReport ?? []) console.log(`  F-${r.featureId}: ${line}`);
+  if (rows.some((r) => r.status === 'failed')) process.exitCode = 1;
 } else {
-  console.log('Commands: add, set-run, set-path, coverage-config, list, changes, set-sync, sync. See server/cli.ts.');
+  console.log('Commands: add, set-run, set-path, coverage-config, list, changes, set-sync, sync, ai-update. See server/cli.ts.');
 }

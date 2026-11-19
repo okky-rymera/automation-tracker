@@ -1,6 +1,6 @@
 # Plan: keep the tracker in sync with new plugin code
 
-Status on 19 Nov 2026: the trial, phase 1 and phase 2 are done. The next step is phase 3.
+Status on 19 Nov 2026: the trial and phases 1 to 3 are done. The next step is phase 4.
 
 ## Goal
 
@@ -61,12 +61,26 @@ The tracker must stay correct when the plugin code or the tests change. It must 
 
 ## Phase 3: AI update with headless Claude
 
-1. [ ] For each feature to review, collect: the diff of its code and tests, the changed tests, and the current feature data.
-2. [ ] Run `claude -p` with `--json-schema`, `--max-budget-usd`, and only read tools. It returns proposals. It does not write to the database.
-3. [ ] Save the proposals through `npm run -s map -- apply` with the "AI draft" mark. The current rules stay: the AI does not change text that a person wrote or checked.
-4. [ ] Test a case where the feature must change. Compare Opus and Sonnet on the quality of the answer and the cost.
-5. [ ] Show the cost of each update in the app (`total_cost_usd` in the JSON output).
-6. [ ] Decide: `--bare` with an API key (same result on each machine, no personal settings), or the user login (personal hooks and `CLAUDE.md` load).
+Built on 19 Nov 2026 in `server/ai-update.ts`. Command: `npm run project -- ai-update <id> [--from <commit> --to <commit>] [--feature 1,2] [--model sonnet|opus] [--budget 1] [--bare] [--no-apply]`. Without `--from` and `--to`, it uses the commits of the last sync with a change report. Each check is a row in the table `ai_updates`.
+
+1. [x] For each feature to review, collect: the feature data (`map feature --all`), the reasons from the change report, the diff of its code and test files (at most 80 KB), the changed PHP functions, code that is gone, likely renamed tests, and new tests that no feature links.
+2. [x] Run `claude -p` with `--json-schema`, `--max-budget-usd`, `--tools Read,Grep,Glob`, `--strict-mcp-config` (no MCP servers) and `--disable-slash-commands`. The prompt goes on standard input. It runs under `setpriv --no-new-privs` with the no-sudo stubs. Claude reads the code at the new commit: the copy, or a temporary `git worktree` when the copy is at another commit. It does not write to the database.
+3. [x] Save the answer through `npm run -s map -- apply` with unit kind `update` (not in the mapping order, so `next`, `skip` and `status` do not see it). The runner sets the feature ID, and drops item, scope and test IDs that do not exist, so one wrong ID does not stop the save. An answer with no change does not call apply.
+4. [x] Test a case where the feature must change. Results on a copy of the database, feature F-1:
+   - Case A, commit `d1c24928` (adds a "Wholesale Sale price" column, later reverted). Sonnet: $0.08, 7 s, correct (new column only with Premium, the hide setting removes both columns, it removed the open question about sale prices). Opus: $0.22, 23 s, correct and more detail (one line for each variation, column order, the new column uses the label "Wholesale Price:"), 5 new scopes.
+   - Case B, commit `f40bf5b9` (`strpos` to `str_contains`, no change in behavior). Sonnet: $0.05, no change. Opus: $0.11, no change. Both correct.
+   - Spend limit: with `--budget 0.01`, the run stopped with `error_max_budget_usd` and cost $0.02. The limit is checked after each step, so a run can go a little over it.
+   - Not tested yet: links to new tests, and changes to an existing scope. Neither commit had tests. Test them on a sync that adds or changes tests.
+5. [x] Show the cost of each update in the app: sync report > "AI updates", with the total, and a button to check the features to review of the last sync (Sonnet or Opus). A sync cannot start while an AI update runs. Tested once through the app route on a database copy ($0.02).
+6. [x] Decided on 19 Nov 2026: the user login (claude.ai subscription). The run does not get `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, so it never bills an API key. The cost in the app is a list-price estimate of the plan use, not a bill. `--bare` stays in the code, but it was not tested.
+7. [x] Decided on 19 Nov 2026: Opus is the default model. The limit is $1 (list price) for each feature. Sonnet stays a choice in the app and on the command line.
+8. [x] Fixes after a code review on 19 Nov 2026:
+   - Each AI update row has its process (`owner_pid`) and its claude run (`claude_pid`). Each process sees a running update in the database, so a sync from the app or the command line waits. When the process is gone (a server restart), the next look at the state marks its rows as failed, stops the claude run, and removes the temporary checkouts.
+   - The prompt input cannot stop the server when claude exits early.
+   - A link to an unknown scope, or a change to an item that the same answer removes, is dropped with a note. The rest of the answer is saved.
+   - The cost stays saved when a step after the claude run fails.
+   - The app button uses the saved report of the sync (its commits and features), and shows an error when the update cannot start.
+   - The feature read, the diff and the save do not block the server.
 
 ## Phase 4: Scale to 40+ plugins
 
@@ -86,7 +100,7 @@ The tracker must stay correct when the plugin code or the tests change. It must 
 
 - How often to sync: each night or each week.
 - Where the tests run (phase 4).
-- Which model the AI update uses, and the spend limit for each feature.
+- (Decided: Opus, $1 for each feature, with the claude.ai login. See phase 3.)
 - Whether to keep the test selection script, or to keep only the change report.
 
 ## Safety
