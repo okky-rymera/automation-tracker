@@ -35,9 +35,10 @@ One project is one plugin. The first start copies `projects.json` into the datab
 The "Features" tab holds the feature list: groups and features. A feature has:
 
 - a title, a description, a group and a priority
-- user roles and needs: short names that features share. Type to see the names that other features use. A name that no feature uses is gone.
-- lists: where it is, rules, out of scope, open questions. Each list item is one sentence that you can change or remove.
-- a scope: the separate things the feature does, like the scenarios of a test
+- user roles: short names that features share. Type to see the names that other features use. A name that no feature uses is gone.
+- requirements: what must be true before you check the feature, for example a setting, some data or the user who is logged in. They apply to every scope.
+- lists: where it is, notes, out of scope, open questions. Notes hold only what no test can check, for example why the feature works as it does. A rule that a test can check is a scope. Each list item is one sentence that you can change or remove.
+- a scope: the separate things the feature does, like the scenarios of a test. A scope can have its own requirements too, for example "The hide setting is checked".
 - screenshots: images that show how the feature looks
 
 Links:

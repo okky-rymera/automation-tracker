@@ -1,6 +1,6 @@
 ---
 name: map-features
-description: Builds the feature list in the automation tracker one small unit at a time. It takes one Playwright spec file, one Cypress .feature file, or one plugin code/settings area, studies it (reads the code, runs the test, or tries the feature with playwright-cli), then writes the feature, description, scope (its scenarios), rules, out of scope, roles and other fields into the tracker database, links each existing test to the scopes it checks, puts the plugin code (files and functions) that does the feature in it, so the app can show code coverage by feature, and adds screenshots that show how the feature looks. It works in this order: Playwright files, then Cypress files, then the code that is left. It records which files and code areas are done, so the next run continues where the last one stopped. Use this skill whenever the user wants to fill, grow or check the feature list or feature matrix, map tests to features, find which feature a test file or code file belongs to, or says things like "do the next Cypress file", "map the next feature", "continue the feature mapping", "what features does this spec cover", or "process the settings page" — even if they do not say "skill" or "feature list".
+description: Builds the feature list in the automation tracker one small unit at a time. It takes one Playwright spec file, one Cypress .feature file, or one plugin code/settings area, studies it (reads the code, runs the test, or tries the feature with playwright-cli), then writes the feature, description, scope (its scenarios), requirements, notes, out of scope, roles and other fields into the tracker database, links each existing test to the scopes it checks, puts the plugin code (files and functions) that does the feature in it, so the app can show code coverage by feature, and adds screenshots that show how the feature looks. It works in this order: Playwright files, then Cypress files, then the code that is left. It records which files and code areas are done, so the next run continues where the last one stopped. Use this skill whenever the user wants to fill, grow or check the feature list or feature matrix, map tests to features, find which feature a test file or code file belongs to, or says things like "do the next Cypress file", "map the next feature", "continue the feature mapping", "what features does this spec cover", or "process the settings page" — even if they do not say "skill" or "feature list".
 ---
 
 # Map features, one unit at a time
@@ -46,7 +46,7 @@ calls). The tool keeps the rules that protect people's work:
 
 - It does not change or remove text that a person wrote or checked. It can fill empty fields. Each field
   has its own AI mark, so filling an empty field does not give the right to change the other fields.
-- Roles, needs, list items, scopes, the scopes of a link, the code of a feature and screenshots are only added.
+- Roles, list items (requirements too), scopes, the scopes of a link, the code of a feature and screenshots are only added.
 - It does not add again code that a person removed from a feature.
 - It does not add again a screenshot that a person deleted (it matches by caption).
 - It does not add again a link that a person removed, and it does not change a link that a person made.
@@ -144,8 +144,10 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   checked: then name the problem in `questions` and in your report.
 - Reuse a scope when it means the same thing: give its `id` (`S-4`). A new
   title makes a new scope, so a reworded copy makes a near copy.
-- Use the role and need names that `features` lists in `labelsInUse`, so one
+- Use the role names that `features` lists in `labelsInUse`, so one
   role does not get two names ("Wholesale customer", not "Wholesale buyer").
+- Put a requirement that every scope shares in the feature `requirements`.
+  Put a requirement of one scope in that scope's `requirements`.
 
 Choose the feature scope by behavior, not by test file. If the code you read
 does the same thing for several screens or REST routes, look in the sibling
@@ -167,12 +169,12 @@ What goes in each field, in short (details and examples in `references/payload.m
 | description | 1–3 sentences: what it does and why a store owner uses it |
 | priority | high / medium / low: how bad a failure is for stores. Leave empty if unsure |
 | roles | Labels: who uses or sees it ("Admin", "Wholesale customer") |
-| needs | Labels: settings, plugins or features it needs ("WooCommerce") |
+| requirements | List: what must be true for every scope: plugins, settings, data, the logged-in user |
 | where | List: admin screens, settings tabs, shop pages, REST routes |
-| rules | List: the rules it must follow, one item each |
+| notes | List: only what no test can check: reasons, code facts, limits. A testable rule is a scope |
 | outOfScope | List: what it does not do; name the feature that does it if there is one |
 | questions | List: what you could not confirm |
-| scopes | The separate things it does, like test scenarios, each with a visible result |
+| scopes | The separate things it does, like test scenarios, each with a visible result, and its own requirements |
 | links | Each test, with the scopes it checks |
 | code | The plugin files or functions that do the feature |
 | screenshots | Images of the feature: a PNG file, a caption, and the scopes it shows |
@@ -279,11 +281,24 @@ screens, REST API, Import and export, Onboarding, Integrations.
 Write all feature text in plain, simple English, as the user's CLAUDE.md asks:
 short sentences, active voice, common words, no internal code names. A person
 who does not read code must understand each feature. Put code names (hooks,
-option keys, class names) only in `where` or `needs`, and only when
+option keys, class names) only in `where` or `requirements`, and only when
 they help a tester find the thing.
 
 Write about behavior, not about tests: do not name spec files or test IDs in
 feature text. The links show which tests check what.
 
 The actor of a scope is the person or system that acts: admin, shop
-manager, wholesale customer, guest, or for an API "an API client".
+manager, wholesale customer, guest, or for an API "an API client". When the
+feature requirements name the user ("Logged in as admin or shop manager"),
+the scope titles do not repeat it.
+
+**Scope titles must not contradict each other.** Read the titles one after the
+other, under the feature title. Each title says what is different about its
+scope. When the difference is a requirement, name it in a few plain words
+("The hide setting removes the column"), and put the exact setting in the
+scope requirements.
+
+**Settings that turn something off** ("Hide …", "Disable …", "Do not …"): do
+not write "the setting is on" or "off" anywhere. Quote the label and say
+"checked" or "unchecked", or say what the setting does. See
+`references/payload.md` > scopes.

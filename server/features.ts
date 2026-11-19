@@ -5,10 +5,14 @@
  *
  * A feature has:
  *  - title, description, priority, group
- *  - labels: short values that repeat across features (roles, needs).
+ *  - labels: short values that repeat across features (roles).
  *    A label exists while at least one feature uses it.
- *  - lists of sentences: rules, out of scope, where, open questions
- *  - scopes: the separate things the feature does, like the scenarios of a test
+ *  - lists of sentences: requirements, notes, out of scope, where, open questions.
+ *    Notes: only what no test can check (reasons, code facts, limits). A testable rule is a scope.
+ *    Requirements: what must be true before a tester checks it (settings, data, the user).
+ *  - scopes: the separate things the feature does, like the scenarios of a test.
+ *    A scope has its own requirements too (feature_items with scope_id). The feature's
+ *    requirements apply to every scope.
  *  - links: test -> feature, and the scopes of the feature that the test checks
  *  - screenshots: images of the feature, each tagged with the scopes it shows. A person or
  *    the AI skill adds them. A deleted screenshot stays as a row with removed = 1 and no image,
@@ -27,9 +31,11 @@ import { db, json, tx } from './db.ts';
 export const PRIORITIES = ['', 'high', 'medium', 'low'];
 
 /** List fields of a feature: API name -> feature_items.kind. */
-export const ITEM_KINDS = { rules: 'rule', outOfScope: 'out_of_scope', where: 'where', questions: 'question' } as const;
+export const ITEM_KINDS = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', questions: 'question' } as const;
+/** The only list kind that a scope has. */
+export const SCOPE_ITEM_KIND = ITEM_KINDS.requirements;
 /** Label fields of a feature: API name -> feature_labels.kind. */
-export const LABEL_KINDS = { roles: 'role', needs: 'needs' } as const;
+export const LABEL_KINDS = { roles: 'role' } as const;
 const ITEM_KIND_VALUES: string[] = Object.values(ITEM_KINDS);
 /** Feature fields that can carry an AI mark. */
 export const FEATURE_AI_FIELDS = ['title', 'description', 'priority', 'group'] as const;
@@ -69,7 +75,7 @@ export function featureData(projectId: string) {
     .all(projectId) as any[];
   const items = db
     .prepare(
-      'SELECT i.id, i.feature_id, i.kind, i.text, i.sort, i.ai_draft AS aiDraft FROM feature_items i JOIN features f ON f.id = i.feature_id WHERE f.project_id = ? ORDER BY i.sort, i.id',
+      'SELECT i.id, i.feature_id, i.scope_id, i.kind, i.text, i.sort, i.ai_draft AS aiDraft FROM feature_items i JOIN features f ON f.id = i.feature_id WHERE f.project_id = ? ORDER BY i.sort, i.id',
     )
     .all(projectId) as any[];
   const labels = db
@@ -118,11 +124,12 @@ export function featureData(projectId: string) {
     const myLabels = labelsBy.get(f.id) ?? [];
     for (const [key, kind] of Object.entries(LABEL_KINDS)) f[key] = myLabels.filter((l) => l.kind === kind).map((l) => l.value);
     const myItems = itemsBy.get(f.id) ?? [];
-    for (const [key, kind] of Object.entries(ITEM_KINDS))
-      f[key] = myItems.filter((i) => i.kind === kind).map((i) => ({ id: i.id, text: i.text, aiDraft: !!i.aiDraft }));
+    const toItem = (i: any) => ({ id: i.id, text: i.text, aiDraft: !!i.aiDraft });
+    for (const [key, kind] of Object.entries(ITEM_KINDS)) f[key] = myItems.filter((i) => i.kind === kind && i.scope_id === null).map(toItem);
     f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, ...s }) => {
       const aiFields = json(ai_fields) as string[];
-      return { ...s, aiFields, aiDraft: aiFields.length > 0 };
+      const requirements = myItems.filter((i) => i.scope_id === s.id).map(toItem);
+      return { ...s, requirements, aiFields, aiDraft: aiFields.length > 0 };
     });
     f.links = (linksBy.get(f.id) ?? []).map(({ feature_id, checked, ...l }) => ({
       ...l,
@@ -217,6 +224,24 @@ function ownItem(projectId: string, id: unknown): any {
     .get(Number(id), projectId);
   if (!r) throw new EditError('Item not found in this project');
   return r;
+}
+/**
+ * A feature requirement applies to every scope, so a scope does not repeat it, and the
+ * feature does not take one that a scope has. Returns why the text is refused, or null.
+ * skipId: the item that changes its text, so it does not clash with itself.
+ */
+export function requirementClash(fid: number, scopeId: number | null, kind: string, t: string, skipId: number | null = null): string | null {
+  if (kind !== SCOPE_ITEM_KIND) return null;
+  const other = db
+    .prepare(
+      `SELECT scope_id FROM feature_items WHERE feature_id = ? AND kind = ? AND lower(text) = lower(?) AND id IS NOT ?
+       AND (CASE WHEN ? IS NULL THEN scope_id IS NOT NULL ELSE scope_id IS NULL END) LIMIT 1`,
+    )
+    .get(fid, kind, t, skipId, scopeId) as any;
+  if (!other) return null;
+  return scopeId === null
+    ? `Scope S-${other.scope_id} has this requirement already. Remove it there first: a feature requirement applies to every scope.`
+    : 'The feature has this requirement already, and it applies to every scope.';
 }
 function ownScreenshot(projectId: string, id: unknown): { id: number; featureId: number } {
   const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), projectId) as any;
@@ -363,6 +388,16 @@ export const edits = {
       db.prepare('INSERT OR IGNORE INTO feature_labels (feature_id, kind, value) SELECT ?, kind, value FROM feature_labels WHERE feature_id = ?').run(into, from);
       const itemBase = nextSort('feature_items', 'feature_id = ?', into);
       db.prepare('UPDATE feature_items SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, itemBase, from);
+      // The same text two times in one list keeps the first item. It keeps a person's check from the other.
+      const sameItem = `SELECT 1 FROM feature_items o WHERE o.feature_id = feature_items.feature_id AND o.kind = feature_items.kind
+        AND o.scope_id IS feature_items.scope_id AND lower(o.text) = lower(feature_items.text)`;
+      db.prepare(`UPDATE feature_items SET ai_draft = 0 WHERE feature_id = ? AND ai_draft = 1 AND EXISTS (${sameItem} AND o.ai_draft = 0)`).run(into);
+      db.prepare(`DELETE FROM feature_items WHERE feature_id = ? AND EXISTS (${sameItem} AND o.id < feature_items.id)`).run(into);
+      // A scope requirement that is also a feature requirement goes: the feature one applies to every scope.
+      db.prepare(
+        `DELETE FROM feature_items WHERE feature_id = ? AND kind = ? AND scope_id IS NOT NULL AND EXISTS (SELECT 1 FROM feature_items o
+           WHERE o.feature_id = feature_items.feature_id AND o.kind = feature_items.kind AND o.scope_id IS NULL AND lower(o.text) = lower(feature_items.text))`,
+      ).run(into, SCOPE_ITEM_KIND);
       const scopeBase = nextSort('scopes', 'feature_id = ?', into);
       db.prepare('UPDATE scopes SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, scopeBase, from);
       // A test linked to both: an active link wins over a link that a person removed.
@@ -426,7 +461,7 @@ export const edits = {
     });
   },
 
-  // Labels (roles, needs). Removing a label from every feature removes it from the project.
+  // Labels (roles). Removing a label from every feature removes it from the project.
   addLabel(p: string, id: string, b: any) {
     const f = own('features', p, id);
     const kind = labelKind(b.kind);
@@ -437,20 +472,29 @@ export const edits = {
     db.prepare('DELETE FROM feature_labels WHERE feature_id = ? AND kind = ? AND value = ?').run(f, labelKind(b.kind), need(b.value, 'Label'));
   },
 
-  // List items (rules, out of scope, where, open questions).
+  // List items (requirements, notes, out of scope, where, open questions).
+  // Body { kind, text, scopeId? }: with scopeId, a requirement of that scope.
   addItem(p: string, id: string, b: any) {
     const f = own('features', p, id);
     const kind = itemKind(b.kind);
+    const scope = b.scopeId ? scopeOf(p, f, b.scopeId) : null;
+    if (scope !== null && kind !== SCOPE_ITEM_KIND) throw new EditError('A scope has only requirements');
     const t = need(b.text, 'Text');
     // The same text two times (a double click, Enter then blur) keeps one item.
-    const same = db.prepare('SELECT id FROM feature_items WHERE feature_id = ? AND kind = ? AND lower(text) = lower(?)').get(f, kind, t) as any;
+    const same = db.prepare('SELECT id FROM feature_items WHERE feature_id = ? AND scope_id IS ? AND kind = ? AND lower(text) = lower(?)').get(f, scope, kind, t) as any;
     if (same) return { id: same.id as number };
-    const r = db.prepare('INSERT INTO feature_items (feature_id, kind, text, sort) VALUES (?, ?, ?, ?)').run(f, kind, t, nextSort('feature_items', 'feature_id = ?', f));
+    const clash = requirementClash(f, scope, kind, t);
+    if (clash) throw new EditError(clash);
+    const r = db
+      .prepare('INSERT INTO feature_items (feature_id, scope_id, kind, text, sort) VALUES (?, ?, ?, ?, ?)')
+      .run(f, scope, kind, t, nextSort('feature_items', 'feature_id = ?', f));
     return { id: Number(r.lastInsertRowid) };
   },
   updateItem(p: string, id: string, b: any) {
     const i = ownItem(p, id);
     const t = 'text' in b ? need(b.text, 'Text') : null;
+    const clash = t === null ? null : requirementClash(i.feature_id, i.scope_id, i.kind, t, i.id);
+    if (clash) throw new EditError(clash);
     tx(() => {
       // A person changed the text: it is not an AI draft now. A move only (sort) keeps the mark.
       if (t !== null) db.prepare('UPDATE feature_items SET text = ?, ai_draft = 0 WHERE id = ?').run(t, i.id);
@@ -477,8 +521,9 @@ export const edits = {
       if (title !== null) db.prepare('UPDATE scopes SET title = ? WHERE id = ?').run(title, s);
       if ('description' in b) db.prepare('UPDATE scopes SET description = ? WHERE id = ?').run(text(b.description), s);
       if ('sort' in b) db.prepare('UPDATE scopes SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s);
-      // b.check = true: the person checked the scope without a change.
+      // b.check = true: the person checked the scope without a change. Its requirements are checked too.
       clearAi('scopes', s, b.check ? [...SCOPE_AI_FIELDS] : (['title', 'description'] as const).filter((k) => k in b));
+      if (b.check) db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE scope_id = ?').run(s);
     });
   },
   deleteScope(p: string, id: string) {

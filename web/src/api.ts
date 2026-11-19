@@ -83,6 +83,8 @@ export interface Scope {
   id: number;
   title: string;
   description: string;
+  /** What must be true for this scope only, on top of the feature's requirements. */
+  requirements: FeatureItem[];
   sort: number;
   /** Fields the skill wrote that no person checked yet. */
   aiFields: string[];
@@ -103,18 +105,18 @@ export interface Screenshot {
 }
 export const screenshotUrl = (project: string, id: number) => `/api/projects/${project}/screenshots/${id}`;
 
-/** One sentence in a feature list (rules, out of scope, where, open questions). */
+/** One sentence in a feature or scope list (requirements, notes, out of scope, where, open questions). */
 export interface FeatureItem {
   id: number;
   text: string;
   aiDraft: boolean;
 }
 
-export type ItemField = 'rules' | 'outOfScope' | 'where' | 'questions';
-export type LabelField = 'roles' | 'needs';
+export type ItemField = 'requirements' | 'notes' | 'outOfScope' | 'where' | 'questions';
+export type LabelField = 'roles';
 /** API kind names of the list and label fields. */
-export const ITEM_KIND: Record<ItemField, string> = { rules: 'rule', outOfScope: 'out_of_scope', where: 'where', questions: 'question' };
-export const LABEL_KIND: Record<LabelField, string> = { roles: 'role', needs: 'needs' };
+export const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', questions: 'question' };
+export const LABEL_KIND: Record<LabelField, string> = { roles: 'role' };
 
 export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelField, string[]> {
   id: number;

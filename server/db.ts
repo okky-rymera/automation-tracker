@@ -342,6 +342,28 @@ const MIGRATIONS: string[] = [
   ALTER TABLE screenshots ADD COLUMN match_key TEXT;
   CREATE INDEX screenshots_match ON screenshots(feature_id, match_key);
   `,
+
+  // 10: requirements: what must be true before a tester checks the feature (settings, data, the user).
+  //     A feature's requirements apply to all its scopes. A scope has its own requirements too:
+  //     feature_items rows with kind 'requirement' and scope_id set. Other kinds have no scope_id.
+  //     The "needs" labels become feature requirements. A label was one or two words, and a requirement
+  //     is a full sentence, so each item gets the AI mark: a person checks it, and the skill can correct it.
+  `
+  ALTER TABLE feature_items ADD COLUMN scope_id INTEGER REFERENCES scopes(id) ON DELETE CASCADE;
+  CREATE INDEX feature_items_scope ON feature_items(scope_id);
+  INSERT INTO feature_items (feature_id, kind, text, sort, ai_draft)
+    SELECT feature_id, 'requirement', value, -1, 1 FROM feature_labels WHERE kind = 'needs' ORDER BY value COLLATE NOCASE;
+  DELETE FROM feature_labels WHERE kind = 'needs';
+  `,
+
+  // 11: "rules" become "notes". A rule that a test can check belongs in a scope, so the
+  //     app shows it as automated or not. Notes keep only what no test can check: reasons,
+  //     facts about the code, known limits. Old rules keep their text. Each one gets the AI mark, also
+  //     if a person checked it as a rule: a person checks it again as a note, and the skill can move a
+  //     rule that a test can check to a scope and remove the note.
+  `
+  UPDATE feature_items SET kind = 'note', ai_draft = 1 WHERE kind = 'rule';
+  `,
 ];
 
 function open(): DatabaseSync {

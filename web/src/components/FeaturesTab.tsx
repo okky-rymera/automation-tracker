@@ -31,12 +31,12 @@ const FW_LABEL: Record<Framework, string> = {
   cypress: 'Cypress',
 };
 const live = (ls: FeatureLink[], fw: Framework) => ls.filter((l) => l.framework === fw && !l.missing);
-const ITEM_FIELDS: ItemField[] = ['rules', 'outOfScope', 'where', 'questions'];
+const ITEM_FIELDS: ItemField[] = ['requirements', 'notes', 'outOfScope', 'where', 'questions'];
 /** True when the skill wrote something in the feature that no person checked yet. */
 const aiLink = (l: FeatureLink) => l.source === 'ai' && !l.checked;
 const needsReview = (f: Feature) =>
   f.aiDraft ||
-  f.scopes.some((s) => s.aiDraft) ||
+  f.scopes.some((s) => s.aiDraft || s.requirements.some((i) => i.aiDraft)) ||
   ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) ||
   f.links.some(aiLink) ||
   f.code.aiToCheck > 0 ||
@@ -61,7 +61,14 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
     const q = query.toLowerCase();
     return (data?.features ?? []).filter(
       (f) =>
-        !q || [featureCode(f.id), f.title, f.description, ...f.roles, ...f.needs, ...f.scopes.map((s) => s.title)].some((s) => s.toLowerCase().includes(q)),
+        !q || [
+          featureCode(f.id),
+          f.title,
+          f.description,
+          ...f.roles,
+          ...f.requirements.map((i) => i.text),
+          ...f.scopes.flatMap((s) => [s.title, ...s.requirements.map((i) => i.text)]),
+        ].some((s) => s.toLowerCase().includes(q)),
     );
   }, [data, query]);
 
@@ -350,17 +357,21 @@ function LabelInput({
   );
 }
 
-/** A list of sentences: each one can change or go, and a new one can be added. */
-function ItemList({ project, f, field, placeholder }: { project: string; f: Feature; field: ItemField; placeholder: string }) {
+/** One list of sentences: a list of the feature, or (with scope) the requirements of one scope. */
+function ItemList({ project, f, field, scope, placeholder }: { project: string; f: Feature; field: ItemField; scope?: Scope; placeholder: string }) {
   const base = `/api/projects/${project}`;
   const [draft, setDraft] = useState('');
-  const items: FeatureItem[] = f[field];
+  const items: FeatureItem[] = scope ? scope.requirements : f[field];
   const add = () => {
     const text = draft.trim();
     if (!text) return;
     // Clear the box at once, so Enter and then a blur cannot send the same item two times.
     setDraft('');
-    act(() => mutate('POST', `${base}/features/${f.id}/items`, { kind: ITEM_KIND[field], text }).catch((e) => (setDraft(text), Promise.reject(e))));
+    act(() =>
+      mutate('POST', `${base}/features/${f.id}/items`, { kind: ITEM_KIND[field], text, ...(scope ? { scopeId: scope.id } : {}) }).catch(
+        (e) => (setDraft(text), Promise.reject(e)),
+      ),
+    );
   };
 
   return (
@@ -486,7 +497,12 @@ function GroupDetail({ project, g, data, onNewFeature }: { project: string; g: F
 /** Feature fields, in the order the page shows them. */
 const FIELDS: ({ kind: 'label'; key: LabelField; label: string; hint: string } | { kind: 'items'; key: ItemField; label: string; hint: string })[] = [
   { kind: 'label', key: 'roles', label: 'User roles', hint: '+ role' },
-  { kind: 'label', key: 'needs', label: 'Needs', hint: '+ setting, plugin…' },
+  {
+    kind: 'items',
+    key: 'requirements',
+    label: 'Requirements',
+    hint: '+ add what must be true for every scope: a setting, data, the user',
+  },
   {
     kind: 'items',
     key: 'where',
@@ -495,9 +511,9 @@ const FIELDS: ({ kind: 'label'; key: LabelField; label: string; hint: string } |
   },
   {
     kind: 'items',
-    key: 'rules',
-    label: 'Rules',
-    hint: '+ add a rule the feature must follow',
+    key: 'notes',
+    label: 'Notes',
+    hint: '+ add a note that no test can check: a reason, a code fact, a limit',
   },
   {
     kind: 'items',
@@ -734,9 +750,9 @@ function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: S
     <div className="rounded-lg border border-line bg-surface p-3">
       <div className="flex items-start gap-2">
         <span className="mt-0.5 font-mono text-[11px] text-ink-3">{scopeCode(s.id)}</span>
-        {s.aiDraft && (
+        {(s.aiDraft || s.requirements.some((r) => r.aiDraft)) && (
           <button type="button" onClick={() => act(() => mutate('PATCH', url, { check: true }))} className="mt-0.5">
-            <AiBadge title="Written by the AI skill. Click to mark as checked." />
+            <AiBadge title="The AI skill wrote this scope or its requirements. Click to mark all as checked." />
           </button>
         )}
         <div className="min-w-0 flex-1">
@@ -748,13 +764,17 @@ function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: S
             onSave={(description) => mutate('PATCH', url, { description })}
             className="text-xs text-ink-2"
           />
+          <div className="mt-1 text-xs">
+            <span className="text-ink-3">Requirements of this scope</span>
+            <ItemList project={project} f={f} field="requirements" scope={s} placeholder="+ add what must be true for this scope only" />
+          </div>
         </div>
         <Pill tone={tone}>{label}</Pill>
         <button
           type="button"
           aria-label="Delete scope"
-          title="Delete scope (its tests stay linked to the feature)"
-          onClick={() => confirm(`Delete scope “${s.title}”? Its tests stay linked to the feature.`) && act(() => mutate('DELETE', url))}
+          title="Delete scope and its requirements (its tests stay linked to the feature)"
+          onClick={() => confirm(`Delete scope “${s.title}” and its requirements? Its tests stay linked to the feature.`) && act(() => mutate('DELETE', url))}
           className="px-1 text-ink-3 hover:text-bad"
         >
           ×

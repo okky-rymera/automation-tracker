@@ -31,7 +31,7 @@ import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
 import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, ITEM_KINDS, LABEL_KINDS, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort } from './features.ts';
+import { EditError, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -321,8 +321,9 @@ const scopeNames = (linkId: number) =>
   );
 const labelsOf = (fid: number, kind: string) =>
   (db.prepare('SELECT value FROM feature_labels WHERE feature_id = ? AND kind = ? ORDER BY value COLLATE NOCASE').all(fid, kind) as any[]).map((r) => r.value as string);
-const itemsOf = (fid: number, kind: string) =>
-  (db.prepare('SELECT id, text, ai_draft FROM feature_items WHERE feature_id = ? AND kind = ? ORDER BY sort, id').all(fid, kind) as any[]).map((i) => ({
+/** Items of one list. scopeId null: the feature's own list. */
+const itemsOf = (fid: number, kind: string, scopeId: number | null = null) =>
+  (db.prepare('SELECT id, text, ai_draft FROM feature_items WHERE feature_id = ? AND scope_id IS ? AND kind = ? ORDER BY sort, id').all(fid, scopeId, kind) as any[]).map((i) => ({
     id: i.id as number,
     text: i.text as string,
     aiDraft: !!i.ai_draft,
@@ -336,7 +337,7 @@ function features(p: ProjectConfig) {
   );
   out({
     groups: groups.map((g) => g.title),
-    // Use these spellings, so one role or need does not show two times.
+    // Use these spellings, so one role does not show two times.
     labelsInUse: Object.fromEntries(Object.entries(LABEL_KINDS).map(([key, kind]) => [key, labelsInUse(p.id, kind).slice(0, 40).map((l) => l.value)])),
     features: rows.map((f) => ({
       id: f.id,
@@ -391,7 +392,7 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
     ...Object.fromEntries(Object.entries(LABEL_KINDS).map(([key, kind]) => [key, labelsOf(f.id, kind)])),
     ...Object.fromEntries(Object.entries(ITEM_KINDS).map(([key, kind]) => [key, itemsOf(f.id, kind)])),
     scopes: (db.prepare('SELECT id, title, description, ai_fields FROM scopes WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((s) => ({
-      id: `S-${s.id}`, title: s.title, description: s.description, aiFields: json(s.ai_fields),
+      id: `S-${s.id}`, title: s.title, description: s.description, requirements: itemsOf(f.id, SCOPE_ITEM_KIND, s.id), aiFields: json(s.ai_fields),
     })),
     links: links.slice(0, all ? undefined : 25).map((l) => ({
       testId: l.testId, title: l.title, framework: l.framework, source: l.source, removed: !!l.removed, scopes: scopeNames(l.id),
@@ -421,19 +422,28 @@ interface FeatureIn {
   description?: string;
   priority?: string;
   roles?: string[];
-  needs?: string[];
-  rules?: ItemIn[];
+  /** What must be true for every scope: settings, data, the user. */
+  requirements?: ItemIn[];
+  /** Only what no test can check. A testable rule is a scope. */
+  notes?: ItemIn[];
   outOfScope?: ItemIn[];
   where?: ItemIn[];
   questions?: ItemIn[];
-  /** IDs of list items to delete (only AI draft items). */
+  /** IDs of list items to delete (only AI draft items), scope requirements too. */
   removeItems?: number[];
-  scopes?: { id?: number | string; title: string; description?: string }[];
+  scopes?: ScopeIn[];
   links?: LinkIn[];
   /** Plugin code of the feature: a whole file, or functions in it. */
   code?: CodeIn[];
   /** Images of the feature: a local image file, a caption, and the scopes it shows. */
   screenshots?: ShotIn[];
+}
+interface ScopeIn {
+  id?: number | string;
+  title: string;
+  description?: string;
+  /** What must be true for this scope only, on top of the feature's requirements. */
+  requirements?: ItemIn[];
 }
 interface ShotIn {
   file: string;
@@ -479,6 +489,14 @@ function apply(p: ProjectConfig, file: string | undefined) {
     if (!fs.existsSync(full)) fail(`No file ${f} in the plugin repo. Give paths relative to the repo root.`);
   }
 
+  // Old field names, checked before anything is written.
+  for (const inF of body.features) {
+    if ((inF as any)?.needs !== undefined) fail('"needs" is now "requirements": a list of sentences. Nothing was saved.');
+    if ((inF as any)?.rules !== undefined) fail('"rules" is gone: write a rule that a test can check as a scope, and other text as "notes". Nothing was saved.');
+    for (const s of Array.isArray(inF?.scopes) ? inF.scopes : [])
+      if ((s as any)?.rules !== undefined || (s as any)?.notes !== undefined) fail('A scope has only "requirements", no "rules" or "notes". Nothing was saved.');
+  }
+
   const report: string[] = [];
   const touched: number[] = [];
   try {
@@ -491,9 +509,10 @@ function apply(p: ProjectConfig, file: string | undefined) {
         removeItems(fid, list<number>(inF.removeItems, 'removeItems'), report);
         for (const [key, kind] of Object.entries(ITEM_KINDS)) writeItems(fid, kind, list<ItemIn>((inF as any)[key], key), report);
         const scopeIds = new Map<string, number>();
-        for (const s of list<FeatureIn['scopes'] & {}>(inF.scopes, 'scopes') as any[]) {
+        for (const s of list<ScopeIn>(inF.scopes, 'scopes')) {
           const sid = writeScope(fid, s, report);
           scopeIds.set(str(s.title).toLowerCase(), sid);
+          writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
@@ -581,25 +600,38 @@ function writeLabels(p: ProjectConfig, fid: number, kind: string, values: string
   if (added.length) report.push(`F-${fid}: added ${kind} ${added.map((a) => `"${a}"`).join(', ')}.`);
 }
 
-/** A string adds an item (the same text again adds nothing). { id, text } changes an AI draft item. */
-function writeItems(fid: number, kind: string, values: ItemIn[], report: string[]) {
+/**
+ * A string adds an item (the same text again adds nothing). { id, text } changes an AI draft item.
+ * scopeId: the items are requirements of that scope. null: the feature's own list.
+ */
+function writeItems(fid: number, kind: string, values: ItemIn[], report: string[], scopeId: number | null = null) {
+  const label = scopeId === null ? `F-${fid}` : `F-${fid} S-${scopeId}`;
   for (const v of values) {
     if (typeof v === 'string') {
       const t = str(v, 2000);
       if (!t) continue;
-      if (db.prepare('SELECT 1 FROM feature_items WHERE feature_id = ? AND kind = ? AND lower(text) = lower(?)').get(fid, kind, t)) continue;
-      const n = (db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM feature_items WHERE feature_id = ?').get(fid) as any).n;
-      const id = db.prepare('INSERT INTO feature_items (feature_id, kind, text, sort, ai_draft) VALUES (?, ?, ?, ?, 1)').run(fid, kind, t, n).lastInsertRowid;
-      report.push(`F-${fid}: new ${kind} item #${id}.`);
+      if (db.prepare('SELECT 1 FROM feature_items WHERE feature_id = ? AND scope_id IS ? AND kind = ? AND lower(text) = lower(?)').get(fid, scopeId, kind, t)) continue;
+      // A scope does not repeat a requirement of its feature, and the reverse.
+      const clash = requirementClash(fid, scopeId, kind, t);
+      if (clash) {
+        report.push(`${label}: did not add "${t}": ${clash}`);
+        continue;
+      }
+      const id = db
+        .prepare('INSERT INTO feature_items (feature_id, scope_id, kind, text, sort, ai_draft) VALUES (?, ?, ?, ?, ?, 1)')
+        .run(fid, scopeId, kind, t, nextSort('feature_items', 'feature_id = ?', fid)).lastInsertRowid;
+      report.push(`${label}: new ${kind} item #${id}.`);
     } else if (v && typeof v === 'object') {
-      const row = db.prepare('SELECT * FROM feature_items WHERE id = ? AND feature_id = ? AND kind = ?').get(Number(v.id), fid, kind) as any;
-      if (!row) throw new EditError(`No ${kind} item #${v.id} in F-${fid}`);
+      const row = db.prepare('SELECT * FROM feature_items WHERE id = ? AND feature_id = ? AND scope_id IS ? AND kind = ?').get(Number(v.id), fid, scopeId, kind) as any;
+      if (!row) throw new EditError(`No ${kind} item #${v.id} in ${label}`);
       const t = str(v.text, 2000);
       if (!t || t === row.text) continue;
-      if (!row.ai_draft) report.push(`F-${fid}: kept the ${kind} item #${row.id} that a person wrote or checked.`);
+      const clash = requirementClash(fid, scopeId, kind, t, row.id);
+      if (!row.ai_draft) report.push(`${label}: kept the ${kind} item #${row.id} that a person wrote or checked.`);
+      else if (clash) report.push(`${label}: did not change item #${row.id} to "${t}": ${clash}`);
       else {
         db.prepare('UPDATE feature_items SET text = ? WHERE id = ?').run(t, row.id);
-        report.push(`F-${fid}: changed AI draft ${kind} item #${row.id}.`);
+        report.push(`${label}: changed AI draft ${kind} item #${row.id}.`);
       }
     } else throw new EditError(`A ${kind} item must be text or { "id", "text" }`);
   }

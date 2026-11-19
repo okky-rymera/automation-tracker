@@ -18,15 +18,15 @@
       "description": "…",
       "priority": "high",
       "roles": ["Admin", "Wholesale customer"],
-      "needs": ["WooCommerce"],
+      "requirements": ["WooCommerce is active.", "A wholesale customer is logged in."],
       "where": ["…"],
-      "rules": ["…", { "id": 12, "text": "…corrected text of an AI draft item…" }],
+      "notes": ["…", { "id": 12, "text": "…corrected text of an AI draft item…" }],
       "outOfScope": ["…"],
       "questions": ["…"],
       "removeItems": [15],
       "scopes": [
-        { "title": "…", "description": "…" },
-        { "id": "S-14", "title": "…" }
+        { "title": "…", "description": "…", "requirements": ["…true for this scope only…"] },
+        { "id": "S-14", "title": "…", "requirements": [{ "id": 21, "text": "…corrected AI draft requirement…" }] }
       ],
       "links": [
         { "testId": "CY-1a2b3c4d", "scopes": ["…title of a scope above…", "S-14"] },
@@ -63,15 +63,25 @@
   you do not know or do not change.
 - `title`, `description`, `priority`, `group`: one value each. The tool fills an
   empty field, and replaces text only while the feature is an AI draft.
-- `roles`, `needs` (labels): short names that many features share. They are
+- `roles` (labels): short names that many features share. They are
   only added. Use the spellings that `features` lists in `labelsInUse`. A name
   with other letter case becomes the existing name.
-- `where`, `rules`, `outOfScope`, `questions` (lists): one sentence for each
+- `requirements`, `where`, `notes`, `outOfScope`, `questions` (lists): one sentence for each
   item. A text adds an item; the same text again adds nothing.
   `{ "id": 12, "text": "…" }` corrects an item, and `removeItems` deletes items
   by ID. Both work only on AI draft items. `feature <id>` shows the item IDs.
+  The old `needs` and `rules` fields are refused: use `requirements`, and
+  scopes or `notes`.
 - Scope: matched by `id` (`S-14` or `14`), or else by the same title in that
-  feature. A new title makes a new scope.
+  feature. A new title makes a new scope. The title of an AI draft scope can be
+  changed: give its `id` and the new title. The ID, links and screenshot tags stay.
+- Scope `requirements`: a list like the feature lists, for this scope only.
+  `{ "id", "text" }` corrects an item of that scope. `removeItems` on the
+  feature deletes scope items too.
+  A scope item with the same text as a feature requirement is not added, and a
+  feature requirement with the same text as a scope item is not added. A
+  correction to such a text is not done. The report says so. A scope has no
+  `rules` or `notes`.
 - Link `scopes`: scope titles from this payload or the feature, or IDs like
   `S-14` (scope IDs are the same across all features; the ID must be in this
   feature). Leave it out only when the test checks the feature in general.
@@ -113,16 +123,34 @@ not "WWP price filter v3".
 **roles**: the user roles that use or see it, as short names.
 > "Admin", "Shop manager", "Wholesale customer", "Guest", "API client"
 
-**needs**: what must be there or switched on, as short names.
-> "WooCommerce", "Wholesale role", "WooCommerce Wholesale Prices Premium"
+**requirements**: what must be true before a tester checks the feature, for
+**every** scope: plugins, settings, data, and the user who is logged in. One
+sentence each.
+> "WooCommerce is active."
+> "A wholesale role exists."
+> "Logged in as admin or shop manager."
+> "All other settings have their default values."
+
+Give the last item when the scopes depend on default settings. Then a scope
+with no requirements of its own means "default settings", not "nobody wrote it".
 
 **where**: one item for each place a tester finds it.
 > "Product edit screen > General tab > Wholesale Prices fields"
 > "Shop page, product page and cart"
 
-**rules**: one item for each rule. These are what tests must check.
-> "A wholesale price shows only when it is lower than the normal price."
-> "Prices follow the WooCommerce tax display setting."
+**notes**: only what no test can check. A rule that a test can check is a
+**scope**, not a note: then the app shows if a test checks it. Ask "can a
+tester see this pass or fail?" If yes, write a scope.
+> Scope, not note: "A wholesale price higher than the normal price does not show"
+> Note: "Admins and shop managers see the same column, because the column has no permission check."
+> Note: "The plugin reads the setting when it starts, so a change shows on the next page load."
+
+**Old data.** Old "rules" are now AI draft notes, and old "needs" labels are
+now AI draft requirements with one or two words. When you work on a feature
+that has them:
+- Move each note that a test can check: add it as a scope, and put the note's
+  ID in `removeItems`.
+- Correct each short requirement to a full sentence with `{ "id", "text" }`.
 
 **outOfScope**: one item for each thing it does not do, and which feature does it if one does.
 > "Minimum order quantities (see F-22)."
@@ -142,9 +170,29 @@ workaround. `low`: display or text. Leave empty when unsure.
 
 **scopes**: the separate things the feature does, like the scenarios of a
 test. Each has a result a tester can see. One scope = one thing to check.
-Write the actor and the result:
-> "Admin sets a wholesale price on a simple product, and a wholesale customer sees it on the product page"
-> "Guest sees only the normal price"
+
+- The **title** says the result, and what makes this scope different from the
+  others. If the difference is a requirement, name it in a few plain words.
+  Write the actor only when it is not the actor of the feature requirements.
+- The **requirements** of the scope give the exact setting, data or user for
+  this scope only. Do not repeat the feature requirements.
+
+> Title: "Shows the role name and wholesale price of a variable product"
+> Requirements: "A variable product has a wholesale price for one wholesale role."
+>
+> Title: "The hide setting removes the column"
+> Requirements: "The setting Wholesale settings > Prices tab > \"Hide Wholesale Price on Admin Product Listing\" is checked."
+>
+> Title: "Guest sees only the normal price"
+
+**Settings that turn something off.** Many settings have a negative label:
+"Hide …", "Disable …", "Do not …". "With the setting on" then means "the
+feature is gone", and readers misread it. So in all text:
+
+- Do not write "the setting is on" or "off".
+- Name the setting by its label, and say "checked" or "unchecked".
+- Or say what the setting does: "the hide setting removes the column".
+- The default case needs no words about the setting: "Shows the column".
 
 Include scopes that no test checks yet. Gaps are the point of the list.
 Negative and edge cases are scopes too ("Wholesale price higher than the
@@ -173,24 +221,33 @@ This feature is made up. It shows the form only: do not copy its facts.
       "description": "Adds a note to each order that a wholesale customer places, so staff can find wholesale orders fast.",
       "priority": "low",
       "roles": ["Admin", "Shop manager"],
-      "needs": ["WooCommerce", "Wholesale role"],
+      "requirements": ["WooCommerce is active.", "A wholesale role exists."],
       "where": ["Plugin settings > Orders tab > \"Order note\" field", "WooCommerce > Orders > order screen"],
-      "rules": [
-        "The note is added only to orders from a wholesale role.",
-        "An empty setting adds no note.",
-        "The note is added one time, when the order is placed."
-      ],
+      "notes": ["Staff asked for the note, so they can find wholesale orders without opening each customer."],
       "outOfScope": ["Emails to the customer (see F-30)."],
       "questions": ["Is the note added to orders made in the admin for a wholesale customer?"],
       "scopes": [
-        { "title": "Admin sets the note text, and a new wholesale order shows it" },
-        { "title": "Order from a normal customer has no note" },
-        { "title": "Admin clears the setting, and new orders have no note" }
+        {
+          "title": "A new wholesale order shows the note text",
+          "requirements": ["The \"Order note\" setting has a text.", "A wholesale customer places the order."]
+        },
+        {
+          "title": "An order from a normal customer has no note",
+          "requirements": ["The \"Order note\" setting has a text.", "A normal customer places the order."]
+        },
+        {
+          "title": "An empty note setting adds no note",
+          "requirements": ["The \"Order note\" setting is empty.", "A wholesale customer places the order."]
+        },
+        {
+          "title": "A change to the order later does not add the note again",
+          "requirements": ["The \"Order note\" setting has a text.", "An admin edits a wholesale order and saves it."]
+        }
       ],
       "links": [
         {
           "testId": "PW-00000001",
-          "scopes": ["Admin sets the note text, and a new wholesale order shows it", "Order from a normal customer has no note"]
+          "scopes": ["A new wholesale order shows the note text", "An order from a normal customer has no note"]
         }
       ]
     }
