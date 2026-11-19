@@ -40,6 +40,8 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Add a requirement or list item | `POST .../features/:fid/items` with `{ "kind", "text", "scopeId"? }` |
 | Link a test | `POST .../links` with `{ "testId", "scopeId" }` or `{ "testId", "featureId" }` |
 | Set the scopes of a link | `PATCH .../links/:lid` with `{ "scopeIds": [] }` |
+| Move all links of a renamed test | `POST .../links/move-test` with `{ "from": "<old test ID>", "to": "<new test ID>" }` |
+| Sync the copy with the remote branch | `POST .../sync` with `{ "tests": "auto" \| "always" \| "never" }`. `GET .../sync` shows the state. |
 
 IDs: `F-12` is feature 12, and `S-40` is scope 40. Send only the number.
 

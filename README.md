@@ -107,6 +107,40 @@ When the app puts the two runs together:
 
 WARNING: Make the two runs at the same plugin commit. Line numbers change when the code changes. The app shows a warning when the commits are not the same.
 
+## Sync with new plugin code
+
+A sync gets the latest commits of the remote branch into the tracker's own copy of the plugin. Then it writes a change report, and it runs the Playwright tests with coverage when the code changed. The plan is in `docs/sync-plan.md`.
+
+WARNING: A sync changes the files of the copy. Turn it on only for the tracker's own copy, never for a working copy.
+
+1. Turn on the sync: `npm run project -- set-sync <id> --branch trunk --site http://automation-tracker.local`. The site must be a local site (`localhost`, `*.local` or `*.localhost`). To turn it off, add `--off`.
+2. Sync from the app: click "Sync now" on the project page. Or use the command line: `npm run project -- sync <id> [--tests auto|always|never]`.
+3. Click "Show report" to see the change report of the last sync.
+
+What a sync does:
+
+1. It checks the copy. It stops when the copy is not on the sync branch, has changed files, or has commits that are not on the remote branch.
+2. It gets the new commits (`git fetch`, then `git merge --ff-only`). It never runs `git clean`, so `.env` and `node_modules` stay.
+3. It runs `npm ci` in the Playwright folder when the package files changed. When the Playwright version changed, it installs the Chromium browser.
+4. It reads the files and tests again.
+5. It writes the change report from the old commit to the new commit:
+   - changed files and changed PHP functions (comments and white space do not count)
+   - tests added, changed and removed
+   - likely renamed tests: a new title or file gives a new test ID, and the links stay on the old ID. Click "Move links to the new test" to move them.
+   - feature code that is not in the code now (file or function gone)
+   - features to review: their linked tests or their code changed
+6. It runs the tests, by the "Tests" choice:
+   - "when code changed" (auto): when PHP code or Playwright files changed since the commit of the selected Playwright run.
+   - "always" or "never".
+
+The test run uses the Local site, 1 worker and `ECHOWP=false`, also when the copy's `.env` says `ECHOWP=true`. It empties `coverage-data/raw/`, runs the baseline page loads, runs the tests, and writes a new run folder in `data/projects/<id>/runs/`. The app selects the new run only when the report has tests and some tests passed. Else the old run stays selected. Only one test run can run at a time.
+
+Keep the test site idle during the test run. Page loads outside a test count as test setup.
+
+Each command of a sync runs without a terminal, with `coverage/no-sudo/` first in `PATH`. That folder holds stubs for `sudo`, `su`, `doas`, `pkexec` and `echowp` that only fail. So new trunk code cannot ask for a password.
+
+To see the change report between any two commits: `npm run -s project -- changes <id> <old commit> <new commit> [--json]`.
+
 ## Make coverage data
 
 The coverage trial uses the Local WP site `automation-tracker`. See `coverage/prepend.php`. Make one run for each test tool.

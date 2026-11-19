@@ -396,6 +396,36 @@ const MIGRATIONS: string[] = [
     SELECT feature_id, scope_id, title_key, created_at FROM scope_tombstones;
   DROP TABLE scope_tombstones;
   `,
+
+  // 14: sync of the tracker's own plugin copy with the remote branch.
+  //     sync_branch: NULL = sync is off. Sync changes the files of the copy (git merge --ff-only), so turn it on only for the tracker's copy.
+  //     site_url: the local test site that the test run uses.
+  //     synced_commit / synced_at: the commit of the last sync that got the code.
+  //     syncs: one row for each sync, with its change report (JSON) and the coverage run it made.
+  //     owner_pid: the process that runs the sync. A row that is "running" with a dead owner was interrupted.
+  `
+  ALTER TABLE projects ADD COLUMN sync_branch TEXT;
+  ALTER TABLE projects ADD COLUMN site_url TEXT;
+  ALTER TABLE projects ADD COLUMN synced_commit TEXT;
+  ALTER TABLE projects ADD COLUMN synced_at TEXT;
+  CREATE TABLE syncs (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,             -- running | done | failed | interrupted | cancelled
+    step TEXT NOT NULL DEFAULT '',
+    owner_pid INTEGER,
+    from_commit TEXT,
+    to_commit TEXT,
+    report TEXT,                      -- JSON change report (server/changes.ts)
+    tests TEXT,                       -- JSON result of the test run, or why it did not run
+    run_dir TEXT,                     -- the coverage run folder that this sync made
+    log TEXT NOT NULL DEFAULT '',
+    error TEXT
+  );
+  CREATE INDEX syncs_project ON syncs(project_id, id);
+  `,
 ];
 
 function open(): DatabaseSync {

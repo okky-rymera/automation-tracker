@@ -6,6 +6,7 @@ import { PlaywrightTab } from './components/PlaywrightTab';
 import { CypressTab } from './components/CypressTab';
 import { FeaturesTab } from './components/FeaturesTab';
 import { FeatureCodePane } from './components/FeatureCodePane';
+import { SyncPanel } from './components/SyncPanel';
 
 export function App() {
   const route = useRoute();
@@ -216,6 +217,7 @@ function ProjectPage({ id }: { id: string }) {
           {p.uncountedFiles > 0 && ` ${p.uncountedFiles} of those could not be counted and are not in the percentages.`} Coverage source: {sourceText(p)}.
           JavaScript files are not measured yet. Some tests run more than once (one run per user role or example row), so test runs can be more than tests.
         </div>
+        <SyncPanel key={id} project={id} />
         <FreshnessNote p={p} />
         {p.playwright.parseErrors.length > 0 && (
           <div className="mt-2 rounded-md px-3 py-2 text-xs" style={{ background: 'var(--warn-tint)' }}>

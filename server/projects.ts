@@ -30,6 +30,13 @@ export interface ProjectConfig {
   runs: Partial<Record<Framework, RunRef>>;
   /** Folders to leave out of the file list (folder names, at any depth). */
   excludeDirs?: string[];
+  /** The remote branch that a sync gets. Unset: sync is off (only the tracker's own copy may sync). */
+  syncBranch?: string;
+  /** The local test site that the sync's test run uses. */
+  siteUrl?: string;
+  /** The commit and time of the last sync that got the code. */
+  syncedCommit?: string;
+  syncedAt?: string;
 }
 
 type Row = Record<string, any>;
@@ -41,6 +48,10 @@ const fromRow = (r: Row): ProjectConfig => ({
   playwrightDir: r.playwright_dir ?? undefined,
   cypressDir: r.cypress_dir ?? undefined,
   excludeDirs: r.exclude_dirs ? json(r.exclude_dirs) : undefined,
+  syncBranch: r.sync_branch ?? undefined,
+  siteUrl: r.site_url ?? undefined,
+  syncedCommit: r.synced_commit ?? undefined,
+  syncedAt: r.synced_at ?? undefined,
   runs: {
     ...(r.pw_id ? { playwright: { id: r.pw_id, dir: r.pw_dir, label: r.pw_label ?? undefined } } : {}),
     ...(r.cy_id ? { cypress: { id: r.cy_id, dir: r.cy_dir, label: r.cy_label ?? undefined } } : {}),

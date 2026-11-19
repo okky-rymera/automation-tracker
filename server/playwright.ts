@@ -27,6 +27,11 @@ export interface PlaywrightTest {
   steps: PlaywrightStep[];
   /** True when the title is built in a loop (for example one test per user role). */
   parametrized: boolean;
+  /**
+   * Fingerprint of the test's code without the title and white space. A new title or a moved
+   * file gives a new test ID, but the same code keeps this, so the sync can find the renamed test.
+   */
+  bodyHash?: string;
   /** From the last coverage run: one entry per runtime test that matched. runId = test ID in the run. */
   run: { runId: string; title: string; status: string; functions: number }[];
 }
@@ -97,6 +102,20 @@ function collectSteps(node: Node, depth: number, out: PlaywrightStep[]) {
   for (const ch of children(node)) collectSteps(ch, depth, out);
 }
 
+/** Fingerprint of a test body: white space and comments do not count. */
+function bodyHash(source: string, start: number, end: number, comments: Node[]): string {
+  // Cut the comments by their place in the parse, so "//" inside a string (a URL, an XPath) stays.
+  let plain = '';
+  let pos = start;
+  for (const c of comments) {
+    if (c.end <= pos || c.start >= end) continue;
+    plain += source.slice(pos, Math.max(pos, c.start));
+    pos = Math.min(end, c.end);
+  }
+  plain += source.slice(pos, end);
+  return crypto.createHash('sha1').update(plain.replace(/\s+/g, '')).digest('hex').slice(0, 12);
+}
+
 interface Describe {
   title: string;
   tags: string[];
@@ -140,6 +159,7 @@ function parseFile(source: string, rel: string, isTs: boolean): Parsed[] {
             tags: [...tags],
             skipped: skipped || describes.some((d) => d.skipped),
             steps,
+            bodyHash: bodyHash(source, fn.body.start, fn.body.end, ast.comments ?? []),
           });
           return;
         }

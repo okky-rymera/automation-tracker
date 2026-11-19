@@ -669,6 +669,49 @@ export const edits = {
       if (scopeId) db.prepare('INSERT OR IGNORE INTO link_scopes (link_id, scope_id) VALUES (?, ?)').run(link, scopeId);
     });
   },
+  /**
+   * Moves all links of a test to another test: body { from, to } (test IDs).
+   * For a renamed test: a new title or file gives a new test ID, and the links stay on the old ID.
+   * Each link keeps its scopes, its source (AI or manual), its check and its "removed" mark.
+   * When the new test already has a link to the same feature, the two links merge:
+   * a manual source wins over AI, and a check stays. A link that a person removed on the new test
+   * stays removed: the old link does not bring it back.
+   */
+  moveTestLinks(p: string, b: any) {
+    const from = need(b.from, 'Old test ID');
+    const to = need(b.to, 'New test ID');
+    if (from === to) throw new EditError('The old and the new test are the same');
+    if (from.slice(0, 3) !== to.slice(0, 3)) throw new EditError('The old and the new test must use the same test tool');
+    if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL').get(p, to)) {
+      throw new EditError(`Unknown test ${to}, or it is not in the repo now`);
+    }
+    const links = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ?').all(p, from) as any[];
+    if (!links.length) throw new EditError(`Test ${from} has no links`);
+    return tx(() => {
+      let merged = 0;
+      for (const l of links) {
+        const keep = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p, to, l.feature_id) as any;
+        if (!keep) {
+          db.prepare('UPDATE links SET test_id = ? WHERE id = ?').run(to, l.id);
+          continue;
+        }
+        merged++;
+        const active = !keep.removed;
+        db.prepare('UPDATE links SET removed = ?, source = ?, checked = ? WHERE id = ?').run(
+          active ? 0 : 1,
+          l.source === 'manual' || keep.source === 'manual' ? 'manual' : keep.source,
+          Math.max(l.checked, keep.checked),
+          keep.id,
+        );
+        if (active) {
+          db.prepare('INSERT OR IGNORE INTO link_scopes (link_id, scope_id) SELECT ?, scope_id FROM link_scopes WHERE link_id = ?').run(keep.id, l.id);
+        }
+        // A removed link that merges into an active one would give the active link removed scopes: the removed link has none.
+        db.prepare('DELETE FROM links WHERE id = ?').run(l.id);
+      }
+      return { moved: links.length, merged };
+    });
+  },
   /** Sets the scopes of a link: body { scopeIds: number[] }. */
   updateLink(p: string, id: string, b: any) {
     const l = ownLink(p, id);

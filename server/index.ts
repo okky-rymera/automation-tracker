@@ -10,6 +10,7 @@ import { listCypress } from './cypress.ts';
 import { availableViews, loadCoverage, resolveView, runFreshness } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
+import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
@@ -194,6 +195,22 @@ const edit = (fn: (req: express.Request) => unknown) => (req: express.Request, r
   }
 };
 const P = (req: express.Request) => proj(req).id;
+// ---- Sync with the remote branch (server/sync.ts) ----
+app.get('/api/projects/:id/sync', (req, res) => res.json(syncState(P(req))));
+const syncEdit = (fn: (req: express.Request) => unknown) => (req: express.Request, res: express.Response) => {
+  try {
+    res.json(fn(req) ?? { ok: true });
+  } catch (e) {
+    if (e instanceof SyncError) return res.status(409).json({ error: e.message });
+    console.error(e);
+    res.status(500).json({ error: (e as Error).message });
+  }
+};
+app.post('/api/projects/:id/sync', syncEdit((req) => {
+  const mode: TestMode = ['auto', 'always', 'never'].includes(req.body?.tests) ? req.body.tests : 'auto';
+  return { syncId: startSync(P(req), mode).syncId };
+}));
+app.post('/api/projects/:id/sync/cancel', syncEdit((req) => cancelSync(P(req))));
 app.post('/api/projects/:id/rescan', edit((req) => syncProject(proj(req), true)));
 app.post('/api/projects/:id/groups', edit((req) => edits.addGroup(P(req), req.body)));
 app.patch('/api/projects/:id/groups/:gid', edit((req) => edits.updateGroup(P(req), req.params.gid, req.body)));
@@ -213,6 +230,7 @@ app.patch('/api/projects/:id/scopes/:sid', edit((req) => edits.updateScope(P(req
 app.post('/api/projects/:id/scopes/:sid/move', edit((req) => edits.moveScope(P(req), req.params.sid, req.body)));
 app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(req), req.params.sid)));
 app.post('/api/projects/:id/links', edit((req) => edits.addLink(P(req), req.body)));
+app.post('/api/projects/:id/links/move-test', edit((req) => edits.moveTestLinks(P(req), req.body)));
 app.patch('/api/projects/:id/links/:lid', edit((req) => edits.updateLink(P(req), req.params.lid, req.body)));
 app.delete('/api/projects/:id/feature-code/:cid', edit((req) => edits.deleteFeatureCode(P(req), req.params.cid)));
 app.post(SCREENSHOT_UPLOAD, edit((req) => edits.addScreenshot(P(req), req.params.fid, req.body)));

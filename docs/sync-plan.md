@@ -1,6 +1,6 @@
 # Plan: keep the tracker in sync with new plugin code
 
-Status on 19 Nov 2026: the trial and phase 1 are done. The next step is phase 2.
+Status on 19 Nov 2026: the trial, phase 1 and phase 2 are done. The next step is phase 3.
 
 ## Goal
 
@@ -44,18 +44,20 @@ The tracker must stay correct when the plugin code or the tests change. It must 
 
 ## Phase 2: Sync one plugin (wwp)
 
-1. [ ] Sync command: get the latest `trunk` in the copy (`git fetch`, then `git reset --hard origin/trunk`). Run `npm install` in the test folder when `package.json` changed.
-2. [ ] Save the synced commit for each project. Then the app can show "synced at" and the commit.
-3. [ ] Change report: list what changed since the last sync.
+1. [x] Sync command: get the latest `trunk` in the copy. Done with `git fetch`, then `git merge --ff-only` (not `git reset --hard`): the sync first checks that the copy is on the branch, has no changed files and no own commits, so the result is the same, but a mistake stops the sync instead of losing work. It runs `npm ci` (not `npm install`, which can change the lock file) when the package files changed, and installs Chromium when the Playwright version changed. Turn the sync on for each project with `set-sync`.
+2. [x] Save the synced commit for each project. Then the app can show "synced at" and the commit. Each sync is a row in the `syncs` table, with its report and test result.
+3. [x] Change report: list what changed since the last sync (`server/changes.ts`, also `npm run -s project -- changes <id> <old> <new>`). It reads only the two commits. Checked on the last 60 trunk commits: no errors, about 0.1 s for each commit.
    - plugin files and functions (use `coverage/fingerprints.php`)
    - tests added, changed and removed
    - likely renamed tests: a new title gives a new test ID, so its links are lost. Offer to move the links.
    - renamed or removed functions in feature code, which then show "not in the code now"
    - features to review: features whose tests or code changed
-4. [ ] Test run job: run the baseline, the Playwright tests with the window reporter, `analyze.py`, write `run-info.json`, and select the run. Do it in the background, and show the progress in the app.
+4. [x] Test run job (`server/test-run.ts`): run the baseline, the Playwright tests with the window reporter, `analyze.py`, write `run-info.json`, and select the run. Do it in the background, and show the progress in the app.
    - Keep the site idle during the run. Page loads outside a test count as setup.
    - Use only the Local site (`ECHOWP=false`). A command started by the app must never reach `sudo`.
-5. [ ] Add a "Sync" button in the app that does steps 1 to 4. Also add a command for the same steps.
+   - Checked on 19 Nov: full run from the job, 47 passed, 2 skipped, 6.2 minutes, selected. Cancel and a server restart stop the tests and keep the old run. 0 failed logins.
+   - The trial run counted 809 more runnable lines at the same commit. Its first 76 requests saw an older copy of the plugin (the site link changed during that run). The sync run is the clean one.
+5. [x] Add a "Sync" button in the app that does steps 1 to 4. Also add a command for the same steps (`npm run project -- sync <id>`).
 
 ## Phase 3: AI update with headless Claude
 
