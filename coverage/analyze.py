@@ -29,6 +29,8 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 
+from raw_records import plugin_lines, plugin_name
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 # Folders to leave out: the same list as the app's file list. Give --exclude when
@@ -39,6 +41,7 @@ if '--exclude' in args:
     EXCLUDE = [d for d in args[i + 1].split(',') if d]
     del args[i:i + 2]
 plugin = args[0]
+PLUGIN = plugin_name(plugin)  # the plugin's lines in each request file
 DATA = args[1] if len(args) > 1 else os.path.join(HERE, '..', 'coverage-data')
 
 
@@ -84,6 +87,7 @@ test_hits = defaultdict(lambda: defaultdict(set))           # test id -> file ->
 hits = {k: defaultdict(set) for k in ('baseline', 'setup', 'background')}
 runnable = defaultdict(set)                                 # file -> lines that can run
 kinds = Counter()
+with_plugin = 0  # requests that hold lines of this plugin
 for path in glob.glob(os.path.join(DATA, 'raw', '*.json')):
     r = json.load(open(path))
     owner = None
@@ -95,7 +99,9 @@ for path in glob.glob(os.path.join(DATA, 'raw', '*.json')):
     if k == 'test' and owner not in tests:
         k = 'setup'
     kinds[k] += 1
-    for f, lines in (r.get('files') or {}).items():
+    files, not_run = plugin_lines(r, PLUGIN)
+    with_plugin += bool(files or not_run)
+    for f, lines in files.items():
         if excluded(f):
             continue
         runnable[f].update(lines)
@@ -103,9 +109,14 @@ for path in glob.glob(os.path.join(DATA, 'raw', '*.json')):
             test_hits[owner][f].update(lines)
         else:
             hits[k][f].update(lines)
-    for f, lines in (r.get('not_run') or {}).items():
+    for f, lines in not_run.items():
         if not excluded(f):
             runnable[f].update(lines)
+
+if kinds and not with_plugin:
+    print(f'WARNING: no request holds lines of the plugin "{PLUGIN}". Check that coverage/plugins.json names it, '
+          f'and that the site has it in wp-content/plugins/{PLUGIN} (run "npm run project -- coverage-config").',
+          file=sys.stderr)
 
 # Files that no request loaded: count their runnable lines without running them
 # (coverage/runnable-lines.php). All those lines count as "never run".

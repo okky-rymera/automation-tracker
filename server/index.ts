@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
-import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, type ProjectConfig } from './projects.ts';
+import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, writeCoverageConfig, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { EditError, edits, featureData, screenshotData, screenshotInfo } from './features.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
@@ -36,6 +36,7 @@ app.post(SCREENSHOT_UPLOAD, express.json({ limit: '14mb' }));
 app.use(express.json({ limit: '200kb' }));
 
 importProjectsJson();
+writeCoverageConfig(); // coverage/prepend.php reads it; it is not in git
 
 /** The run of each test tool: label, plugin commit check, and number of test runs. */
 function runInfo(p: ProjectConfig) {

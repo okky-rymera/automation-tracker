@@ -29,6 +29,7 @@ One project is one plugin. The first start copies `projects.json` into the datab
 1. Add the project: `npm run project -- add <id> "<name>" <plugin path> --playwright <specs dir> --cypress <feature dir>`. The test folders are relative to the plugin repo.
 2. Select a coverage run: `npm run project -- set-run <id> <run folder> "<label>" --framework playwright` (or `--framework cypress`). The run folder holds `report.json` and `lines.json` from `coverage/analyze.py`. Without `--framework`, the run is a Playwright run. Use a separate run folder for each test tool. The command refuses a folder that is already the run of the other tool.
 3. Show the list: `npm run project -- list`.
+4. To read the plugin from another folder, use `npm run project -- set-path <id> <plugin path>`. Use a separate copy of the plugin on trunk, so that your own branch work does not change the app. The test site must load the same copy: link the copy into the site's `wp-content/plugins`. The copy's folder name must be the plugin's folder name. `set-path` refuses a new folder name, unless you add `--rename` because the plugin folder in the site has the new name too.
 
 ## Feature list
 
@@ -109,6 +110,8 @@ WARNING: Make the two runs at the same plugin commit. Line numbers change when t
 ## Make coverage data
 
 The coverage trial uses the Local WP site `automation-tracker`. See `coverage/prepend.php`. Make one run for each test tool.
+
+The recorder records only the plugins in `coverage/plugins.json`. The commands `add` and `set-path` write this file from the projects. To write it again, run `npm run project -- coverage-config`. The recorder finds each plugin in the site's `wp-content/plugins`, also through a link. Each request file keeps the lines of each plugin apart.
 
 1. Empty `coverage-data/raw/` first. (The database is in `data/`, not in `coverage-data/`.) The Local site records every page load, and loads outside a test count as setup.
 2. Run the baseline page loads: `coverage/baseline.sh <site url> <admin user> <admin password>`. The code that runs there is library code.

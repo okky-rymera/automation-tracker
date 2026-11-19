@@ -111,6 +111,27 @@ export function importProjectsJson() {
   console.log(`Imported ${list.length} projects from projects.json into the database.`);
 }
 
+/**
+ * Writes coverage/plugins.json: the folder names of the tracked plugins. coverage/prepend.php
+ * records only these plugins, and finds each one in the site's wp-content/plugins.
+ * So the tracker's copy of a repo must have the same folder name as the plugin.
+ * The file is not in git, so the server and the project commands write it each time they start.
+ * Writes only when the list changed. With log, prints the list.
+ */
+export function writeCoverageConfig(log = false) {
+  const names = [...new Set(loadProjects().map((p) => path.basename(p.path)))].sort();
+  const file = path.join(ROOT, 'coverage', 'plugins.json');
+  const text = JSON.stringify(names, null, 2) + '\n';
+  let old = '';
+  try {
+    old = fs.readFileSync(file, 'utf8');
+  } catch {
+    /* missing: write it */
+  }
+  if (old !== text) fs.writeFileSync(file, text);
+  if (log || old !== text) console.log(`coverage/plugins.json: ${names.join(', ') || '(no plugins)'}`);
+}
+
 /** Code file types: shown in the file list, and the only types the source view serves. */
 export const SOURCE_EXT = new Set(['.php', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
 
