@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, featureData } from './features.ts';
+import { EditError, edits, featureData, screenshotData, screenshotInfo } from './features.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
 import { listCypress } from './cypress.ts';
@@ -29,6 +29,10 @@ app.use((req, res, next) => {
   if (!req.is('application/json')) return res.status(415).json({ error: 'Send JSON' });
   next();
 });
+// A screenshot upload is one image as base64 text (10 MB image = about 13.4 MB text). Other changes are small.
+// The upload route reads its body first; the general parser then skips a body that is already read.
+const SCREENSHOT_UPLOAD = '/api/projects/:id/features/:fid/screenshots';
+app.post(SCREENSHOT_UPLOAD, express.json({ limit: '14mb' }));
 app.use(express.json({ limit: '200kb' }));
 
 importProjectsJson();
@@ -209,6 +213,23 @@ app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(re
 app.post('/api/projects/:id/links', edit((req) => edits.addLink(P(req), req.body)));
 app.patch('/api/projects/:id/links/:lid', edit((req) => edits.updateLink(P(req), req.params.lid, req.body)));
 app.delete('/api/projects/:id/feature-code/:cid', edit((req) => edits.deleteFeatureCode(P(req), req.params.cid)));
+app.post(SCREENSHOT_UPLOAD, edit((req) => edits.addScreenshot(P(req), req.params.fid, req.body)));
+app.patch('/api/projects/:id/screenshots/:sid', edit((req) => edits.updateScreenshot(P(req), req.params.sid, req.body)));
+app.delete('/api/projects/:id/screenshots/:sid', edit((req) => edits.deleteScreenshot(P(req), req.params.sid)));
+/**
+ * The image of a screenshot. The browser keeps a copy, but asks each time if the copy is still good
+ * (a restored backup can give an ID another image). The tag is the ID and upload time, so the
+ * answer "still good" (304) does not read the image.
+ */
+app.get('/api/projects/:id/screenshots/:sid', (req, res) => {
+  const info = screenshotInfo(P(req), req.params.sid);
+  if (!info) return res.status(404).json({ error: 'Unknown screenshot' });
+  const etag = `"${info.id}-${info.createdAt.replace(/\D/g, '')}"`;
+  res.set({ ETag: etag, 'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff' });
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  const data = screenshotData(info.id);
+  res.type(info.mime).send(Buffer.from(data.buffer, data.byteOffset, data.byteLength)); // no copy of the bytes
+});
 app.delete('/api/projects/:id/links/:lid', edit((req) => edits.deleteLink(P(req), req.params.lid)));
 
 // Any other error: answer with JSON, so the app can show the message.

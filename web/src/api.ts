@@ -89,6 +89,16 @@ export interface Scope {
   aiDraft: boolean;
 }
 
+/** An image of the feature. The image loads from screenshotUrl(). */
+export interface Screenshot {
+  id: number;
+  caption: string;
+  sort: number;
+  /** Scopes of the feature that the image shows (none = the feature in general). */
+  scopeIds: number[];
+}
+export const screenshotUrl = (project: string, id: number) => `/api/projects/${project}/screenshots/${id}`;
+
 /** One sentence in a feature list (rules, out of scope, where, open questions). */
 export interface FeatureItem {
   id: number;
@@ -114,6 +124,7 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   aiDraft: boolean;
   scopes: Scope[];
   links: FeatureLink[];
+  screenshots: Screenshot[];
   /** Mapped code: number of entries, and AI entries that no person checked. */
   code: { entries: number; aiToCheck: number };
 }
@@ -246,12 +257,18 @@ const listeners = new Set<() => void>();
  * Sends a change to the API (POST, PATCH or DELETE with a JSON body).
  * On success, all views load their data again. Throws the API error text.
  */
-export async function mutate<T = unknown>(method: 'POST' | 'PATCH' | 'DELETE', url: string, body: unknown = {}): Promise<T> {
-  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const out = await r.json().catch(() => ({}));
+/** Tells every open view to load its data again. */
+export function reloadAll() {
   inflight.clear();
   version++;
   listeners.forEach((f) => f());
+}
+
+/** Sends a change. quiet: no reload; call reloadAll() after the last change of a batch. */
+export async function mutate<T = unknown>(method: 'POST' | 'PATCH' | 'DELETE', url: string, body: unknown = {}, opts: { quiet?: boolean } = {}): Promise<T> {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const out = await r.json().catch(() => ({}));
+  if (!opts.quiet) reloadAll();
   if (!r.ok) throw new Error(out.error ?? r.statusText);
   return out as T;
 }

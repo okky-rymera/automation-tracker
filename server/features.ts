@@ -10,6 +10,7 @@
  *  - lists of sentences: rules, out of scope, where, open questions
  *  - scopes: the separate things the feature does, like the scenarios of a test
  *  - links: test -> feature, and the scopes of the feature that the test checks
+ *  - screenshots: images of the feature, each tagged with the scopes it shows
  *
  * Every link is made by a person (source manual) or by the AI skill (source ai).
  * When a person removes a link, the row stays with removed = 1, so the AI skill
@@ -95,6 +96,17 @@ export function featureData(projectId: string) {
     .prepare("SELECT feature_id, COUNT(*) AS n, SUM(source = 'ai' AND checked = 0) AS ai FROM feature_code WHERE project_id = ? AND removed = 0 GROUP BY feature_id")
     .all(projectId) as any[];
   const codeBy = new Map(code.map((r) => [r.feature_id, r]));
+  // Screenshots without the image bytes: the app loads each image from its own URL.
+  const shots = db
+    .prepare('SELECT id, feature_id, caption, sort FROM screenshots WHERE project_id = ? ORDER BY sort, id')
+    .all(projectId) as any[];
+  const shotScopes = byKey(
+    db
+      .prepare('SELECT ss.screenshot_id, ss.scope_id FROM screenshot_scopes ss JOIN screenshots s ON s.id = ss.screenshot_id WHERE s.project_id = ? ORDER BY ss.scope_id')
+      .all(projectId) as any[],
+    (r) => r.screenshot_id,
+  );
+  const shotsBy = byKey(shots, (s) => s.feature_id);
   for (const f of features) {
     // Mapped code: number of entries, and how many the AI added that no person checked.
     f.code = { entries: codeBy.get(f.id)?.n ?? 0, aiToCheck: codeBy.get(f.id)?.ai ?? 0 };
@@ -117,6 +129,7 @@ export function featureData(projectId: string) {
       framework: l.framework ?? (l.testId.startsWith('CY-') ? 'cypress' : 'playwright'),
       missing: !l.framework || !!l.testRemovedAt,
     }));
+    f.screenshots = (shotsBy.get(f.id) ?? []).map(({ feature_id, ...s }) => ({ ...s, scopeIds: (shotScopes.get(s.id) ?? []).map((r) => r.scope_id) }));
   }
 
   const linked = new Set(links.map((l) => l.testId));
@@ -198,6 +211,48 @@ function ownItem(projectId: string, id: unknown): any {
   if (!r) throw new EditError('Item not found in this project');
   return r;
 }
+function ownScreenshot(projectId: string, id: unknown): { id: number; featureId: number } {
+  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ?').get(Number(id), projectId) as any;
+  if (!r) throw new EditError('Screenshot not found in this project');
+  return { id: r.id, featureId: r.feature_id };
+}
+/** Scope IDs of feature featureId from a request body list, without duplicates. */
+function scopeList(projectId: string, featureId: number, v: unknown): number[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new EditError('scopeIds must be a list');
+  return [...new Set(v.map((s) => scopeOf(projectId, featureId, s)))];
+}
+
+/** Largest image the app accepts, after base64 decoding. */
+export const SCREENSHOT_MAX_BYTES = 10 * 1024 * 1024;
+/** Image types and the first bytes of each. No SVG: an SVG file can run scripts. */
+const IMAGE_TYPES: Record<string, (b: Buffer) => boolean> = {
+  'image/png': (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  'image/jpeg': (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  'image/gif': (b) => b.subarray(0, 4).toString('latin1') === 'GIF8',
+  'image/webp': (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
+};
+/** Reads a "data:image/...;base64,..." URL. The first bytes must match the type. */
+function imageFromDataUrl(v: unknown): { mime: string; data: Buffer } {
+  const m = typeof v === 'string' ? /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(v) : null;
+  if (!m) throw new EditError('Send the image as a base64 data URL');
+  const mime = m[1];
+  if (!IMAGE_TYPES[mime]) throw new EditError('Use a PNG, JPEG, WebP or GIF image');
+  const data = Buffer.from(m[2], 'base64');
+  if (data.length > SCREENSHOT_MAX_BYTES) throw new EditError('The image is too large (10 MB or less)');
+  if (!IMAGE_TYPES[mime](data)) throw new EditError(`The file is not a ${mime.slice(6).toUpperCase()} image`);
+  return { mime, data };
+}
+
+/** Type and upload time of one screenshot, or null. Cheap: it does not read the image. */
+export function screenshotInfo(projectId: string, id: unknown): { id: number; mime: string; createdAt: string } | null {
+  return (db.prepare('SELECT id, mime, created_at AS createdAt FROM screenshots WHERE id = ? AND project_id = ?').get(Number(id), projectId) as any) ?? null;
+}
+/** The image bytes of a screenshot (an ID from screenshotInfo). */
+export function screenshotData(id: number): Uint8Array {
+  return (db.prepare('SELECT data FROM screenshot_images WHERE screenshot_id = ?').get(id) as any).data;
+}
+
 function ownLink(projectId: string, id: unknown): any {
   const r = db.prepare('SELECT * FROM links WHERE id = ? AND project_id = ?').get(Number(id), projectId);
   if (!r) throw new EditError('Link not found in this project');
@@ -319,6 +374,9 @@ export const edits = {
          AND file || char(0) || function IN (SELECT file || char(0) || function FROM feature_code WHERE feature_id = ?)`,
       ).run(from, into);
       db.prepare('UPDATE feature_code SET feature_id = ? WHERE feature_id = ?').run(into, from);
+      // Screenshots move with their scope tags (the scopes moved above).
+      const shotBase = nextSort('screenshots', 'feature_id = ?', into);
+      db.prepare('UPDATE screenshots SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, shotBase, from);
       db.prepare('DELETE FROM features WHERE id = ?').run(from);
     });
   },
@@ -411,6 +469,40 @@ export const edits = {
       db.prepare("UPDATE links SET source = 'manual' WHERE id = ?").run(l.id);
     });
   },
+  // Screenshots. Body of add: { image: data URL, caption?, scopeIds? }.
+  addScreenshot(p: string, id: string, b: any) {
+    const f = own('features', p, id);
+    const { mime, data } = imageFromDataUrl(b.image);
+    const scopeIds = scopeList(p, f, b.scopeIds);
+    return tx(() => {
+      const r = db.prepare('INSERT INTO screenshots (project_id, feature_id, caption, mime, sort) VALUES (?, ?, ?, ?, ?)').run(
+        p, f, text(b.caption), mime, nextSort('screenshots', 'feature_id = ?', f),
+      );
+      const shot = Number(r.lastInsertRowid);
+      db.prepare('INSERT INTO screenshot_images (screenshot_id, data) VALUES (?, ?)').run(shot, data);
+      const add = db.prepare('INSERT INTO screenshot_scopes (screenshot_id, scope_id) VALUES (?, ?)');
+      for (const s of scopeIds) add.run(shot, s);
+      return { id: shot };
+    });
+  },
+  /** Changes the caption, the order, or the scopes (body { scopeIds } sets the full list). */
+  updateScreenshot(p: string, id: string, b: any) {
+    const s = ownScreenshot(p, id);
+    const scopeIds = 'scopeIds' in b ? scopeList(p, s.featureId, b.scopeIds) : null;
+    tx(() => {
+      if ('caption' in b) db.prepare('UPDATE screenshots SET caption = ? WHERE id = ?').run(text(b.caption), s.id);
+      if ('sort' in b) db.prepare('UPDATE screenshots SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s.id);
+      if (scopeIds) {
+        db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ?').run(s.id);
+        const add = db.prepare('INSERT INTO screenshot_scopes (screenshot_id, scope_id) VALUES (?, ?)');
+        for (const x of scopeIds) add.run(s.id, x);
+      }
+    });
+  },
+  deleteScreenshot(p: string, id: string) {
+    db.prepare('DELETE FROM screenshots WHERE id = ?').run(ownScreenshot(p, id).id); // the image and scope tags go too
+  },
+
   /** Removes code from a feature. The row stays as a marker, so the AI skill does not add it again. */
   deleteFeatureCode(p: string, id: string) {
     const r = db.prepare('SELECT id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;

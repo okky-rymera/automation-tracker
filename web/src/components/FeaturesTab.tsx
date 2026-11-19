@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ITEM_KIND,
   LABEL_KIND,
@@ -15,6 +15,9 @@ import {
   type LabelField,
   type PlaywrightTest,
   type Scope,
+  type Screenshot,
+  reloadAll,
+  screenshotUrl,
 } from '../api';
 import { href } from '../router';
 import { CY_ONLY_META, Empty, Loading, StateBadge, Tag } from './ui';
@@ -610,6 +613,8 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
         )}
       </div>
 
+      <ScreenshotsSection project={project} f={f} />
+
       <Section title={`Scope (${f.scopes.length})`}>
         {f.scopes.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-3 text-xs text-ink-2">
@@ -715,6 +720,7 @@ function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: S
   const base = `/api/projects/${project}`;
   const url = `${base}/scopes/${s.id}`;
   const [picking, setPicking] = useState(false);
+  const uploader = useUpload(project, f, [s.id]);
   const pw = live(links, 'playwright').length;
   const cy = live(links, 'cypress').length;
   const tone = pw && cy ? 'good' : pw || cy ? 'warn' : 'bad';
@@ -750,7 +756,8 @@ function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: S
         </button>
       </div>
       {links.length > 0 && <LinkTable project={project} f={f} links={links} className="mt-2" />}
-      <div className="mt-2">
+      <ScopeShots project={project} f={f} s={s} />
+      <div className="mt-2 flex flex-wrap items-start gap-2">
         {picking ? (
           <div className="space-y-1">
             <TestPicker
@@ -764,6 +771,7 @@ function ScopeCard({ project, f, s, links }: { project: string; f: Feature; s: S
         ) : (
           <Button onClick={() => setPicking(true)}>+ Link a test</Button>
         )}
+        {!picking && <AddScreenshotButton uploader={uploader} label="+ Screenshot" />}
       </div>
     </div>
   );
@@ -816,11 +824,39 @@ function LinkTable({ project, f, links, className = '' }: { project: string; f: 
 /** The scopes of one link: a chip for each, with remove, and a select to add one. */
 function LinkScopes({ project, f, l, withTitles }: { project: string; f: Feature; l: FeatureLink; withTitles?: boolean }) {
   const url = `/api/projects/${project}/links/${l.id}`;
-  const save = (scopeIds: number[]) => act(() => mutate('PATCH', url, { scopeIds }));
-  const rest = f.scopes.filter((s) => !l.scopeIds.includes(s.id));
+  return (
+    <ScopeChips
+      f={f}
+      ids={l.scopeIds}
+      withTitles={withTitles}
+      what="link"
+      emptyLabel="No scope: add…"
+      onSave={(scopeIds) => act(() => mutate('PATCH', url, { scopeIds }))}
+    />
+  );
+}
+
+/** Scope chips of a link or a screenshot: a chip for each scope, with remove, and a select to add one. */
+function ScopeChips({
+  f,
+  ids,
+  onSave,
+  withTitles,
+  what,
+  emptyLabel,
+}: {
+  f: Feature;
+  ids: number[];
+  onSave: (ids: number[]) => void;
+  withTitles?: boolean;
+  /** For screen readers: "link" or "screenshot". */
+  what: string;
+  emptyLabel: string;
+}) {
+  const rest = f.scopes.filter((s) => !ids.includes(s.id));
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {l.scopeIds.map((id) => (
+      {ids.map((id) => (
         <span
           key={id}
           title={f.scopes.find((s) => s.id === id)?.title}
@@ -831,7 +867,7 @@ function LinkScopes({ project, f, l, withTitles }: { project: string; f: Feature
           <button
             type="button"
             aria-label={`Remove scope ${scopeCode(id)}`}
-            onClick={() => save(l.scopeIds.filter((x) => x !== id))}
+            onClick={() => onSave(ids.filter((x) => x !== id))}
             className="text-ink-3 hover:text-bad"
           >
             ×
@@ -841,11 +877,11 @@ function LinkScopes({ project, f, l, withTitles }: { project: string; f: Feature
       {rest.length > 0 && (
         <select
           value=""
-          aria-label="Add a scope to this link"
-          onChange={(e) => e.target.value && save([...l.scopeIds, Number(e.target.value)])}
+          aria-label={`Add a scope to this ${what}`}
+          onChange={(e) => e.target.value && onSave([...ids, Number(e.target.value)])}
           className="min-w-0 flex-1 rounded border border-line bg-bg px-1 py-0.5 text-xs"
         >
-          <option value="">{l.scopeIds.length ? '+ scope' : 'No scope: add…'}</option>
+          <option value="">{ids.length ? '+ scope' : emptyLabel}</option>
           {rest.map((s) => (
             <option key={s.id} value={s.id}>
               {scopeCode(s.id)} {s.title}
@@ -853,6 +889,196 @@ function LinkScopes({ project, f, l, withTitles }: { project: string; f: Feature
           ))}
         </select>
       )}
+    </div>
+  );
+}
+
+// ---- Screenshots ----
+
+/** Same limit as the server (SCREENSHOT_MAX_BYTES). */
+const SHOT_MAX_BYTES = 10 * 1024 * 1024;
+const SHOT_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+const readDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    r.readAsDataURL(file);
+  });
+
+/** Sends image files to a feature, one at a time, then reloads the views one time. Files that are not images are left out. */
+async function uploadShots(project: string, f: Feature, files: File[], scopeIds: number[]) {
+  const images = files.filter((x) => x.type.startsWith('image/'));
+  if (!images.length) throw new Error('No image found. Use a PNG, JPEG, WebP or GIF image.');
+  for (const file of images) {
+    if (!SHOT_TYPES.includes(file.type)) throw new Error(`${file.name}: use a PNG, JPEG, WebP or GIF image.`);
+    if (file.size > SHOT_MAX_BYTES) throw new Error(`${file.name} is too large. Use an image of 10 MB or less.`);
+  }
+  try {
+    for (const file of images) {
+      const caption = /^image\.\w+$/.test(file.name) ? '' : file.name.replace(/\.\w+$/, ''); // a pasted image has the name "image.png"
+      const body = { image: await readDataUrl(file), caption, scopeIds };
+      await mutate('POST', `/api/projects/${project}/features/${f.id}/screenshots`, body, { quiet: true });
+    }
+  } finally {
+    reloadAll(); // also after an error: the files before it were saved
+  }
+}
+
+/** Runs uploadShots and keeps a "busy" flag. Controls that share one uploader cannot upload at the same time. */
+type Uploader = { busy: boolean; upload: (files: File[]) => void };
+function useUpload(project: string, f: Feature, scopeIds: number[]): Uploader {
+  const [busy, setBusy] = useState(false);
+  const upload = (files: File[]) => {
+    if (busy || !files.length) return;
+    setBusy(true);
+    act(() => uploadShots(project, f, files, scopeIds)).finally(() => setBusy(false));
+  };
+  return { busy, upload };
+}
+
+/** A button that opens the file picker and sends the images. */
+function AddScreenshotButton({ uploader: { busy, upload }, label }: { uploader: Uploader; label: string }) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept={SHOT_TYPES.join(',')}
+        multiple
+        hidden
+        onChange={(e) => (upload([...(e.target.files ?? [])]), (e.target.value = ''))}
+      />
+      <Button disabled={busy} onClick={() => input.current?.click()}>
+        {busy ? 'Uploading…' : label}
+      </Button>
+    </>
+  );
+}
+
+/** The screenshots of a feature: a grid, plus a box to paste or drop images into. */
+function ScreenshotsSection({ project, f }: { project: string; f: Feature }) {
+  const uploader = useUpload(project, f, []);
+  const { busy, upload } = uploader;
+  const [over, setOver] = useState(false);
+  const [open, setOpen] = useState<Screenshot | null>(null);
+  return (
+    <Section title={`Screenshots (${f.screenshots.length})`} right={<AddScreenshotButton uploader={uploader} label="+ Add screenshot" />}>
+      {f.screenshots.length > 0 && (
+        <div className="mb-2 grid grid-cols-[repeat(auto-fill,minmax(12rem,1fr))] gap-3">
+          {f.screenshots.map((x) => (
+            <ShotCard key={x.id} project={project} f={f} shot={x} onOpen={() => setOpen(x)} />
+          ))}
+        </div>
+      )}
+      <div
+        tabIndex={0}
+        role="button"
+        aria-label="Paste or drop a screenshot here"
+        onPaste={(e) => {
+          const files = [...e.clipboardData.files];
+          if (files.length) (e.preventDefault(), upload(files));
+        }}
+        onDragOver={(e) => (e.preventDefault(), setOver(true))}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => (e.preventDefault(), setOver(false), upload([...e.dataTransfer.files]))}
+        className={`rounded-md border border-dashed px-3 py-2 text-xs text-ink-3 outline-none focus:border-accent focus:text-ink-2 ${over ? 'border-accent bg-surface-2' : 'border-line'}`}
+      >
+        {busy
+          ? 'Uploading…'
+          : 'Paste a screenshot: click here, then press Ctrl+V. Or drop image files here. To show which scopes a screenshot shows, add the scopes on it.'}
+      </div>
+      {open && <Lightbox project={project} f={f} shot={open} onClose={() => setOpen(null)} />}
+    </Section>
+  );
+}
+
+/** One screenshot: thumbnail, caption, scopes, remove. */
+function ShotCard({ project, f, shot, onOpen }: { project: string; f: Feature; shot: Screenshot; onOpen: () => void }) {
+  const url = screenshotUrl(project, shot.id);
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-line bg-surface p-2">
+      <button type="button" onClick={onOpen} title="Show full size" className="block overflow-hidden rounded border border-line bg-bg">
+        <img src={url} alt={shot.caption || 'Screenshot'} loading="lazy" className="h-32 w-full object-contain" />
+      </button>
+      <div className="flex items-start gap-1">
+        <InlineText
+          value={shot.caption}
+          placeholder="Add a caption"
+          onSave={(caption) => mutate('PATCH', url, { caption })}
+          className="min-w-0 flex-1 text-xs"
+        />
+        <button
+          type="button"
+          aria-label="Delete screenshot"
+          title="Delete screenshot"
+          onClick={() => confirm(`Delete screenshot${shot.caption ? ` “${shot.caption}”` : ''}?`) && act(() => mutate('DELETE', url))}
+          className="px-1 text-ink-3 hover:text-bad"
+        >
+          ×
+        </button>
+      </div>
+      <ScopeChips
+        f={f}
+        ids={shot.scopeIds}
+        what="screenshot"
+        emptyLabel="Shows which scope?"
+        onSave={(scopeIds) => act(() => mutate('PATCH', url, { scopeIds }))}
+      />
+    </div>
+  );
+}
+
+/** Small thumbnails of the screenshots that show one scope. */
+function ScopeShots({ project, f, s }: { project: string; f: Feature; s: Scope }) {
+  const [open, setOpen] = useState<Screenshot | null>(null);
+  const shots = f.screenshots.filter((x) => x.scopeIds.includes(s.id));
+  if (!shots.length) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {shots.map((x) => (
+        <button
+          key={x.id}
+          type="button"
+          onClick={() => setOpen(x)}
+          title={x.caption || 'Show full size'}
+          className="overflow-hidden rounded border border-line bg-bg hover:border-accent"
+        >
+          <img src={screenshotUrl(project, x.id)} alt={x.caption || 'Screenshot'} loading="lazy" className="h-16 w-24 object-contain" />
+        </button>
+      ))}
+      {open && <Lightbox project={project} f={f} shot={open} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
+/** The image at full size over the page. Escape or a click outside the image closes it. */
+function Lightbox({ project, f, shot, onClose }: { project: string; f: Feature; shot: Screenshot; onClose: () => void }) {
+  // The parent gives a new onClose on each render. A ref keeps one key listener while the view is open.
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close.current();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const scopes = shot.scopeIds.map((id) => f.scopes.find((s) => s.id === id)).filter(Boolean) as Scope[];
+  return (
+    <div role="dialog" aria-modal="true" aria-label={shot.caption || 'Screenshot'} onClick={onClose} className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-2 bg-black/75 p-6">
+      <img src={screenshotUrl(project, shot.id)} alt={shot.caption || 'Screenshot'} className="max-h-[85vh] max-w-full rounded shadow-lg" onClick={(e) => e.stopPropagation()} />
+      <div className="max-w-3xl text-center text-sm text-white">
+        {shot.caption}
+        {scopes.map((s) => (
+          <div key={s.id} className="text-xs text-white/70">
+            {scopeCode(s.id)} {s.title}
+          </div>
+        ))}
+      </div>
+      <button type="button" onClick={onClose} aria-label="Close" className="absolute right-4 top-3 text-2xl text-white/80 hover:text-white">
+        ×
+      </button>
     </div>
   );
 }

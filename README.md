@@ -8,7 +8,7 @@ All data is in one SQLite file: `data/tracker.db`.
 
 - Projects, code files, Playwright tests and Cypress scenarios. The app scans the plugin repo again when the last scan is older than 5 seconds.
 - Coverage runs: one Playwright run and one Cypress run per project. The app imports a run folder again when `report.json` or `lines.json` changes.
-- Features, scopes and links to tests. People type these in the app, or the AI skill writes a draft.
+- Features, scopes, screenshots and links to tests. People type these in the app, or the AI skill writes a draft.
 
 WARNING: The database holds the only copy of the feature list and the links. Make a backup copy of `data/tracker.db` before large changes.
 
@@ -38,6 +38,7 @@ The "Features" tab holds the feature list: groups and features. A feature has:
 - user roles and needs: short names that features share. Type to see the names that other features use. A name that no feature uses is gone.
 - lists: where it is, rules, out of scope, open questions. Each list item is one sentence that you can change or remove.
 - a scope: the separate things the feature does, like the scenarios of a test
+- screenshots: images that show how the feature looks
 
 Links:
 
@@ -47,6 +48,21 @@ Links:
 - When you remove a link, the AI skill does not add it again.
 - A scope with a Playwright test and a Cypress scenario shows "In both".
 - Feature IDs (`F-…`) and scope IDs (`S-…`) are numbers. A new title keeps the ID.
+
+### Screenshots
+
+A screenshot belongs to a feature. It can also show one or more scopes of the feature.
+
+- To add a screenshot to the feature, use one of these:
+  - Click "+ Add screenshot".
+  - Drop image files on the box.
+  - Click the box, then press Ctrl+V.
+- To add a screenshot for one scope, click "+ Screenshot" on the scope. The screenshot gets that scope.
+- To show which scopes a screenshot shows, add the scopes on the screenshot. The scope then shows a small copy of the image.
+- Click an image to see it full size. Press Escape to close it.
+- Use PNG, JPEG, WebP or GIF images of 10 MB or less.
+
+The images are in the database file, so the backup command also saves them. When you delete a scope, its screenshots stay on the feature.
 
 ### Fill the list with the AI skill
 

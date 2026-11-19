@@ -299,6 +299,35 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX feature_code_project ON feature_code(project_id);
   `,
+
+  // 8: screenshots of a feature. The image is in the database, so the one-file backup keeps it.
+  //    A screenshot belongs to a feature, and can show one or more of its scopes.
+  //    When a scope goes, the screenshot stays on the feature.
+  //    AUTOINCREMENT: a deleted screenshot's ID never comes back, so a browser cache cannot show its old image.
+  //    The image bytes are in their own table, so the feature list does not read them.
+  `
+  CREATE TABLE screenshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    caption TEXT NOT NULL DEFAULT '',
+    mime TEXT NOT NULL,               -- image/png | image/jpeg | image/webp | image/gif
+    sort INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX screenshots_project ON screenshots(project_id, sort);
+  CREATE INDEX screenshots_feature ON screenshots(feature_id);
+  CREATE TABLE screenshot_images (
+    screenshot_id INTEGER PRIMARY KEY REFERENCES screenshots(id) ON DELETE CASCADE,
+    data BLOB NOT NULL
+  );
+  CREATE TABLE screenshot_scopes (
+    screenshot_id INTEGER NOT NULL REFERENCES screenshots(id) ON DELETE CASCADE,
+    scope_id INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    PRIMARY KEY (screenshot_id, scope_id)
+  );
+  CREATE INDEX screenshot_scopes_scope ON screenshot_scopes(scope_id);
+  `,
 ];
 
 function open(): DatabaseSync {
