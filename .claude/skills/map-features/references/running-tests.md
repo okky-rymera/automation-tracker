@@ -73,5 +73,6 @@ password in your reply. Good uses:
   words a store owner sees.
 - Check a behavior that no test checks (a `never` function from the `code` command).
 - Switch a setting on, look at the result, then set it back.
+- Take the screenshots of the feature (SKILL.md, step 4).
 
 Close the browser when you finish (`playwright-cli close`).

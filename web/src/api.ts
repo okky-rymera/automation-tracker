@@ -96,6 +96,10 @@ export interface Screenshot {
   sort: number;
   /** Scopes of the feature that the image shows (none = the feature in general). */
   scopeIds: number[];
+  /** manual = a person uploaded it, ai = the map-features skill added it. */
+  source: 'manual' | 'ai';
+  /** The AI skill added it, and no person checked it yet. */
+  aiDraft: boolean;
 }
 export const screenshotUrl = (project: string, id: number) => `/api/projects/${project}/screenshots/${id}`;
 

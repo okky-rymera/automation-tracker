@@ -22,6 +22,8 @@
  *  - A link that a person removed is never added again.
  *  - Links made here have source "ai", so the app can show them as AI links.
  *  - Mapped code (feature_code) is only added. Code that a person removed is never added again.
+ *  - Screenshots are only added. The skill finds its own by a key from the first caption it sent
+ *    (captionKey), so a person can change the caption. A screenshot that a person deleted is never added again.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -29,7 +31,7 @@ import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
 import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, ITEM_KINDS, LABEL_KINDS, PRIORITIES, labelValue, labelsInUse } from './features.ts';
+import { EditError, ITEM_KINDS, LABEL_KINDS, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -148,7 +150,8 @@ function status(p: ProjectConfig) {
   res.code = { areas: code.length, phpFiles: php, phpFilesInAreas: covered.size, changed: code.filter((u) => u.hash !== hashFiles(p, u.files)).map((u) => u.ref) };
   const f = db.prepare("SELECT COUNT(*) AS n, SUM(ai_fields <> '[]') AS ai FROM features WHERE project_id = ?").get(p.id) as any;
   const noCode = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.removed = 0)').get(p.id) as any).n;
-  res.features = { total: f.n, aiDraft: f.ai ?? 0, withoutCode: noCode };
+  const noShots = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM screenshots s WHERE s.feature_id = f.id AND s.removed = 0)').get(p.id) as any).n;
+  res.features = { total: f.n, aiDraft: f.ai ?? 0, withoutCode: noCode, withoutScreenshots: noShots };
   res.order = 'Playwright files first, then Cypress files, then code areas. "next <project>" with no kind follows this order.';
   out(res);
 }
@@ -328,6 +331,9 @@ const itemsOf = (fid: number, kind: string) =>
 function features(p: ProjectConfig) {
   const groups = db.prepare('SELECT id, title FROM feature_groups WHERE project_id = ? ORDER BY sort, id').all(p.id) as any[];
   const rows = db.prepare('SELECT * FROM features WHERE project_id = ? ORDER BY sort, id').all(p.id) as any[];
+  const shotCount = new Map(
+    (db.prepare('SELECT feature_id, COUNT(*) AS n FROM screenshots WHERE project_id = ? AND removed = 0 GROUP BY feature_id').all(p.id) as any[]).map((r) => [r.feature_id, r.n]),
+  );
   out({
     groups: groups.map((g) => g.title),
     // Use these spellings, so one role or need does not show two times.
@@ -341,8 +347,29 @@ function features(p: ProjectConfig) {
       roles: labelsOf(f.id, LABEL_KINDS.roles),
       scopes: (db.prepare('SELECT id, title FROM scopes WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((s) => `S-${s.id} ${s.title}`),
       links: (db.prepare('SELECT COUNT(*) AS n FROM links WHERE feature_id = ? AND removed = 0').get(f.id) as any).n,
+      screenshots: shotCount.get(f.id) ?? 0,
     })),
   });
+}
+
+/**
+ * Screenshots of a feature, for the skill. firstCaption: the caption the skill sent first (a person can
+ * change the caption since). removed: a person deleted it. The skill cannot add that screenshot again.
+ */
+function screenshotsOf(fid: number) {
+  const tags = new Map<number, string[]>();
+  for (const r of db
+    .prepare('SELECT ss.screenshot_id AS shot, s.id, s.title FROM screenshot_scopes ss JOIN scopes s ON s.id = ss.scope_id WHERE s.feature_id = ? ORDER BY s.id')
+    .all(fid) as any[])
+    tags.set(r.shot, [...(tags.get(r.shot) ?? []), `S-${r.id} ${r.title}`]);
+  return (db.prepare('SELECT id, caption, match_key, source, checked, removed FROM screenshots WHERE feature_id = ? ORDER BY sort, id').all(fid) as any[]).map((x) => ({
+    caption: x.caption,
+    ...(x.match_key !== null && x.match_key !== captionKey(x.caption) ? { firstCaption: x.match_key } : {}),
+    source: x.source,
+    checked: !!x.checked,
+    removed: !!x.removed,
+    scopes: tags.get(x.id) ?? [],
+  }));
 }
 
 function feature(p: ProjectConfig, id: string | undefined, all = false) {
@@ -373,6 +400,7 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
     code: (db.prepare('SELECT file, function, source, removed FROM feature_code WHERE feature_id = ? ORDER BY file, function').all(f.id) as any[]).map((c) => ({
       file: c.file, function: c.function || null, source: c.source, removed: !!c.removed,
     })),
+    screenshots: screenshotsOf(f.id),
     ...(all || links.length <= 25 ? {} : { note: 'At most 25 links shown. Add --all to see every link.' }),
   });
 }
@@ -404,6 +432,13 @@ interface FeatureIn {
   links?: LinkIn[];
   /** Plugin code of the feature: a whole file, or functions in it. */
   code?: CodeIn[];
+  /** Images of the feature: a local image file, a caption, and the scopes it shows. */
+  screenshots?: ShotIn[];
+}
+interface ShotIn {
+  file: string;
+  caption: string;
+  scopes?: (string | number)[];
 }
 interface Payload {
   unit: { kind: Kind; ref: string; files?: string[]; note?: string };
@@ -462,6 +497,7 @@ function apply(p: ProjectConfig, file: string | undefined) {
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
+        for (const x of list<ShotIn>(inF.screenshots, 'screenshots')) writeScreenshot(p, fid, x, scopeIds, report);
       }
       db.prepare(
         `INSERT INTO processed_units (project_id, kind, ref, status, files, hash, features, note, processed_at)
@@ -606,30 +642,86 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
   return row.id;
 }
 
+const names = (ids: number[]) => ids.map((s) => `S-${s}`).join(', ');
+/** Adds scope tags to a link or a screenshot. Tags that are there stay. */
+function addScopeTags(table: 'link_scopes' | 'screenshot_scopes', id: number, scopeIds: number[]) {
+  const col = table === 'link_scopes' ? 'link_id' : 'screenshot_id';
+  const add = db.prepare(`INSERT OR IGNORE INTO ${table} (${col}, scope_id) VALUES (?, ?)`);
+  for (const s of scopeIds) add.run(id, s);
+}
+
+/** Scope IDs of feature fid from titles (of this payload or the feature) or S-ids. */
+function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<string, number>, what: string): number[] {
+  const ids = keys
+    .map((k) => String(k).trim())
+    .filter(Boolean)
+    .map((key) => {
+      const byId = SCOPE_RE.exec(key);
+      const found = byId
+        ? (db.prepare('SELECT id FROM scopes WHERE id = ? AND feature_id = ?').get(Number(byId[1]), fid) as any)?.id
+        : scopeIds.get(key.toLowerCase()) ?? (db.prepare('SELECT id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any)?.id;
+      if (!found) throw new EditError(`${what}: scope "${key}" is not in F-${fid}`);
+      return found as number;
+    });
+  return [...new Set(ids)];
+}
+
+/**
+ * Adds a screenshot from a local image file. The caption names what it shows. Its fixed form (captionKey)
+ * is the match key: the skill does not add a second screenshot with the same key to a feature, also
+ * after a person changed the caption. For an AI screenshot that no person checked, missing scope tags
+ * are added; else they are only suggested. The image file is read only for a new screenshot.
+ */
+function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map<string, number>, report: string[]) {
+  const caption = str(x?.caption, 500);
+  if (!caption) throw new EditError(`A screenshot of F-${fid} has no caption. Say what it shows`);
+  const key = captionKey(caption);
+  const want = resolveScopes(fid, list<string | number>(x.scopes, `scopes of screenshot "${caption}"`), scopeIds, `Screenshot "${caption}"`);
+  const label = `F-${fid} screenshot "${caption}"`;
+
+  const cur = db.prepare('SELECT * FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1').get(fid, key) as any;
+  if (cur?.removed) return void report.push(`${label}: a person deleted it before. Not added again.`);
+  if (cur) {
+    const named = captionKey(cur.caption) === key ? '' : ` (a person changed the caption to "${cur.caption}")`;
+    const have = new Set((db.prepare('SELECT scope_id FROM screenshot_scopes WHERE screenshot_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
+    const missing = want.filter((s) => !have.has(s));
+    if (!missing.length) return void report.push(`${label}: already there${named}. Image not changed.`);
+    if (cur.checked) return void report.push(`${label}: a person checked it${named}. Not changed. Suggested scopes: ${names(missing)}.`);
+    addScopeTags('screenshot_scopes', cur.id, missing);
+    return void report.push(`${label}: already there${named}. Added ${names(missing)}. Image not changed.`);
+  }
+
+  // A new screenshot: now the file must be there.
+  const file = str(x.file, 4000);
+  if (!path.isAbsolute(file)) throw new EditError(`Screenshot "${caption}": give the full path of the image file, not "${file}"`);
+  const stat = fs.existsSync(file) ? fs.statSync(file) : null;
+  if (!stat?.isFile()) throw new EditError(`Screenshot "${caption}": no image file "${file}"`);
+  if (stat.size > SCREENSHOT_MAX_BYTES) throw new EditError(`Screenshot "${caption}": the image is too large (10 MB or less)`);
+  let data: Buffer;
+  let mime: string;
+  try {
+    data = fs.readFileSync(file);
+    mime = imageType(data);
+  } catch (e) {
+    throw new EditError(`Screenshot "${caption}" (${file}): ${(e as Error).message}`);
+  }
+  const id = Number(
+    db
+      .prepare("INSERT INTO screenshots (project_id, feature_id, caption, mime, sort, source, match_key) VALUES (?, ?, ?, ?, ?, 'ai', ?)")
+      .run(p.id, fid, caption, mime, nextSort('screenshots', 'feature_id = ?', fid), key).lastInsertRowid,
+  );
+  db.prepare('INSERT INTO screenshot_images (screenshot_id, data) VALUES (?, ?)').run(id, data);
+  addScopeTags('screenshot_scopes', id, want);
+  report.push(`${label}: added${want.length ? ` with ${names(want)}` : ' (no scope)'}.`);
+}
+
 function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<string, number>, report: string[]) {
   const testId = str(l.testId, 100);
   if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL').get(p.id, testId))
     throw new EditError(`Unknown test ${testId}. Use the test IDs that "next" or "code" gave`);
-  const keys = [...list<string | number>(l.scopes, `scopes of ${testId}`), ...(l.scope !== undefined && l.scope !== null ? [l.scope] : [])]
-    .map((k) => String(k).trim())
-    .filter(Boolean);
-  const want = [
-    ...new Set(
-      keys.map((key) => {
-        const byId = SCOPE_RE.exec(key);
-        const found = byId
-          ? (db.prepare('SELECT id FROM scopes WHERE id = ? AND feature_id = ?').get(Number(byId[1]), fid) as any)?.id
-          : scopeIds.get(key.toLowerCase()) ?? (db.prepare('SELECT id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any)?.id;
-        if (!found) throw new EditError(`Link ${testId}: scope "${key}" is not in F-${fid}`);
-        return found as number;
-      }),
-    ),
-  ];
-  const names = (ids: number[]) => ids.map((s) => `S-${s}`).join(', ');
-  const addScopes = (linkId: number, ids: number[]) => {
-    const add = db.prepare('INSERT OR IGNORE INTO link_scopes (link_id, scope_id) VALUES (?, ?)');
-    for (const s of ids) add.run(linkId, s);
-  };
+  const keys = [...list<string | number>(l.scopes, `scopes of ${testId}`), ...(l.scope !== undefined && l.scope !== null ? [l.scope] : [])];
+  const want = resolveScopes(fid, keys, scopeIds, `Link ${testId}`);
+  const addScopes = (linkId: number, ids: number[]) => addScopeTags('link_scopes', linkId, ids);
 
   const cur = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p.id, testId, fid) as any;
   if (!cur) {

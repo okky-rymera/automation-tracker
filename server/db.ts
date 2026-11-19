@@ -328,6 +328,20 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX screenshot_scopes_scope ON screenshot_scopes(scope_id);
   `,
+
+  // 9: the AI skill can add screenshots too.
+  //    source = manual (a person) or ai (the map-features skill). checked = 1: a person checked an AI screenshot.
+  //    match_key: AI screenshots only. The first caption the skill sent, in a fixed form (captionKey).
+  //      The skill finds its screenshots by this key, so a person can change the caption.
+  //    removed = 1: a person deleted an AI screenshot. The row stays without its image and scope tags,
+  //      so the skill does not add it again. A person's own upload is deleted fully.
+  `
+  ALTER TABLE screenshots ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+  ALTER TABLE screenshots ADD COLUMN checked INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE screenshots ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE screenshots ADD COLUMN match_key TEXT;
+  CREATE INDEX screenshots_match ON screenshots(feature_id, match_key);
+  `,
 ];
 
 function open(): DatabaseSync {

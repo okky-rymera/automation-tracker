@@ -1,6 +1,6 @@
 ---
 name: map-features
-description: Builds the feature list in the automation tracker one small unit at a time. It takes one Playwright spec file, one Cypress .feature file, or one plugin code/settings area, studies it (reads the code, runs the test, or tries the feature with playwright-cli), then writes the feature, description, scope (its scenarios), rules, out of scope, roles and other fields into the tracker database, links each existing test to the scopes it checks, and puts the plugin code (files and functions) that does the feature in it, so the app can show code coverage by feature. It works in this order: Playwright files, then Cypress files, then the code that is left. It records which files and code areas are done, so the next run continues where the last one stopped. Use this skill whenever the user wants to fill, grow or check the feature list or feature matrix, map tests to features, find which feature a test file or code file belongs to, or says things like "do the next Cypress file", "map the next feature", "continue the feature mapping", "what features does this spec cover", or "process the settings page" — even if they do not say "skill" or "feature list".
+description: Builds the feature list in the automation tracker one small unit at a time. It takes one Playwright spec file, one Cypress .feature file, or one plugin code/settings area, studies it (reads the code, runs the test, or tries the feature with playwright-cli), then writes the feature, description, scope (its scenarios), rules, out of scope, roles and other fields into the tracker database, links each existing test to the scopes it checks, puts the plugin code (files and functions) that does the feature in it, so the app can show code coverage by feature, and adds screenshots that show how the feature looks. It works in this order: Playwright files, then Cypress files, then the code that is left. It records which files and code areas are done, so the next run continues where the last one stopped. Use this skill whenever the user wants to fill, grow or check the feature list or feature matrix, map tests to features, find which feature a test file or code file belongs to, or says things like "do the next Cypress file", "map the next feature", "continue the feature mapping", "what features does this spec cover", or "process the settings page" — even if they do not say "skill" or "feature list".
 ---
 
 # Map features, one unit at a time
@@ -46,8 +46,9 @@ calls). The tool keeps the rules that protect people's work:
 
 - It does not change or remove text that a person wrote or checked. It can fill empty fields. Each field
   has its own AI mark, so filling an empty field does not give the right to change the other fields.
-- Roles, needs, list items, scopes, the scopes of a link and the code of a feature are only added.
+- Roles, needs, list items, scopes, the scopes of a link, the code of a feature and screenshots are only added.
 - It does not add again code that a person removed from a feature.
+- It does not add again a screenshot that a person deleted (it matches by caption).
 - It does not add again a link that a person removed, and it does not change a link that a person made.
 - It marks what it writes as "AI draft" and its links as "linked by AI", so the app shows them for review.
 
@@ -174,6 +175,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | scopes | The separate things it does, like test scenarios, each with a visible result |
 | links | Each test, with the scopes it checks |
 | code | The plugin files or functions that do the feature |
+| screenshots | Images of the feature: a PNG file, a caption, and the scopes it shows |
 
 Link every test in the unit that checks a feature, **to the scopes it checks**.
 A link with no scope says only "this test is about the feature", which tells a
@@ -214,6 +216,41 @@ coverage by feature (Features tab > "Code by feature"). Give:
 - The tool only adds code. If code you added before is wrong, say so in the
   report: a person removes it in the app.
 
+**Add screenshots, so a person sees how the feature looks.** People open the
+feature page to learn the feature. A picture of the settings and of the result
+shows it faster than text.
+
+- **When:** the feature has a screen that a person sees: an admin screen, a
+  settings section, or a shop page. A REST API or background feature has no
+  screen: send no screenshots. Run `feature <project> <id>` first: if the
+  screenshots that are there already show the scopes, add no more.
+- **What:** 1–4 screenshots for each feature. Take the place where a person
+  sets it up (the settings or the edit screen), and the result that the user
+  sees (for example, the shop page with the wholesale price). One screenshot
+  for each scope is not necessary.
+- **How:** use `playwright-cli` on the test site, as `references/running-tests.md`
+  says. Its safety rules apply. Set the window to 1280×800
+  (`playwright-cli resize 1280 800`). Take a screenshot of the part that
+  matters (`playwright-cli screenshot e12 --filename=<path>.png`), or of the
+  window. Do not take a full page of a long screen. Save the PNG files in the
+  session scratchpad folder, and give their full paths in the payload.
+- **Data:** do not show passwords, license keys, API keys or real customer
+  data in the image. If a setting must change to show a result, set it back
+  after the screenshot.
+- **Caption:** say what the image shows, in plain words, for example
+  "Settings > Prices: the option to hide the wholesale price column". Each
+  caption in a feature must be different. The tool uses the caption to find a
+  screenshot that is already there, so the same caption adds nothing. A person
+  can change a caption: `feature <project> <id>` then shows the caption you
+  sent as `firstCaption`. Use that one to refer to the screenshot.
+- **Scopes:** give the scopes whose result the image shows. Leave them out for
+  an image of the feature in general.
+
+The tool only adds screenshots. It does not change an image that is there. If a
+screenshot you added before is wrong, say so in the report: a person deletes
+it in the app. `feature <project> <id>` shows deleted screenshots with
+`removed: true`. Do not send their captions again.
+
 If `apply` fails, nothing was saved. Read the error, fix the payload, run it again.
 
 ### 5. Report and stop
@@ -224,6 +261,7 @@ Tell the user, in plain words:
 - the features you made or added to, with their IDs (F-12), and the scopes (S-4)
 - which tests you linked, and which you did not link and why
 - the code you put in each feature (files and functions)
+- the screenshots you added, with their captions, or why you added none
 - open questions, and any person's text that the tool kept
 - the progress (`status`): for example "Cypress: 5 of 82 files done"
 

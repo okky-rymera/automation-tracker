@@ -35,6 +35,13 @@
       "code": [
         { "file": "includes/class-example-prices.php", "functions": ["Example_Prices::filter_price_html"] },
         { "file": "includes/class-example-price-settings.php" }
+      ],
+      "screenshots": [
+        {
+          "file": "/tmp/claude-1000/<session scratchpad>/f39-shop-page.png",
+          "caption": "Shop page: a wholesale customer sees the wholesale price under the normal price",
+          "scopes": ["S-14"]
+        }
       ]
     }
   ]
@@ -77,6 +84,19 @@
   holds all of them. No `functions` = the whole file. Entries are only added; an
   entry that a person removed is not added again (the report says so).
 
+- `screenshots`: images of the feature. `file` is the full path of a local
+  PNG, JPEG, WebP or GIF file of 10 MB or less (save it in the session
+  scratchpad folder). A relative path is refused. `caption` is required: it
+  says what the image shows, and it must be different for each screenshot of
+  the feature. `scopes` (optional): scope titles or IDs, as for links.
+  Screenshots are only added. The tool finds a screenshot that is already
+  there by the first caption it got (letter case and extra spaces do not
+  count), also when a person changed the caption since. `feature <id>` shows
+  that first caption as `firstCaption`. For a screenshot that is already
+  there, the tool does not read the file, and it adds only missing scopes
+  (when no person checked it). A screenshot that a person deleted is not
+  added again (the report says so).
+
 ## Fields: what to write
 
 Sources: requirements traceability matrix templates (stable ID per
@@ -110,6 +130,11 @@ not "WWP price filter v3".
 
 **questions**: one item for each thing you could not confirm, as a question.
 > "Does the wholesale price show in the mini cart widget?"
+
+**screenshots**: 1–4 images for a feature that has a screen. The caption names
+the place and what the image shows.
+> "Settings > Prices tab: the option to hide the wholesale price column"
+> "Product list in the admin: the wholesale price column with the role name"
 
 **priority**: how bad a failure is for a store. `high`: stores lose money or
 orders, or customers see wrong prices. `medium`: a feature does not work, with a

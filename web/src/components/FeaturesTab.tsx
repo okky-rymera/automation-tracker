@@ -35,7 +35,12 @@ const ITEM_FIELDS: ItemField[] = ['rules', 'outOfScope', 'where', 'questions'];
 /** True when the skill wrote something in the feature that no person checked yet. */
 const aiLink = (l: FeatureLink) => l.source === 'ai' && !l.checked;
 const needsReview = (f: Feature) =>
-  f.aiDraft || f.scopes.some((s) => s.aiDraft) || ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) || f.links.some(aiLink) || f.code.aiToCheck > 0;
+  f.aiDraft ||
+  f.scopes.some((s) => s.aiDraft) ||
+  ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) ||
+  f.links.some(aiLink) ||
+  f.code.aiToCheck > 0 ||
+  f.screenshots.some((s) => s.aiDraft);
 
 /** Runs a change and shows the error text if the API refuses it. */
 export async function act(fn: () => Promise<unknown>) {
@@ -1004,6 +1009,11 @@ function ShotCard({ project, f, shot, onOpen }: { project: string; f: Feature; s
         <img src={url} alt={shot.caption || 'Screenshot'} loading="lazy" className="h-32 w-full object-contain" />
       </button>
       <div className="flex items-start gap-1">
+        {shot.aiDraft && (
+          <button type="button" onClick={() => act(() => mutate('PATCH', url, { check: true }))} className="mt-0.5">
+            <AiBadge title="Added by the AI skill. Click to mark as checked." />
+          </button>
+        )}
         <InlineText
           value={shot.caption}
           placeholder="Add a caption"
@@ -1014,7 +1024,10 @@ function ShotCard({ project, f, shot, onOpen }: { project: string; f: Feature; s
           type="button"
           aria-label="Delete screenshot"
           title="Delete screenshot"
-          onClick={() => confirm(`Delete screenshot${shot.caption ? ` “${shot.caption}”` : ''}?`) && act(() => mutate('DELETE', url))}
+          onClick={() =>
+            confirm(`Delete screenshot${shot.caption ? ` “${shot.caption}”` : ''}?${shot.source === 'ai' ? ' The AI skill does not add it again.' : ''}`) &&
+            act(() => mutate('DELETE', url))
+          }
           className="px-1 text-ink-3 hover:text-bad"
         >
           ×

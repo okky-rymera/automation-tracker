@@ -64,6 +64,8 @@ A screenshot belongs to a feature. It can also show one or more scopes of the fe
 
 The images are in the database file, so the backup command also saves them. When you delete a scope, its screenshots stay on the feature.
 
+The AI skill also adds screenshots. It takes them with playwright-cli on the test site. Its screenshots show "AI draft". Click the mark, or change the caption or the scopes, to remove the mark. When you delete a screenshot, the skill does not add a screenshot with the same caption again.
+
 ### Fill the list with the AI skill
 
 The Claude Code skill `map-features` (in `.claude/skills/`) writes a first draft of the list. It does one unit at a time: one Playwright spec file, one Cypress `.feature` file, or one plugin code area. It does all Playwright files first, then all Cypress files, then the plugin code that is left. Start Claude Code in this folder and say, for example, "map the next cypress file for wwp".
@@ -71,6 +73,7 @@ The Claude Code skill `map-features` (in `.claude/skills/`) writes a first draft
 - The skill reads the tests and the plugin code. It can also run the test or try the feature in a browser.
 - It adds to the features that exist before it makes new ones, and it links each test to the scopes it checks.
 - It puts the plugin code of each feature (files or functions) in the feature, for "Code by feature".
+- It adds 1 to 4 screenshots to each feature that has a screen.
 - Text it writes shows "AI draft" in the app. Its links show "linked by AI". Click "Mark as checked", or change the text, to remove the mark.
 - It does not change or remove text that a person wrote or checked. It does not add again a link that a person removed, and it does not change a link that a person made.
 - It records each unit it did. A unit shows again when its files change.

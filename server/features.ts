@@ -10,7 +10,9 @@
  *  - lists of sentences: rules, out of scope, where, open questions
  *  - scopes: the separate things the feature does, like the scenarios of a test
  *  - links: test -> feature, and the scopes of the feature that the test checks
- *  - screenshots: images of the feature, each tagged with the scopes it shows
+ *  - screenshots: images of the feature, each tagged with the scopes it shows. A person or
+ *    the AI skill adds them. A deleted screenshot stays as a row with removed = 1 and no image,
+ *    so the AI skill does not add it again.
  *
  * Every link is made by a person (source manual) or by the AI skill (source ai).
  * When a person removes a link, the row stays with removed = 1, so the AI skill
@@ -98,7 +100,7 @@ export function featureData(projectId: string) {
   const codeBy = new Map(code.map((r) => [r.feature_id, r]));
   // Screenshots without the image bytes: the app loads each image from its own URL.
   const shots = db
-    .prepare('SELECT id, feature_id, caption, sort FROM screenshots WHERE project_id = ? ORDER BY sort, id')
+    .prepare('SELECT id, feature_id, caption, sort, source, checked FROM screenshots WHERE project_id = ? AND removed = 0 ORDER BY sort, id')
     .all(projectId) as any[];
   const shotScopes = byKey(
     db
@@ -129,7 +131,12 @@ export function featureData(projectId: string) {
       framework: l.framework ?? (l.testId.startsWith('CY-') ? 'cypress' : 'playwright'),
       missing: !l.framework || !!l.testRemovedAt,
     }));
-    f.screenshots = (shotsBy.get(f.id) ?? []).map(({ feature_id, ...s }) => ({ ...s, scopeIds: (shotScopes.get(s.id) ?? []).map((r) => r.scope_id) }));
+    f.screenshots = (shotsBy.get(f.id) ?? []).map(({ feature_id, source, checked, ...s }) => ({
+      ...s,
+      source,
+      aiDraft: source === 'ai' && !checked,
+      scopeIds: (shotScopes.get(s.id) ?? []).map((r) => r.scope_id),
+    }));
   }
 
   const linked = new Set(links.map((l) => l.testId));
@@ -183,7 +190,7 @@ const need = (v: unknown, what: string): string => {
   return s;
 };
 const text = (v: unknown) => (typeof v === 'string' ? v.trim().slice(0, 20000) : '');
-const nextSort = (table: string, where: string, arg: string | number) =>
+export const nextSort = (table: string, where: string, arg: string | number) =>
   ((db.prepare(`SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM ${table} WHERE ${where}`).get(arg) as any).n as number);
 
 function own(table: 'feature_groups' | 'features', projectId: string, id: unknown): number {
@@ -212,7 +219,7 @@ function ownItem(projectId: string, id: unknown): any {
   return r;
 }
 function ownScreenshot(projectId: string, id: unknown): { id: number; featureId: number } {
-  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ?').get(Number(id), projectId) as any;
+  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), projectId) as any;
   if (!r) throw new EditError('Screenshot not found in this project');
   return { id: r.id, featureId: r.feature_id };
 }
@@ -243,10 +250,25 @@ function imageFromDataUrl(v: unknown): { mime: string; data: Buffer } {
   if (!IMAGE_TYPES[mime](data)) throw new EditError(`The file is not a ${mime.slice(6).toUpperCase()} image`);
   return { mime, data };
 }
+/**
+ * The fixed form of a caption that the AI skill uses to find its own screenshots: Unicode-normalized,
+ * lower case (all letters, not only A–Z), and with each run of spaces as one space.
+ */
+export function captionKey(caption: string): string {
+  return caption.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Image type from the first bytes of an image file (for files that have no type, like a file on disk). */
+export function imageType(data: Buffer): string {
+  if (data.length > SCREENSHOT_MAX_BYTES) throw new EditError('The image is too large (10 MB or less)');
+  const mime = Object.keys(IMAGE_TYPES).find((t) => IMAGE_TYPES[t](data));
+  if (!mime) throw new EditError('The file is not a PNG, JPEG, WebP or GIF image');
+  return mime;
+}
 
 /** Type and upload time of one screenshot, or null. Cheap: it does not read the image. */
 export function screenshotInfo(projectId: string, id: unknown): { id: number; mime: string; createdAt: string } | null {
-  return (db.prepare('SELECT id, mime, created_at AS createdAt FROM screenshots WHERE id = ? AND project_id = ?').get(Number(id), projectId) as any) ?? null;
+  return (db.prepare('SELECT id, mime, created_at AS createdAt FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), projectId) as any) ?? null;
 }
 /** The image bytes of a screenshot (an ID from screenshotInfo). */
 export function screenshotData(id: number): Uint8Array {
@@ -326,6 +348,7 @@ export const edits = {
       db.prepare("UPDATE scopes SET ai_fields = '[]' WHERE feature_id = ?").run(f);
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
+      db.prepare("UPDATE screenshots SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
     });
   },
   deleteFeature(p: string, id: string) {
@@ -374,7 +397,29 @@ export const edits = {
          AND file || char(0) || function IN (SELECT file || char(0) || function FROM feature_code WHERE feature_id = ?)`,
       ).run(from, into);
       db.prepare('UPDATE feature_code SET feature_id = ? WHERE feature_id = ?').run(into, from);
-      // Screenshots move with their scope tags (the scopes moved above).
+      // Screenshots move with their scope tags (the scopes moved above). AI screenshots with the same
+      // match key: a live one wins over a deleted marker. Then keep the target's screenshot, with the
+      // source's scope tags and its "checked" mark added.
+      db.prepare(
+        `DELETE FROM screenshots WHERE feature_id = ? AND removed = 1 AND match_key IS NOT NULL
+         AND match_key IN (SELECT match_key FROM screenshots WHERE feature_id = ? AND removed = 0 AND match_key IS NOT NULL)`,
+      ).run(into, from);
+      db.prepare(
+        `INSERT OR IGNORE INTO screenshot_scopes (screenshot_id, scope_id)
+         SELECT keep.id, ss.scope_id FROM screenshots old
+         JOIN screenshots keep ON keep.feature_id = ? AND keep.match_key = old.match_key AND keep.removed = 0
+         JOIN screenshot_scopes ss ON ss.screenshot_id = old.id
+         WHERE old.feature_id = ? AND old.match_key IS NOT NULL`,
+      ).run(into, from);
+      db.prepare(
+        `UPDATE screenshots SET checked = MAX(checked, COALESCE((SELECT MAX(o.checked) FROM screenshots o
+           WHERE o.feature_id = ? AND o.match_key = screenshots.match_key AND o.removed = 0), 0))
+         WHERE feature_id = ? AND match_key IS NOT NULL AND removed = 0`,
+      ).run(from, into);
+      db.prepare(
+        `DELETE FROM screenshots WHERE feature_id = ? AND match_key IS NOT NULL
+         AND match_key IN (SELECT match_key FROM screenshots WHERE feature_id = ? AND match_key IS NOT NULL)`,
+      ).run(from, into);
       const shotBase = nextSort('screenshots', 'feature_id = ?', into);
       db.prepare('UPDATE screenshots SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, shotBase, from);
       db.prepare('DELETE FROM features WHERE id = ?').run(from);
@@ -485,11 +530,15 @@ export const edits = {
       return { id: shot };
     });
   },
-  /** Changes the caption, the order, or the scopes (body { scopeIds } sets the full list). */
+  /**
+   * Changes the caption, the order, or the scopes (body { scopeIds } sets the full list).
+   * A change of caption or scopes, or b.check = true, marks an AI screenshot as checked.
+   */
   updateScreenshot(p: string, id: string, b: any) {
     const s = ownScreenshot(p, id);
     const scopeIds = 'scopeIds' in b ? scopeList(p, s.featureId, b.scopeIds) : null;
     tx(() => {
+      if ('caption' in b || scopeIds || b.check) db.prepare('UPDATE screenshots SET checked = 1 WHERE id = ?').run(s.id);
       if ('caption' in b) db.prepare('UPDATE screenshots SET caption = ? WHERE id = ?').run(text(b.caption), s.id);
       if ('sort' in b) db.prepare('UPDATE screenshots SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s.id);
       if (scopeIds) {
@@ -499,8 +548,19 @@ export const edits = {
       }
     });
   },
+  /**
+   * A person's own upload is deleted fully. For an AI screenshot, the image and scope tags go,
+   * and the row stays as a marker, so the AI skill does not add it again.
+   */
   deleteScreenshot(p: string, id: string) {
-    db.prepare('DELETE FROM screenshots WHERE id = ?').run(ownScreenshot(p, id).id); // the image and scope tags go too
+    const s = ownScreenshot(p, id).id;
+    const ai = (db.prepare('SELECT match_key FROM screenshots WHERE id = ?').get(s) as any).match_key !== null;
+    if (!ai) return void db.prepare('DELETE FROM screenshots WHERE id = ?').run(s);
+    tx(() => {
+      db.prepare('UPDATE screenshots SET removed = 1 WHERE id = ?').run(s);
+      db.prepare('DELETE FROM screenshot_images WHERE screenshot_id = ?').run(s);
+      db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ?').run(s);
+    });
   },
 
   /** Removes code from a feature. The row stays as a marker, so the AI skill does not add it again. */
