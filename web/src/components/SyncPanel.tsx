@@ -36,7 +36,6 @@ interface TestResult {
 interface SyncState {
   enabled: boolean;
   branch: string | null;
-  siteUrl: string | null;
   syncedCommit: string | null;
   syncedAt: string | null;
   last: null | {
@@ -99,7 +98,7 @@ export function SyncPanel({ project }: { project: string }) {
     return (
       <div className="mt-2 text-xs text-ink-3">
         Sync is off for this project. To turn it on for the tracker's own copy of the plugin, run{' '}
-        <code>npm run project -- set-sync {project} --branch trunk --site &lt;local site URL&gt;</code>.
+        <code>npm run project -- set-sync {project} --branch trunk</code>.
       </div>
     );
   }
@@ -181,7 +180,7 @@ export function SyncPanel({ project }: { project: string }) {
         )}
       </div>
       {running && last?.step === 'tests' && (
-        <div className="mt-1 text-ink-3">Keep the test site idle until the run ends: page loads outside a test count as test setup.{p?.current && ` Now: ${p.current}`}</div>
+        <div className="mt-1 text-ink-3">The tests run on the tracker's own echowp site. It stops when the run ends. Coverage records only the requests to this site.{p?.current && ` Now: ${p.current}`}</div>
       )}
       {error && <div className="mt-1" style={{ color: 'var(--bad)' }}>{error}</div>}
       {open && last && <Report project={project} last={last} />}

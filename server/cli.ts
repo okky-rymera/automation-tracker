@@ -5,9 +5,11 @@
  *   npm run project -- set-run <id> <run folder> [label] [--framework playwright|cypress]
  *   npm run project -- set-path <id> <plugin path> [--rename]
  *   npm run project -- coverage-config
+ *   npm run project -- coverage-php [--frankenphp <version>] [--xdebug <version>] [--force] [--check]
+ *   npm run project -- echowp <id> <echowp command> [options]   (the tracker's own echowp home, with coverage)
  *   npm run project -- list
  *   npm run project -- changes <id> <old commit> <new commit> [--json]
- *   npm run project -- set-sync <id> [--branch <branch>] [--site <local site URL>] [--off]
+ *   npm run project -- set-sync <id> [--branch <branch>] [--off]
  *   npm run project -- sync <id> [--tests auto|always|never]
  *   npm run project -- ai-update <id> [--from <commit> --to <commit>] [--feature 1,2] [--model opus] [--budget 1] [--bare] [--no-apply]
  *     (no --from/--to: the commits of the last sync that saved a change report)
@@ -18,7 +20,8 @@ import { db } from './db.ts';
 import { changeReport, reportText } from './changes.ts';
 import { startSync, type TestMode } from './sync.ts';
 import { aiUpdate, DEFAULTS } from './ai-update.ts';
-import { LOCAL_SITE } from './test-run.ts';
+import { checkCoveragePhp, prepareCoveragePhp } from './coverage-php.ts';
+import { trackerEchowp } from './echowp.ts';
 import { addCoverageRun, FRAMEWORKS, importProjectsJson, loadProjects, ROOT, RUN_COLUMN, writeCoverageConfig, type Framework } from './projects.ts';
 
 importProjectsJson();
@@ -85,20 +88,22 @@ if (cmd === 'add') {
   console.log(asJson ? JSON.stringify(r, null, 1) : reportText(r));
 } else if (cmd === 'set-sync') {
   // Turns the sync on or off. Sync changes the files of the copy (git merge --ff-only), so only for the tracker's own copy.
+  // --site is gone: each test run starts its own echowp site. Stop, so that an old command does not look like it worked.
+  if (args.some((a) => a === '--site' || a.startsWith('--site='))) {
+    throw new Error('set-sync has no --site option now. Each test run starts its own echowp site. Run the command again without --site.');
+  }
   const branch = opt('branch');
-  const site = opt('site');
   const off = args.includes('--off');
   const [id] = args.filter((a) => a !== '--off');
   const p = loadProjects().find((x) => x.id === id);
-  if (!p) throw new Error('Usage: set-sync <id> [--branch <branch>] [--site <local site URL>] [--off]');
-  if (site && !LOCAL_SITE.test(site)) throw new Error(`${site} is not a local site (localhost, *.local, *.localhost). The tests change the site's data.`);
+  if (!p) throw new Error('Usage: set-sync <id> [--branch <branch>] [--off]');
   if (off) {
     db.prepare('UPDATE projects SET sync_branch = NULL WHERE id = ?').run(id);
     console.log(`Sync is off for ${id}.`);
   } else {
     const b = branch ?? p.syncBranch ?? 'trunk';
-    db.prepare('UPDATE projects SET sync_branch = ?, site_url = COALESCE(?, site_url) WHERE id = ?').run(b, site, id);
-    console.log(`Sync is on for ${id}: branch ${b}, copy ${p.path}, test site ${site ?? p.siteUrl ?? '(none: the sync does not run tests)'}.`);
+    db.prepare('UPDATE projects SET sync_branch = ? WHERE id = ?').run(b, id);
+    console.log(`Sync is on for ${id}: branch ${b}, copy ${p.path}. Test runs start their own echowp site.`);
     console.log('The copy must be the tracker\'s own copy: a sync stops when it has changed files or own commits.');
   }
 } else if (cmd === 'sync') {
@@ -134,6 +139,24 @@ if (cmd === 'add') {
   console.log(`${rows.length} features checked, $${total.toFixed(2)} in total.`);
   for (const r of rows) for (const line of r.applyReport ?? []) console.log(`  F-${r.featureId}: ${line}`);
   if (rows.some((r) => r.status === 'failed')) process.exitCode = 1;
+} else if (cmd === 'coverage-php') {
+  // FrankenPHP "-gnu" binary + Xdebug for echowp sites (server/coverage-php.ts).
+  if (args.includes('--check')) {
+    const info = await checkCoveragePhp();
+    console.log(`Coverage PHP works: FrankenPHP ${info.frankenphp}, PHP ${info.php}, Xdebug ${info.xdebug}.`);
+  } else {
+    const frankenphp = opt('frankenphp') ?? undefined;
+    const xdebug = opt('xdebug') ?? undefined;
+    const info = await prepareCoveragePhp({ frankenphp, xdebug, force: args.includes('--force'), onLine: (l) => console.log(l) });
+    console.log(`\nStart the sites with: npm run project -- echowp <id> up`);
+    console.log(`The sites must use PHP ${info.php.split('.').slice(0, 2).join('.')} (or no php setting).`);
+  }
+} else if (cmd === 'echowp') {
+  // echowp for the tracker's copy of a project, in the tracker's own echowp home, with coverage (server/echowp.ts).
+  const [id, ...rest] = args;
+  const p = loadProjects().find((x) => x.id === id);
+  if (!p || !rest.length) throw new Error('Usage: echowp <id> <echowp command> [echowp options], for example: echowp wwp up');
+  process.exitCode = await trackerEchowp(p, rest);
 } else {
-  console.log('Commands: add, set-run, set-path, coverage-config, list, changes, set-sync, sync, ai-update. See server/cli.ts.');
+  console.log('Commands: add, set-run, set-path, coverage-config, coverage-php, echowp, list, changes, set-sync, sync, ai-update. See server/cli.ts.');
 }

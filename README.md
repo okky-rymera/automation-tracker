@@ -113,7 +113,7 @@ A sync gets the latest commits of the remote branch into the tracker's own copy 
 
 WARNING: A sync changes the files of the copy. Turn it on only for the tracker's own copy, never for a working copy.
 
-1. Turn on the sync: `npm run project -- set-sync <id> --branch trunk --site http://automation-tracker.local`. The site must be a local site (`localhost`, `*.local` or `*.localhost`). To turn it off, add `--off`.
+1. Turn on the sync once, when you add a project: `npm run project -- set-sync <id> --branch trunk`. To turn it off, add `--off`. The tests always run on the tracker's own echowp site (see "Coverage on echowp sites"). You do not start or stop a site.
 2. Sync from the app: click "Sync now" on the project page. Or use the command line: `npm run project -- sync <id> [--tests auto|always|never]`.
 3. Click "Show report" to see the change report of the last sync.
 
@@ -133,9 +133,9 @@ What a sync does:
    - "when code changed" (auto): when PHP code or Playwright files changed since the commit of the selected Playwright run.
    - "always" or "never".
 
-The test run uses the Local site, 1 worker and `ECHOWP=false`, also when the copy's `.env` says `ECHOWP=true`. It empties `coverage-data/raw/`, runs the baseline page loads, runs the tests, and writes a new run folder in `data/projects/<id>/runs/`. The app selects the new run only when the report has tests and some tests passed. Else the old run stays selected. Only one test run can run at a time.
+The test run starts the tracker's echowp test site, and uses 1 worker and `ECHOWP=false`, also when the copy's `.env` says `ECHOWP=true`. It empties `coverage-data/raw/`, runs the baseline page loads, runs the tests, and writes a new run folder in `data/projects/<id>/runs/`. The app selects the new run only when the report has tests and some tests passed. Else the old run stays selected. Only one test run can run at a time.
 
-Keep the test site idle during the test run. Page loads outside a test count as test setup.
+The tests are skipped (the sync still ends as done) when echowp is not installed or the copy has no `echowp.yml`.
 
 Each command of a sync runs without a terminal, with `coverage/no-sudo/` first in `PATH`. That folder holds stubs for `sudo`, `su`, `doas`, `pkexec` and `echowp` that only fail. So new trunk code cannot ask for a password.
 
@@ -166,6 +166,43 @@ PHP files that no request loaded still count. `analyze.py` counts their runnable
 The coverage script turns off OPcache for each request. With OPcache on, Xdebug does not report the skipped lines inside functions that ran.
 
 Test IDs (`PW-…`, `CY-…`) come from the file path and the title. A rename gives a new ID.
+
+### Coverage on echowp sites
+
+Each sync test run does these steps:
+
+1. It starts the project's test site (`site-1` in the echowp profile `test`) in the tracker's echowp home. A stopped site starts again in about 1 second.
+2. It resets the site's database to the echowp template. The admin login comes from the `.env` file of the plugin's Playwright folder.
+3. It runs the tests on the site, with 1 worker.
+4. It stops the site, also when the run fails, when you cancel it, or when the server stops during the run.
+
+All the tracker's sites use one PHP server, so each of them can record coverage. During a run, the file `coverage-data/test-site.json` gives the port of the test site. Then only requests to that port are recorded, and you can use the other tracker sites.
+
+You can also start the tracker's sites yourself:
+
+```
+npm run project -- echowp <id> up          # start the sites of the project's copy
+npm run project -- echowp <id> stop <site> # stop one site, keep its data
+npm run project -- echowp <id> down        # remove all the tracker's sites, stop its database
+```
+
+Any echowp command works: the tracker adds the settings below and `--dir <the project's copy>`.
+
+- The tracker uses its own echowp home, `data/echowp-home/` (`ECHOWP_HOME`). It has its own PHP server, database, site list and downloads. echowp runs one PHP server for all projects of a home, so a shared home could give your own sites Xdebug.
+- Your own `echowp` commands do not change, and they do not see the tracker's sites.
+- `up` makes the coverage PHP first when it is missing. Then it serves plain HTTP, and picks ports from 8801 that neither echowp home uses. When the project has sites already, new sites get the next ports after them. At the end, it checks that the server runs the coverage PHP.
+- The first `up` downloads MariaDB, WP-CLI and WordPress into the tracker's home. It took 17 minutes (MariaDB came slowly from archive.mariadb.org).
+- `down` always uses `--all`. It removes only the tracker's sites, because they are the only sites in this home.
+
+The coverage PHP comes from `npm run project -- coverage-php`. The normal echowp PHP cannot load Xdebug. This command downloads the FrankenPHP "-gnu" binary of the version that echowp uses, and checks its checksum. Then it builds Xdebug in the matching official PHP Docker image, and checks that Xdebug records the correct lines. The files go to `data/coverage-php/current/`. A second run reuses them. It needs Linux and Docker without `sudo`. When a sync must make the coverage PHP first, a cancel stops the download and the Docker build.
+
+WARNING: The sites must ask for the same PHP version as the binary (or have no `php` setting). `up` stops when they do not.
+
+- `--check` tests the current files again.
+- `--frankenphp <version>` and `--xdebug <version>` choose other versions.
+- `--force` builds again.
+
+When echowp moves to a new FrankenPHP version, run `coverage-php` again.
 
 ## Check the parsers
 

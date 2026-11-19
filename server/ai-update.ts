@@ -408,7 +408,7 @@ export async function runClaude(
     // the login and bill the key, so the run does not get it.
     for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
   }
-  const job: Job = { syncId: 0, child: null, cancelled: false };
+  const job: Job = { syncId: 0, child: null, cancelled: false, abort: new AbortController() };
   const started = run(job, 'claude', args, { cwd, env, quiet: true, input: prompt });
   onStart?.(job.child?.pid); // run() starts the process at once
   const res = await started;

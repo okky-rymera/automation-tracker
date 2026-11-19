@@ -22,6 +22,38 @@ if ( isset( $_SERVER['HTTP_X_COVERAGE_SKIP'] ) ) {
 }
 
 /**
+ * During a test run of a sync, coverage-data/test-site.json names the port of the test site
+ * (server/test-run.ts). All sites of the tracker's echowp home share one PHP server, so record
+ * only the requests to that port. Without the file (or when the run that wrote it has
+ * stopped), record all requests, as before.
+ */
+function __atcov_other_site() {
+	$mark = @file_get_contents( dirname( __DIR__ ) . '/coverage-data/test-site.json' );
+	if ( false === $mark ) {
+		return false;
+	}
+	$m = json_decode( $mark, true );
+	if ( ! is_array( $m ) || empty( $m['port'] ) ) {
+		return false;
+	}
+	if ( ! empty( $m['pid'] ) && is_dir( '/proc' ) && ! file_exists( '/proc/' . (int) $m['pid'] ) ) {
+		return false; // Left by a run that stopped.
+	}
+	$host = isset( $_SERVER['HTTP_HOST'] ) ? (string) $_SERVER['HTTP_HOST'] : '';
+	if ( preg_match( '/:(\d+)$/', $host, $p ) ) {
+		$port = (int) $p[1];
+	} elseif ( isset( $_SERVER['SERVER_PORT'] ) ) {
+		$port = (int) $_SERVER['SERVER_PORT'];
+	} else {
+		return false;
+	}
+	return $port !== (int) $m['port'];
+}
+if ( __atcov_other_site() ) {
+	return;
+}
+
+/**
  * The plugins to record: coverage/plugins.json, a list of plugin folder names that the app
  * writes from its projects (npm run project -- coverage-config). For each name, the folder
  * is found in this site's wp-content/plugins. A plugin there is often a link to a copy of

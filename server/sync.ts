@@ -23,6 +23,7 @@ import { changedFiles, changeReport, playwrightRoot, type ChangeReport } from '.
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { runTests, type TestResult } from './test-run.ts';
+import { findEchowp } from './echowp.ts';
 import { runFreshness } from './coverage.ts';
 
 export type TestMode = 'auto' | 'always' | 'never';
@@ -61,7 +62,7 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  * setpriv --no-new-privs: the command and its children cannot gain privileges, so a setuid
  * program (sudo, also by its full path /usr/bin/sudo) cannot start as root and stops before it asks.
  */
-const SETPRIV = (() => {
+export const SETPRIV = (() => {
   try {
     execFileSync('setpriv', ['--no-new-privs', '--', 'true'], { stdio: 'ignore' });
     return 'setpriv';
@@ -75,6 +76,8 @@ export interface Job {
   syncId: number;
   child: ReturnType<typeof spawn> | null;
   cancelled: boolean;
+  /** Fires on a cancel. It stops work that is not in job.child, such as a build of the coverage PHP. */
+  abort: AbortController;
 }
 const jobs = new Map<string, Job>();
 
@@ -228,7 +231,6 @@ export function syncState(projectId: string) {
   return {
     enabled: !!p.syncBranch,
     branch: p.syncBranch ?? null,
-    siteUrl: p.siteUrl ?? null,
     syncedCommit: p.syncedCommit ?? null,
     syncedAt: p.syncedAt ?? null,
     last: last && { ...last, log: last.log.slice(-6000) },
@@ -251,7 +253,7 @@ export function startSync(projectId: string, mode: TestMode = 'auto', onLog?: (l
   if (!p.syncBranch) {
     throw new SyncError(
       `Sync is off for ${projectId}. Sync changes the files in ${p.path}, so turn it on only for the tracker's own copy: ` +
-        `npm run project -- set-sync ${projectId} --branch trunk --site <local site URL>`,
+        `npm run project -- set-sync ${projectId} --branch trunk`,
     );
   }
   markInterrupted(projectId);
@@ -264,7 +266,7 @@ export function startSync(projectId: string, mode: TestMode = 'auto', onLog?: (l
   const syncId = Number(
     db.prepare("INSERT INTO syncs (project_id, started_at, status, step, owner_pid) VALUES (?, ?, 'running', 'check', ?)").run(projectId, now(), process.pid).lastInsertRowid,
   );
-  const job: Job = { syncId, child: null, cancelled: false };
+  const job: Job = { syncId, child: null, cancelled: false, abort: new AbortController() };
   jobs.set(projectId, job);
   const done = doSync(p, job, mode, onLog)
     .then(() => {
@@ -290,6 +292,7 @@ export function startSync(projectId: string, mode: TestMode = 'auto', onLog?: (l
 function stopAll() {
   for (const job of jobs.values()) {
     job.cancelled = true;
+    job.abort.abort();
     if (job.child?.pid) {
       try {
         process.kill(-job.child.pid, 'SIGTERM');
@@ -312,6 +315,7 @@ export function cancelSync(projectId: string) {
   const job = jobs.get(projectId);
   if (!job) throw new SyncError('No sync of this project runs in this app');
   job.cancelled = true;
+  job.abort.abort();
   if (job.child?.pid) {
     try {
       process.kill(-job.child.pid, 'SIGTERM'); // the whole process group: npx, playwright and the browser
@@ -420,6 +424,7 @@ async function doSync(p: ProjectConfig, job: Job, mode: TestMode, onLog?: (line:
     env: childEnv,
     log: say,
     cancelled: () => job.cancelled,
+    signal: job.abort.signal,
   });
   db.prepare('UPDATE syncs SET tests = ?, run_dir = ? WHERE id = ?').run(JSON.stringify(result), result.runDir ?? null, job.syncId);
   if (!result.selected) throw new SyncError(`The test run was not selected: ${result.reason}`);
@@ -440,7 +445,8 @@ function playwrightVersion(pwRoot: string): string | null {
 export function testDecision(p: ProjectConfig, to: string, mode: TestMode): { skip: boolean; reason: string } {
   if (mode === 'never') return { skip: true, reason: 'tests are off for this sync' };
   if (!p.playwrightDir) return { skip: true, reason: 'the project has no Playwright folder' };
-  if (!p.siteUrl) return { skip: true, reason: `no test site; set it with: npm run project -- set-sync ${p.id} --site <url>` };
+  if (!findEchowp()) return { skip: true, reason: 'echowp is not installed (the tests run on an echowp site)' };
+  if (!fs.existsSync(path.join(p.path, 'echowp.yml'))) return { skip: true, reason: `the copy has no echowp.yml (the tests run on an echowp site)` };
   if (mode === 'always') return { skip: false, reason: 'asked' };
   const run = p.runs.playwright;
   // runFreshness imports the run first. The commit column is empty until the run is imported,

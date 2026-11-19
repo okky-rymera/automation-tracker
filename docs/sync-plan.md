@@ -85,6 +85,27 @@ Built on 19 Nov 2026 in `server/ai-update.ts`. Command: `npm run project -- ai-u
 ## Phase 4: Scale to 40+ plugins
 
 1. [ ] Get coverage on sites that can run in parallel. Options: add PCOV to the echowp FrankenPHP build, or use a Docker site with Xdebug or PCOV.
+   - Hand test on 19 Nov 2026: echowp coverage works with no PHP build.
+     - echowp uses FrankenPHP's own PHP 8.5.8. echowp has published no PHP builds (no `php-builds` release).
+     - Xdebug and PCOV cannot be built into PHP (static-php-cli `ext.json`: `"target": ["shared"]`). The normal FrankenPHP binary cannot load add-on files.
+     - FrankenPHP's own `frankenphp-linux-x86_64-gnu` (same release, 1.12.4) can load them.
+     - No ready-made thread-safe Xdebug file for it was found. Xdebug 3.5.3 was built with `pecl install xdebug` in `php:8.5.8-zts-trixie`. Build ID `API20250925,TS` and the timer and signal settings match the binary.
+     - It loaded. 400 parallel requests (16 PHP threads) each got correct coverage.
+     - An echowp site got the binary from PATH and the settings from `PHP_INI_SCAN_DIR`, with no echowp change. Settings: `zend_extension`, `xdebug.mode=coverage`, `auto_prepend_file`.
+     - 28 page loads gave 28 correct request files with wwp lines. Each file had the same 10,592 runnable lines.
+     - Decided on 19 Nov 2026: the tracker makes the coverage PHP, not echowp. echowp does not change.
+   - Built on 19 Nov 2026: `npm run project -- coverage-php` (`server/coverage-php.ts`). It downloads the "-gnu" binary, checks its sha256 against the GitHub digest, builds Xdebug in Docker, and checks it. It took 32 s. An echowp site with it gave 19 correct request files for 19 page loads.
+   - echowp runs one FrankenPHP process for all projects of a home (echowp `docs/DESIGN.md:443`). So the binary on PATH must not reach the user's echowp. Decided on 19 Nov 2026: the tracker has its own echowp home.
+   - Built on 19 Nov 2026: `npm run project -- echowp <id> <command>` (`server/echowp.ts`). It uses `ECHOWP_HOME=data/echowp-home`, the coverage PHP, plain HTTP, and ports from 8801 that neither home uses. After `up`, it checks the server's binary and `PHP_INI_SCAN_DIR` in `/proc`.
+     - Test with wwp: first `up` 17.5 minutes (downloads). The user's registry did not change, and `echowp ls --all` of the user does not show the tracker's site.
+     - Tracker MariaDB on port 3307, site on 8801. Page loads wrote request files. The copy has no changed files.
+     - `stop` frees the site and admin ports. The tracker's MariaDB stays on until `down`.
+   - Built on 19 Nov 2026: the sync test run always uses echowp (the user decided: no setting, nothing to start or stop by hand; the Local site and `--site` are gone). It starts `site-1` in profile `test` of the tracker's home, resets its database, runs the tests with 1 worker, and stops the site. The echowp stub in `coverage/no-sudo` stays: only the tracker's own code calls the real echowp.
+     - Test with wwp on 19 Nov 2026 (DB copy, so the real selected run did not change): new test site in 25 s, reset in 1 s, 48 passed and 2 skipped in 7.4 minutes, site stopped after the run. Run folder `data/projects/wwp/runs/2026-11-19-1715-sync-b73e8a97`.
+     - Compared with the Local site run at the same commit (`2026-11-19-1320-sync-b73e8a97`): tests ran 395 functions, against 367. 33 functions only on echowp (mostly admin notices and onboarding code of a fresh site), 5 only on Local. Cause: the site data differs (fresh template against an old site).
+     - The user's echowp registry did not change. The copy has no changed files. No failed logins.
+     - Real sync 6 from the app API ("Sync now", tests always): 47 passed, 2 skipped, 7.1 minutes, run `2026-11-19-1730-sync-b73e8a97` selected, site stopped after.
+   - Next: step 2 (parallel workers).
 2. [ ] With parallel sites, each request must name its test or worker. `coverage/prepend.php` already reads an `X-Coverage-ID` header. Test a worker header that the Playwright config sets.
 3. [ ] Run the sync on a schedule (each night or each week), not only by hand. Run tests only when PHP or test files changed.
 4. [ ] Make adding a plugin easy: the copy, the `.env` file, the test packages, the site link, and the project in the app.

@@ -1,16 +1,21 @@
 /**
- * Test run job of a sync: one full Playwright run with PHP coverage on the local test site.
+ * Test run job of a sync: one full Playwright run with PHP coverage on an echowp test site.
  *
+ *  0. start the project's test site in the tracker's own echowp home (server/echowp.ts, with the
+ *     coverage PHP) and reset its database. The site stops at the end, also after a failure or a cancel.
  *  1. empty coverage-data/raw (the site writes one file for each request there)
  *  2. baseline page loads (coverage/baseline.sh): their code is "library code"
  *  3. the Playwright tests, 1 worker, with the window reporter (start and end time of each test)
  *  4. copy the requests and the windows into a new run folder, then coverage/analyze.py
  *  5. write run-info.json and select the run, only when the report looks right
  *
- * The site must be idle during the run: page loads outside a test count as setup.
  * Only one test run at a time, for all projects: coverage-data/raw is one shared folder.
+ * All sites of the tracker's echowp home share one PHP server, so each of them records coverage.
+ * During a run, coverage-data/test-site.json names the port of the test site. Then
+ * coverage/prepend.php records only the requests to that port.
+ * When the server stops during a run (restart, Ctrl+C), an exit handler stops the test site.
  * The copy's .env can say ECHOWP=true. The job always sets ECHOWP=false and BASE_URL, so the
- * tests use the one local site, and the echowp setup (which can call sudo) does nothing.
+ * tests use the tracker's site, and the plugin's own echowp setup (which can call sudo) does nothing.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { db } from './db.ts';
 import { playwrightRoot } from './changes.ts';
 import { addCoverageRun, ROOT, type ProjectConfig } from './projects.ts';
+import { startTestSite, stopTestSitesSync, type TestSite } from './echowp.ts';
 
 export interface TestResult {
   ran: boolean;
@@ -41,13 +47,33 @@ interface Ctx {
   env: (extra?: Record<string, string>) => NodeJS.ProcessEnv;
   log: (line: string) => void;
   cancelled: () => boolean;
+  /** Fires on a cancel. */
+  signal?: AbortSignal;
 }
 
 const DATA = path.join(ROOT, 'coverage-data');
 const LOCK = path.join(ROOT, 'data', 'test-run.lock');
+/** The test site of the run that runs now: coverage/prepend.php reads it. */
+const SITE_MARK = path.join(DATA, 'test-site.json');
 
-/** A site on this computer only: tests change the site's data. */
-export const LOCAL_SITE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|[a-z0-9-]+(\.[a-z0-9-]+)*\.(local|localhost))(:\d+)?\/?$/i;
+/** The project of the test run that runs in this process, for the exit handler. */
+let active: ProjectConfig | null = null;
+
+// The "finally" of runTests does not run when the process exits (sync.ts calls process.exit on
+// SIGINT, SIGTERM and SIGHUP). Stop the test site here, synchronously, so that it does not keep
+// its port and PHP server.
+process.on('exit', () => {
+  if (!active) return;
+  const p = active;
+  active = null;
+  try {
+    for (const e of stopTestSitesSync(p)) console.error(`Could not stop the test site: ${e}`);
+  } catch (e) {
+    console.error(`Could not stop the test site: ${(e as Error).message}`);
+  }
+  fs.rmSync(SITE_MARK, { force: true });
+  fs.rmSync(LOCK, { force: true });
+});
 
 function takeLock(projectId: string) {
   try {
@@ -96,18 +122,29 @@ const stamp = () => {
 };
 
 export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Promise<TestResult> {
-  if (!p.siteUrl || !LOCAL_SITE.test(p.siteUrl)) {
-    return { ran: false, reason: `the test site "${p.siteUrl ?? ''}" is not a local site (localhost, *.local, *.localhost)` };
-  }
-  const site = p.siteUrl.replace(/\/+$/, '');
   const pwRoot = path.join(p.path, playwrightRoot(p));
   takeLock(p.id);
+  active = p;
   const started = Date.now();
   let runDir: string | null = null;
+  let echowpSite: TestSite | null = null;
   try {
     const dotenv = readEnv(path.join(pwRoot, '.env'));
     // The same defaults as the plugin's Playwright config.
     const creds = { ADMIN_USERNAME: dotenv.ADMIN_USERNAME || 'admin', ADMIN_PASSWORD: dotenv.ADMIN_PASSWORD || 'test' };
+    // 0. The test site.
+    ctx.log('Start the echowp test site (the first start of a project downloads WordPress and the plugins)');
+    echowpSite = await startTestSite(p, { user: creds.ADMIN_USERNAME, password: creds.ADMIN_PASSWORD }, ctx.log, async (cmd, args, env, onLine) => {
+      const r = await ctx.run(cmd, args, { cwd: ROOT, env, quiet: true, onLine });
+      return r.code ?? 1;
+    }, ctx.signal);
+    if (ctx.cancelled()) throw new Error('Cancelled');
+    const site = echowpSite.url;
+    ctx.log(`echowp test site ${echowpSite.name}: ${site}`);
+    // Record only the requests to the test site, not to other sites of the tracker's PHP server.
+    const port = Number(new URL(site).port) || (site.startsWith('https:') ? 443 : 80);
+    fs.mkdirSync(DATA, { recursive: true });
+    fs.writeFileSync(SITE_MARK, JSON.stringify({ port, pid: process.pid, project: p.id }) + '\n');
     const env = ctx.env({ ...creds, ECHOWP: 'false', BASE_URL: site, WORKERS: '1' });
 
     // 1. A clean request folder.
@@ -130,7 +167,7 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     runDir = path.join(ROOT, runRel);
     fs.mkdirSync(runDir, { recursive: true });
     const logFile = fs.openSync(path.join(runDir, 'full-run.log'), 'w');
-    ctx.log(`Playwright run, 1 worker. Keep the site idle: page loads outside a test count as setup.`);
+    ctx.log(`Playwright run, 1 worker.`);
     const reporter = path.join(ROOT, 'coverage', 'test-window-reporter.cjs');
     let pw;
     try {
@@ -200,6 +237,14 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     if ((e as Error).message === 'Cancelled' && runDir) fs.rmSync(runDir, { recursive: true, force: true });
     throw e;
   } finally {
+    // A stop error must not replace the result of the run.
+    try {
+      if (echowpSite) await echowpSite.stop();
+    } catch (e) {
+      ctx.log(`Could not stop the test site: ${(e as Error).message}`);
+    }
+    fs.rmSync(SITE_MARK, { force: true });
     fs.rmSync(LOCK, { force: true });
+    active = null;
   }
 }
