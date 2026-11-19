@@ -6,3 +6,5 @@ coverage/plugins.json
 __pycache__/
 # Live database and coverage run files: local data, not code.
 data/
+# Snapshots and screenshots of playwright-cli.
+.playwright-cli/
