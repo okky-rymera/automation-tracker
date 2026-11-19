@@ -74,7 +74,10 @@ export const SETPRIV = (() => {
 /** A command that the running sync started. Cancel stops its whole process group. */
 export interface Job {
   syncId: number;
+  /** A command that still runs: the last one that started, or else another one that runs. */
   child: ReturnType<typeof spawn> | null;
+  /** All commands that run now. A test run starts one setup command for each test site at the same time. */
+  children?: Set<ReturnType<typeof spawn>>;
   cancelled: boolean;
   /** Fires on a cancel. It stops work that is not in job.child, such as a build of the coverage PHP. */
   abort: AbortController;
@@ -112,6 +115,7 @@ export function run(job: Job, cmd: string, args: string[], o: RunOptions): Promi
     const [c, a] = SETPRIV ? [SETPRIV, ['--no-new-privs', '--', cmd, ...args]] : [cmd, args];
     const child = spawn(c, a, { cwd: o.cwd, env: o.env ?? childEnv(), stdio: [o.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], detached: true });
     job.child = child;
+    (job.children ??= new Set()).add(child);
     if (o.input !== undefined) {
       // A command that stops before it reads all its input gives EPIPE. Without a handler, that
       // error would stop the whole server. The exit code and output still show what went wrong.
@@ -139,10 +143,26 @@ export function run(job: Job, cmd: string, args: string[], o: RunOptions): Promi
     child.on('error', reject);
     child.on('close', (code, signal) => {
       if (partial) take(Buffer.from('\n'));
-      job.child = null;
+      job.children?.delete(child);
+      // Point to a command that still runs (the setup commands of a test run end in any order).
+      if (job.child === child) job.child = [...(job.children ?? [])].pop() ?? null;
       resolve({ code, signal, out });
     });
   });
+}
+
+/** Stops the process group of each command of the job: npx, playwright and the browser. */
+function killChildren(job: Job) {
+  const all = new Set(job.children ?? []);
+  if (job.child) all.add(job.child);
+  for (const c of all) {
+    if (!c.pid) continue;
+    try {
+      process.kill(-c.pid, 'SIGTERM');
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /** Runs a command and fails the sync when it does not end with code 0. */
@@ -293,13 +313,7 @@ function stopAll() {
   for (const job of jobs.values()) {
     job.cancelled = true;
     job.abort.abort();
-    if (job.child?.pid) {
-      try {
-        process.kill(-job.child.pid, 'SIGTERM');
-      } catch {
-        /* already gone */
-      }
-    }
+    killChildren(job);
   }
 }
 process.on('exit', stopAll);
@@ -316,13 +330,7 @@ export function cancelSync(projectId: string) {
   if (!job) throw new SyncError('No sync of this project runs in this app');
   job.cancelled = true;
   job.abort.abort();
-  if (job.child?.pid) {
-    try {
-      process.kill(-job.child.pid, 'SIGTERM'); // the whole process group: npx, playwright and the browser
-    } catch {
-      /* already gone */
-    }
-  }
+  killChildren(job);
 }
 
 async function doSync(p: ProjectConfig, job: Job, mode: TestMode, onLog?: (line: string) => void) {

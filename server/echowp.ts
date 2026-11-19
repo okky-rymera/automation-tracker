@@ -133,6 +133,9 @@ function sitePort(s: any): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** A new site cannot get the port that comes after the ports of the existing sites. */
+export class PortClash extends Error {}
+
 /**
  * The start port for an "up" that adds sites to sites that exist. echowp gives the k-th site
  * of the "up" the port base+k-1, and it refuses to move a site that exists (echowp
@@ -147,13 +150,13 @@ async function portBaseForMore(mine: any[], target: string[]): Promise<number> {
     if (!port) throw new Error(`The tracker cannot read the port of site ${s.name}. Give --port, or remove the sites with "down" first.`);
     bases.add(port - target.indexOf(s.name));
   }
-  if (bases.size !== 1) throw new Error(`The sites of this project do not have ports in a row. Give --port, or remove the sites with "down" first.`);
+  if (bases.size !== 1) throw new PortClash(`The sites of this project do not have ports in a row. Give --port, or remove the sites with "down" first.`);
   const base = [...bases][0];
   const own = new Set(mine.map(sitePort));
   const used = new Set([...registryPorts(userEchowpHome()), ...registryPorts(TRACKER_ECHOWP_HOME)]);
   for (let p = base; p < base + target.length; p++) {
     if (own.has(p)) continue;
-    if (!(await portUsable(p, used))) throw new Error(`Port ${p} is in use, so a new site cannot get it. Remove the sites with "down" first. The next "up" then picks new ports.`);
+    if (!(await portUsable(p, used))) throw new PortClash(`Port ${p} is in use, so a new site cannot get it. Remove the sites with "down" first. The next "up" then picks new ports.`);
   }
   return base;
 }
@@ -324,22 +327,33 @@ export const TEST_PROFILE = 'test';
 export interface TestSite {
   name: string;
   url: string;
-  /** Stops the site and keeps its data. The next run starts it again in about 1 second. */
+  /** echowp clone number: site-1 is 1. Playwright worker slot k uses the site with index k+1. */
+  index: number;
+  port: number;
+}
+
+export interface TestSites {
+  /** Sorted by index: sites[k] is the site of worker slot k. */
+  sites: TestSite[];
+  /** Stops all sites and keeps their data. The next run starts them again in about 1 second each. */
   stop: () => Promise<void>;
 }
 
 /**
- * Starts one test site of the project in the tracker's echowp home, resets its database to the
- * echowp template, and gives its URL. The first start of a project downloads WordPress and plugins.
+ * Starts n test sites of the project (site-1 … site-n, profile "test") in the tracker's echowp
+ * home, resets the database of each to the echowp template, and gives their URLs. Sites with a
+ * higher number from an earlier run stay stopped. The first start of a project downloads
+ * WordPress and plugins, and each new site is a clone of the first.
  * admin: the login that the tests use. echowp puts it into the template when it makes the site.
  */
-export async function startTestSite(
+export async function startTestSites(
   p: ProjectConfig,
+  n: number,
   admin: { user: string; password: string },
   log: (l: string) => void,
   run?: EchowpRunner,
   signal?: AbortSignal,
-): Promise<TestSite> {
+): Promise<TestSites> {
   const o: EchowpOptions = { env: { ECHOWP_ADMIN_USER: admin.user, ECHOWP_ADMIN_PASSWORD: admin.password }, run, signal };
   const prof = ['--profile', TEST_PROFILE];
   const cov = await coveragePhp(log, signal);
@@ -354,20 +368,45 @@ export async function startTestSite(
     }
   };
   try {
-    const up = await trackerEchowp(p, ['up', '--count', '1', ...prof], log, o);
+    let up: number;
+    try {
+      up = await trackerEchowp(p, ['up', '--count', String(n), ...prof], log, o);
+    } catch (e) {
+      // New sites must get the ports right after the ports of the existing sites (portBaseForMore).
+      // Another project's site can have one of those ports, for example after one-site runs.
+      // Then remove the test sites of this project, and start all n on a new block of free ports.
+      // The tests reset the database of each site, so no data is lost.
+      if (!(e instanceof PortClash)) throw e;
+      log(`${(e as Error).message} Remove the test sites of this project and start ${n} new sites on free ports.`);
+      await stopAll();
+      for (const s of await trackerSites(p, env, prof)) {
+        const rm = await trackerEchowp(p, ['rm', s.name, ...prof], log, o);
+        if (rm !== 0) throw new Error(`echowp rm ${s.name} failed (exit ${rm}).`);
+      }
+      up = await trackerEchowp(p, ['up', '--count', String(n), ...prof], log, o);
+    }
     if (up !== 0) throw new Error(`echowp up failed (exit ${up}).`);
-    const site = (await trackerSites(p, env, prof)).find((s) => s.status === 'running' && s.url);
-    if (!site) throw new Error(`echowp up ended, but echowp ls shows no running site in profile "${TEST_PROFILE}".`);
+    const want = Array.from({ length: n }, (_, i) => `site-${i + 1}`);
+    const running = (await trackerSites(p, env, prof)).filter((s) => s.status === 'running' && s.url);
+    const sites: TestSite[] = [];
+    for (const [i, name] of want.entries()) {
+      const s = running.find((x) => x.name === name);
+      const port = s && sitePort(s);
+      if (!s || !port) throw new Error(`echowp up ended, but echowp ls shows no running site ${name} with a port in profile "${TEST_PROFILE}".`);
+      sites.push({ name, url: String(s.url).replace(/\/+$/, ''), index: i + 1, port });
+    }
     // A clean database for each run, so that the data of the last run does not change the result.
-    const reset = await trackerEchowp(p, ['reset', site.name, ...prof], log, o);
-    if (reset !== 0) throw new Error(`echowp reset ${site.name} failed (exit ${reset}).`);
-    return { name: site.name, url: String(site.url).replace(/\/+$/, ''), stop: stopAll };
+    for (const s of sites) {
+      const reset = await trackerEchowp(p, ['reset', s.name, ...prof], log, o);
+      if (reset !== 0) throw new Error(`echowp reset ${s.name} failed (exit ${reset}).`);
+    }
+    return { sites, stop: stopAll };
   } catch (e) {
     // A failed or cancelled start must not leave a site on.
     try {
       await stopAll();
     } catch (e2) {
-      log(`Could not stop the test site: ${(e2 as Error).message}`);
+      log(`Could not stop the test sites: ${(e2 as Error).message}`);
     }
     throw e;
   }

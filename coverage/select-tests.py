@@ -31,7 +31,7 @@ import sys
 import tempfile
 from collections import Counter, defaultdict
 
-from raw_records import plugin_lines, plugin_name
+from raw_records import plugin_lines, plugin_name, site_slots, window_of
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXCLUDE = json.load(open(os.path.join(HERE, 'exclude-dirs.json')))
@@ -91,12 +91,14 @@ startup = {(f['file'], f['function']) for f in report['functions'] if f['categor
 # window of a test counts, also its setup calls, because a change there can break the test too.
 # This also covers files without functions (templates in views/) and the startup lines of a function.
 windows = [w for w in json.load(open(os.path.join(run_dir, 'test-windows.json'))) if w['start']]
+slots = site_slots(run_dir)
 hits = defaultdict(lambda: defaultdict(set))   # run test ID -> file -> lines
 for path in glob.glob(os.path.join(run_dir, 'raw', '*.json')):
     r = json.load(open(path))
     if r.get('kind') == 'baseline':
         continue
-    owner = next((w['id'] for w in windows if w['start'] <= r['start'] <= w['end']), None)
+    w = window_of(r, windows, slots)
+    owner = w['id'] if w else None
     if owner not in all_tests:
         continue
     for f, lines in plugin_lines(r, plugin_name(repo))[0].items():

@@ -1,6 +1,6 @@
 /**
- * Playwright reporter (trial). It writes the start and end time of each test,
- * so the coverage requests can be matched to tests by time.
+ * Playwright reporter. It writes the start and end time and the worker slot of each test,
+ * so the coverage requests can be matched to tests by site and time.
  *
  * Use it with: --reporter=list,/path/to/test-window-reporter.cjs
  */
@@ -51,6 +51,9 @@ class TestWindowReporter {
       line: test.location.line,
       tags: test.tags,
       retry: result.retry,
+      // The worker slot (0 … workers-1). Each slot has its own test site (server/test-run.ts).
+      // Not workerIndex: a worker that restarts after a failure gets a new index but keeps its slot.
+      slot: result.parallelIndex,
       status: result.status,
       start: this.open.get(key),
       end: Date.now() / 1000,

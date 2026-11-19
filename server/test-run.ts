@@ -1,18 +1,22 @@
 /**
  * Test run job of a sync: one full Playwright run with PHP coverage on an echowp test site.
  *
- *  0. start the project's test site in the tracker's own echowp home (server/echowp.ts, with the
- *     coverage PHP) and reset its database. The site stops at the end, also after a failure or a cancel.
- *  1. empty coverage-data/raw (the site writes one file for each request there)
- *  2. baseline page loads (coverage/baseline.sh): their code is "library code"
- *  3. the Playwright tests, 1 worker, with the window reporter (start and end time of each test)
- *  4. copy the requests and the windows into a new run folder, then coverage/analyze.py
+ *  0. start one test site for each worker in the tracker's own echowp home (server/echowp.ts, with
+ *     the coverage PHP) and reset their databases. The sites stop at the end, also after a failure
+ *     or a cancel.
+ *  1. empty coverage-data/raw (the sites write one file for each request there)
+ *  2. baseline page loads (coverage/baseline.sh) on the first site: their code is "library code"
+ *  3. the plugin's setup project once for each site, then the other Playwright projects with one
+ *     worker for each site (coverage/playwright-wrapper.cjs gives each worker its site), with the
+ *     window reporter (start, end and worker slot of each test)
+ *  4. copy the requests, the windows and the slot-to-port list (sites.json) into a new run folder,
+ *     then coverage/analyze.py. A request goes to a test of the worker whose site has its port.
  *  5. write run-info.json and select the run, only when the report looks right
  *
  * Only one test run at a time, for all projects: coverage-data/raw is one shared folder.
  * All sites of the tracker's echowp home share one PHP server, so each of them records coverage.
- * During a run, coverage-data/test-site.json names the port of the test site. Then
- * coverage/prepend.php records only the requests to that port.
+ * During a run, coverage-data/test-site.json names the ports of the test sites. Then
+ * coverage/prepend.php records only the requests to those ports, with the port.
  * When the server stops during a run (restart, Ctrl+C), an exit handler stops the test site.
  * The copy's .env can say ECHOWP=true. The job always sets ECHOWP=false and BASE_URL, so the
  * tests use the tracker's site, and the plugin's own echowp setup (which can call sudo) does nothing.
@@ -23,7 +27,9 @@ import { execFileSync } from 'node:child_process';
 import { db } from './db.ts';
 import { playwrightRoot } from './changes.ts';
 import { addCoverageRun, ROOT, type ProjectConfig } from './projects.ts';
-import { startTestSite, stopTestSitesSync, type TestSite } from './echowp.ts';
+import os from 'node:os';
+import { createRequire } from 'node:module';
+import { startTestSites, stopTestSitesSync, type TestSites } from './echowp.ts';
 
 export interface TestResult {
   ran: boolean;
@@ -56,6 +62,64 @@ const LOCK = path.join(ROOT, 'data', 'test-run.lock');
 /** The test site of the run that runs now: coverage/prepend.php reads it. */
 const SITE_MARK = path.join(DATA, 'test-site.json');
 
+/**
+ * Copied next to the plugin's Playwright config during a run: coverage/playwright-wrapper.cjs for
+ * a CommonJS config, coverage/playwright-wrapper.mjs for an ES module config.
+ */
+const WRAPPER_BASE = '.tracker-playwright.config';
+const WRAPPER_LIB = path.join(ROOT, 'coverage', 'playwright-wrapper-lib.cjs');
+
+/** "mjs" when the config is an ES module: .mjs or .mts, or .js or .ts in a "type": "module" package. */
+function configKind(pwRoot: string, config: string): 'cjs' | 'mjs' {
+  if (/\.m[jt]s$/.test(config)) return 'mjs';
+  if (/\.c[jt]s$/.test(config)) return 'cjs';
+  for (let dir = pwRoot; ; dir = path.dirname(dir)) {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).type === 'module' ? 'mjs' : 'cjs';
+    } catch {
+      /* no package.json here */
+    }
+    if (path.dirname(dir) === dir) return 'cjs';
+  }
+}
+
+/** The copy of a saved login file for the site of a slot: the same name as the wrapper uses. */
+const stateCopy: (file: string, slot: number) => string = createRequire(import.meta.url)(WRAPPER_LIB).stateFile;
+
+/** Facts about the plugin's config, from coverage/playwright-wrapper-lib.cjs. */
+interface ConfigInfo {
+  storageStates: string[];
+  setupProjects: string[];
+  teardownProjects: string[];
+  globalSetup: boolean;
+  globalTeardown: boolean;
+}
+
+/** Waits for all commands, also when one of them fails to start. A start error becomes exit null. */
+async function settleAll<T extends { code: number | null; signal: string | null; out: string }>(jobs: Promise<T>[]) {
+  const done = await Promise.allSettled(jobs);
+  return done.map((d) => (d.status === 'fulfilled' ? d.value : { code: null, signal: `start error: ${(d.reason as Error)?.message ?? d.reason}`, out: '' }));
+}
+/** Config file names that Playwright looks for, in its own order. */
+const PW_CONFIGS = ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mts', 'playwright.config.mjs', 'playwright.config.cts', 'playwright.config.cjs'];
+
+/**
+ * Workers (and test sites) for a run. All sites share one PHP server, so more workers than half
+ * the CPUs gives slow requests and timeouts. TRACKER_TEST_WORKERS changes it (for trials).
+ */
+export function testWorkers(): number {
+  const env = Number.parseInt(process.env.TRACKER_TEST_WORKERS ?? '', 10);
+  if (env > 0) return env;
+  return Math.max(1, Math.min(MAX_WORKERS, Math.floor(os.cpus().length / 2)));
+}
+const MAX_WORKERS = 4;
+
+/** Copies of saved login files, one for each site. Removed at the end of the run, or by the exit handler. */
+const activeStateCopies: string[] = [];
+
+/** The wrapper file of the run that runs in this process, for the exit handler. */
+let activeWrapper: string | null = null;
+
 /** The project of the test run that runs in this process, for the exit handler. */
 let active: ProjectConfig | null = null;
 
@@ -63,6 +127,8 @@ let active: ProjectConfig | null = null;
 // SIGINT, SIGTERM and SIGHUP). Stop the test site here, synchronously, so that it does not keep
 // its port and PHP server.
 process.on('exit', () => {
+  if (activeWrapper) fs.rmSync(activeWrapper, { force: true });
+  for (const f of activeStateCopies) fs.rmSync(f, { force: true });
   if (!active) return;
   const p = active;
   active = null;
@@ -127,25 +193,75 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
   active = p;
   const started = Date.now();
   let runDir: string | null = null;
-  let echowpSite: TestSite | null = null;
+  let echowpSites: TestSites | null = null;
+  let wrapper: string | null = null;
+  const stateCopies = activeStateCopies;
+  stateCopies.length = 0;
   try {
+    const pwConfig = PW_CONFIGS.find((f) => fs.existsSync(path.join(pwRoot, f)));
+    if (!pwConfig) return { ran: false, reason: `no Playwright config (${PW_CONFIGS.join(', ')}) in ${pwRoot}` };
+    let workers = testWorkers();
     const dotenv = readEnv(path.join(pwRoot, '.env'));
     // The same defaults as the plugin's Playwright config.
     const creds = { ADMIN_USERNAME: dotenv.ADMIN_USERNAME || 'admin', ADMIN_PASSWORD: dotenv.ADMIN_PASSWORD || 'test' };
-    // 0. The test site.
-    ctx.log('Start the echowp test site (the first start of a project downloads WordPress and the plugins)');
-    echowpSite = await startTestSite(p, { user: creds.ADMIN_USERNAME, password: creds.ADMIN_PASSWORD }, ctx.log, async (cmd, args, env, onLine) => {
+    const wrapperName = `${WRAPPER_BASE}.${configKind(pwRoot, pwConfig)}`;
+    wrapper = path.join(pwRoot, wrapperName);
+    fs.copyFileSync(path.join(ROOT, 'coverage', `playwright-wrapper.${configKind(pwRoot, pwConfig)}`), wrapper);
+    activeWrapper = wrapper;
+    const baseEnv = ctx.env({ ...creds, ECHOWP: 'false', TRACKER_PW_CONFIG: pwConfig, TRACKER_WRAPPER_LIB: WRAPPER_LIB });
+    const pwArgs = ['playwright', 'test', '-c', wrapperName];
+
+    // Before the sites start: read the config, and find tests whose name holds BASE_URL. The test
+    // list does not open the sites, so two made-up URLs are enough.
+    const infoFile = path.join(DATA, 'config-info.json');
+    fs.mkdirSync(DATA, { recursive: true });
+    fs.rmSync(infoFile, { force: true });
+    const li = await ctx.run('npx', [...pwArgs, '--list'], { cwd: pwRoot, env: { ...baseEnv, BASE_URL: 'http://tracker-check.localhost', TRACKER_PHASE: 'setup', TRACKER_INFO_FILE: infoFile }, quiet: true });
+    if (ctx.cancelled()) throw new Error('Cancelled');
+    if (li.code !== 0 || !fs.existsSync(infoFile)) {
+      return { ran: false, reason: `Playwright could not read the config ${pwConfig} (exit ${li.code ?? li.signal}): ${li.out.trim().split('\n').slice(-3).join(' | ')}` };
+    }
+    const info = JSON.parse(fs.readFileSync(infoFile, 'utf8')) as ConfigInfo;
+    if (workers > 1) {
+      const lists: string[] = [];
+      for (const slot of ['0', '1']) {
+        const out = path.join(DATA, `test-list-${slot}.json`);
+        const r = await ctx.run('npx', [...pwArgs, '--list', '--reporter=json'], {
+          cwd: pwRoot,
+          env: { ...baseEnv, TRACKER_PHASE: 'main', TRACKER_LIST_SLOT: slot, TRACKER_SITE_URLS: JSON.stringify(['http://tracker-check-1.localhost:8801', 'http://tracker-check-2.localhost:8802']), PLAYWRIGHT_JSON_OUTPUT_NAME: out },
+          quiet: true,
+        });
+        if (ctx.cancelled()) throw new Error('Cancelled');
+        let suites = '';
+        try {
+          suites = JSON.stringify(JSON.parse(fs.readFileSync(out, 'utf8')).suites);
+        } catch {
+          /* no list */
+        }
+        fs.rmSync(out, { force: true });
+        lists.push(r.code === 0 ? suites : '');
+      }
+      // Playwright lists the tests in the main process (site 1) and runs them in the workers (own
+      // site). A name that holds BASE_URL is then not the same, and the worker does not find the test.
+      if (!lists[0] || lists[0] !== lists[1]) {
+        ctx.log(lists[0] ? 'Some test names hold the site URL (BASE_URL), so the tests run on 1 worker.' : 'Playwright could not list the tests, so the tests run on 1 worker.');
+        workers = 1;
+      }
+    }
+
+    // 0. The test sites: one for each worker.
+    ctx.log(`Start ${workers} echowp test site${workers === 1 ? '' : 's'} (the first start of a project downloads WordPress and the plugins)`);
+    echowpSites = await startTestSites(p, workers, { user: creds.ADMIN_USERNAME, password: creds.ADMIN_PASSWORD }, ctx.log, async (cmd, args, env, onLine) => {
       const r = await ctx.run(cmd, args, { cwd: ROOT, env, quiet: true, onLine });
       return r.code ?? 1;
     }, ctx.signal);
     if (ctx.cancelled()) throw new Error('Cancelled');
-    const site = echowpSite.url;
-    ctx.log(`echowp test site ${echowpSite.name}: ${site}`);
-    // Record only the requests to the test site, not to other sites of the tracker's PHP server.
-    const port = Number(new URL(site).port) || (site.startsWith('https:') ? 443 : 80);
-    fs.mkdirSync(DATA, { recursive: true });
-    fs.writeFileSync(SITE_MARK, JSON.stringify({ port, pid: process.pid, project: p.id }) + '\n');
-    const env = ctx.env({ ...creds, ECHOWP: 'false', BASE_URL: site, WORKERS: '1' });
+    const sites = echowpSites.sites;
+    const site = sites[0].url;
+    ctx.log(`echowp test sites: ${sites.map((s) => `${s.name} ${s.url}`).join(', ')}`);
+    // Record only the requests to the test sites, not to other sites of the tracker's PHP server.
+    fs.writeFileSync(SITE_MARK, JSON.stringify({ ports: sites.map((s) => s.port), pid: process.pid, project: p.id }) + '\n');
+    const env = { ...baseEnv, BASE_URL: site, WORKERS: String(workers), TRACKER_SITE_URLS: JSON.stringify(sites.map((s) => s.url)) };
 
     // 1. A clean request folder.
     const raw = path.join(DATA, 'raw');
@@ -166,17 +282,69 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     const runRel = path.join('data', 'projects', p.id, 'runs', `${stamp()}-sync-${commit.slice(0, 8)}`);
     runDir = path.join(ROOT, runRel);
     fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'sites.json'), JSON.stringify(sites.map((s, slot) => ({ slot, name: s.name, port: s.port })), null, 2) + '\n');
     const logFile = fs.openSync(path.join(runDir, 'full-run.log'), 'w');
-    ctx.log(`Playwright run, 1 worker.`);
     const reporter = path.join(ROOT, 'coverage', 'test-window-reporter.cjs');
+    // One command for each site, in the setup or teardown phase. Each has its own results folder:
+    // Playwright empties its results folder when it starts.
+    const phaseRun = (phase: string, slot: number) =>
+      ctx.run('npx', [...pwArgs, '--reporter=list', '--workers=1', '--pass-with-no-tests', `--output=test-results/tracker-${phase}-${sites[slot].name}`], {
+        cwd: pwRoot,
+        env: { ...env, TRACKER_PHASE: phase, BASE_URL: sites[slot].url, TRACKER_SITE_SLOT: String(slot) },
+        quiet: true,
+      });
     let pw;
     try {
-      pw = await ctx.run('npx', ['playwright', 'test', `--reporter=list,${reporter}`, '--workers=1'], {
+      // 3a. The setup projects and globalSetup once for each site. Their requests are in no test
+      // window, so the analysis counts them as setup. Without saved login files, all sites at the
+      // same time. With them, one site after the other: the setup writes one file, and the tracker
+      // copies it for the site (coverage/playwright-wrapper-lib.cjs).
+      ctx.log(`Playwright setup on ${sites.map((s) => s.name).join(', ')}${info.storageStates.length ? ' (one after the other, for the saved logins)' : ''}`);
+      let setups: Awaited<ReturnType<typeof phaseRun>>[];
+      if (!info.storageStates.length) setups = await settleAll(sites.map((_, k) => phaseRun('setup', k)));
+      else {
+        setups = [];
+        for (const k of sites.keys()) {
+          const r = (await settleAll([phaseRun('setup', k)]))[0];
+          setups.push(r);
+          if (ctx.cancelled() || r.code !== 0) break;
+          for (const f of info.storageStates) {
+            const src = path.resolve(pwRoot, f);
+            const dst = path.resolve(pwRoot, stateCopy(f, k));
+            if (fs.existsSync(src)) {
+              fs.copyFileSync(src, dst);
+              stateCopies.push(dst);
+            }
+          }
+        }
+      }
+      for (const [i, su] of setups.entries()) fs.writeSync(logFile, `=== setup on ${sites[i].name} (${sites[i].url}), exit ${su.code ?? su.signal}\n${su.out.trim()}\n`);
+      if (ctx.cancelled()) throw new Error('Cancelled');
+      const bad = setups.findIndex((su) => su.code !== 0);
+      if (bad >= 0) {
+        const su = setups[bad];
+        const tail = su.out.trim().split('\n').slice(-4).join(' | ');
+        return { ran: false, runDir: runRel, reason: `the Playwright setup failed on ${sites[bad].name} (exit ${su.code ?? su.signal}): ${tail}` };
+      }
+      // 3b. The other projects, one worker for each site.
+      ctx.log(`Playwright run, ${workers} worker${workers === 1 ? '' : 's'}.`);
+      fs.writeSync(logFile, `=== tests, ${workers} workers\n`);
+      pw = await ctx.run('npx', [...pwArgs, `--reporter=list,${reporter}`, `--workers=${workers}`], {
         cwd: pwRoot,
-        env,
+        env: { ...env, TRACKER_PHASE: 'main' },
         quiet: true,
         onLine: (l) => fs.writeSync(logFile, l + '\n'),
       });
+      // 3c. The teardown projects and globalTeardown once for each site. A failure here does not
+      // change the result of the tests.
+      if (!ctx.cancelled() && (info.teardownProjects.length || info.globalTeardown)) {
+        ctx.log(`Playwright teardown on ${sites.map((s) => s.name).join(', ')}`);
+        const tds = await settleAll(sites.map((_, k) => phaseRun('teardown', k)));
+        for (const [i, td] of tds.entries()) {
+          fs.writeSync(logFile, `=== teardown on ${sites[i].name}, exit ${td.code ?? td.signal}\n${td.out.trim()}\n`);
+          if (td.code !== 0) ctx.log(`The Playwright teardown failed on ${sites[i].name} (exit ${td.code ?? td.signal}). See full-run.log.`);
+        }
+      }
     } finally {
       fs.closeSync(logFile);
     }
@@ -237,11 +405,14 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     if ((e as Error).message === 'Cancelled' && runDir) fs.rmSync(runDir, { recursive: true, force: true });
     throw e;
   } finally {
+    if (wrapper) fs.rmSync(wrapper, { force: true });
+    for (const f of stateCopies) fs.rmSync(f, { force: true });
+    activeWrapper = null;
     // A stop error must not replace the result of the run.
     try {
-      if (echowpSite) await echowpSite.stop();
+      if (echowpSites) await echowpSites.stop();
     } catch (e) {
-      ctx.log(`Could not stop the test site: ${(e as Error).message}`);
+      ctx.log(`Could not stop the test sites: ${(e as Error).message}`);
     }
     fs.rmSync(SITE_MARK, { force: true });
     fs.rmSync(LOCK, { force: true });

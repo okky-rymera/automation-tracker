@@ -8,8 +8,8 @@
  * coverage-data/raw/ in this tool. The lines are kept by plugin name.
  * Older request files have one plugin, in "files" and "not_run" at the top.
  *
- * Requests are matched to tests later by time (start/end below), so
- * the test run must use one worker.
+ * Requests are matched to tests later by time (start/end below). In a run with
+ * more workers, each worker has its own site, so the port also names the worker.
  */
 
 if ( ! function_exists( 'xdebug_start_code_coverage' ) || PHP_SAPI === 'cli' ) {
@@ -22,10 +22,22 @@ if ( isset( $_SERVER['HTTP_X_COVERAGE_SKIP'] ) ) {
 }
 
 /**
- * During a test run of a sync, coverage-data/test-site.json names the port of the test site
- * (server/test-run.ts). All sites of the tracker's echowp home share one PHP server, so record
- * only the requests to that port. Without the file (or when the run that wrote it has
- * stopped), record all requests, as before.
+ * The port of this request: the port in the Host header, else the server port. null when unknown.
+ */
+function __atcov_port() {
+	$host = isset( $_SERVER['HTTP_HOST'] ) ? (string) $_SERVER['HTTP_HOST'] : '';
+	if ( preg_match( '/:(\d+)$/', $host, $p ) ) {
+		return (int) $p[1];
+	}
+	return isset( $_SERVER['SERVER_PORT'] ) ? (int) $_SERVER['SERVER_PORT'] : null;
+}
+
+/**
+ * During a test run of a sync, coverage-data/test-site.json names the ports of the test sites
+ * (server/test-run.ts): one site for each Playwright worker. All sites of the tracker's echowp
+ * home share one PHP server, so record only the requests to those ports. Without the file (or
+ * when the run that wrote it has stopped), record all requests, as before.
+ * Older files have one "port" in place of "ports".
  */
 function __atcov_other_site() {
 	$mark = @file_get_contents( dirname( __DIR__ ) . '/coverage-data/test-site.json' );
@@ -33,21 +45,21 @@ function __atcov_other_site() {
 		return false;
 	}
 	$m = json_decode( $mark, true );
-	if ( ! is_array( $m ) || empty( $m['port'] ) ) {
+	if ( ! is_array( $m ) ) {
+		return false;
+	}
+	$ports = isset( $m['ports'] ) && is_array( $m['ports'] ) ? $m['ports'] : ( empty( $m['port'] ) ? array() : array( $m['port'] ) );
+	if ( ! $ports ) {
 		return false;
 	}
 	if ( ! empty( $m['pid'] ) && is_dir( '/proc' ) && ! file_exists( '/proc/' . (int) $m['pid'] ) ) {
 		return false; // Left by a run that stopped.
 	}
-	$host = isset( $_SERVER['HTTP_HOST'] ) ? (string) $_SERVER['HTTP_HOST'] : '';
-	if ( preg_match( '/:(\d+)$/', $host, $p ) ) {
-		$port = (int) $p[1];
-	} elseif ( isset( $_SERVER['SERVER_PORT'] ) ) {
-		$port = (int) $_SERVER['SERVER_PORT'];
-	} else {
+	$port = __atcov_port();
+	if ( null === $port ) {
 		return false;
 	}
-	return $port !== (int) $m['port'];
+	return ! in_array( $port, array_map( 'intval', $ports ), true );
 }
 if ( __atcov_other_site() ) {
 	return;
@@ -172,6 +184,8 @@ function __atcov_write() {
 		'end'     => microtime( true ),
 		'method'  => isset( $_SERVER['REQUEST_METHOD'] ) ? $_SERVER['REQUEST_METHOD'] : '',
 		'uri'     => isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '',
+		// The site of the request: in a run with more workers, each worker has its own site.
+		'port'    => __atcov_port(),
 		'test_id' => isset( $_SERVER['HTTP_X_COVERAGE_ID'] ) ? $_SERVER['HTTP_X_COVERAGE_ID'] : null,
 		// admin-ajax.php requests name their job in "action" (for example "heartbeat").
 		'action'  => isset( $_REQUEST['action'] ) && is_string( $_REQUEST['action'] ) ? $_REQUEST['action'] : null,

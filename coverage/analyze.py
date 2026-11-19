@@ -3,6 +3,7 @@
 
 Usage: python3 analyze.py <plugin-dir> [run-dir] [--exclude a,b,c]
 run-dir defaults to coverage-data/. It must hold raw/*.json and test-windows.json.
+A run with more workers also has sites.json (worker slot -> site port).
 test-windows.json comes from the Playwright reporter (coverage/test-window-reporter.cjs)
 or, for a Cypress run, from coverage/cypress-windows.py. Make one run per test tool.
 Writes report.json, lines.json and summary.txt into run-dir.
@@ -29,7 +30,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 
-from raw_records import plugin_lines, plugin_name
+from raw_records import plugin_lines, plugin_name, site_slots, window_of
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
@@ -78,6 +79,8 @@ def is_setup(w):
 
 
 tests = {w['id']: w for w in windows if not is_setup(w)}
+# Runs with more workers: each worker slot has its own site (sites.json). See raw_records.window_of.
+slots = site_slots(DATA)
 spec_of = {t: w['file'] for t, w in tests.items()}
 features_of = {t: sorted(x[len('@feature:'):] for x in w['tags'] if x.startswith('@feature:')) or ['(no feature tag)']
                for t, w in tests.items()}
@@ -90,11 +93,8 @@ kinds = Counter()
 with_plugin = 0  # requests that hold lines of this plugin
 for path in glob.glob(os.path.join(DATA, 'raw', '*.json')):
     r = json.load(open(path))
-    owner = None
-    for w in windows:
-        if w['start'] <= r['start'] <= w['end']:
-            owner = w['id'] if not is_setup(w) else None
-            break
+    w = window_of(r, windows, slots)
+    owner = w['id'] if w and not is_setup(w) else None
     k = kind_of(r)
     if k == 'test' and owner not in tests:
         k = 'setup'

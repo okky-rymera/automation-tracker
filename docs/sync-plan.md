@@ -105,8 +105,32 @@ Built on 19 Nov 2026 in `server/ai-update.ts`. Command: `npm run project -- ai-u
      - Compared with the Local site run at the same commit (`2026-11-19-1320-sync-b73e8a97`): tests ran 395 functions, against 367. 33 functions only on echowp (mostly admin notices and onboarding code of a fresh site), 5 only on Local. Cause: the site data differs (fresh template against an old site).
      - The user's echowp registry did not change. The copy has no changed files. No failed logins.
      - Real sync 6 from the app API ("Sync now", tests always): 47 passed, 2 skipped, 7.1 minutes, run `2026-11-19-1730-sync-b73e8a97` selected, site stopped after.
-   - Next: step 2 (parallel workers).
-2. [ ] With parallel sites, each request must name its test or worker. `coverage/prepend.php` already reads an `X-Coverage-ID` header. Test a worker header that the Playwright config sets.
+2. [x] With parallel sites, each request must name its test or worker.
+   - Built on 19 Nov 2026. The run does not use a header: the port of the site names the worker. Each worker has its own site, so WP-Cron and loopback requests (which send no header) also go to the correct worker.
+   - The run starts one echowp site for each worker (`site-1` … `site-N`, profile `test`) and resets each. Workers: half the CPUs, at most 4. `TRACKER_TEST_WORKERS` changes it for trials. There is no setting.
+   - When another site has a port that a new site needs, the run removes the test sites of the project and starts all of them on a new block of free ports.
+   - The run copies a wrapper next to the plugin's Playwright config, and removes it after the run. `coverage/playwright-wrapper.cjs` loads CommonJS configs, and `coverage/playwright-wrapper.mjs` loads ES module configs. Both use `coverage/playwright-wrapper-lib.cjs`.
+   - The wrapper sets `BASE_URL` from the worker slot (`TEST_PARALLEL_INDEX`) before it loads the plugin's config. The plugin stays on `ECHOWP=false`, so it never calls echowp.
+   - The run has 3 phases:
+     1. Setup: the projects that other projects depend on, and `globalSetup`, once for each site. Setup projects that depend on each other keep their order.
+     2. Main: the other projects, with `N` workers and no dependencies.
+     3. Teardown: the teardown projects and `globalTeardown`, once for each site.
+   - A config with no `projects` list runs as one main project.
+   - Saved logins (`storageState` in the config): the setups run one after the other. After each setup, the run copies the login file for that site. Each worker reads the copy of its site. Without login files, the setups run at the same time. A `storageState` that a test file sets (not the config) is not covered.
+   - Before the sites start, the run lists the tests for 2 different site URLs. When the lists differ (a test name holds `BASE_URL`), the run uses 1 worker.
+   - `coverage/prepend.php` records the port of each request. `test-site.json` has a list of ports. The reporter saves the worker slot (`parallelIndex`). The run folder has `sites.json` (slot to port).
+   - `analyze.py` and `select-tests.py` match a request only to tests of its worker (`raw_records.window_of`). Old runs (no `sites.json`) keep the time-only rule.
+   - A cancel stops all commands of the sync (`killChildren` in `server/sync.ts`), also the setup commands that run at the same time. When a setup command cannot start, the run waits for the others before it stops the sites.
+   - Test with wwp at `b73e8a97`, DB copy, compared with the 1-worker run `2026-11-19-1730-sync-b73e8a97` (7.1 minutes):
+     - 2 workers: 4.8 minutes. 47 passed, 2 skipped (the same). 47 of 49 tests ran the same functions.
+     - 4 workers, setup in parallel: 2.7 minutes. The same counts. 46 of 49 tests ran the same functions.
+     - Run `2026-11-19-2052-sync-b73e8a97` (4 workers): 2 of the 3 other tests ran first on their site. The third ran second on its site. All differences are one-time code of a new site (`WWP_Getting_Started_Note`, `WWP_Onboarding_*`, `maybe_dispatch_admin`). This comes from test order, not from wrong matching.
+     - The "tested" line count did not change. All-code coverage went from 31.3% to 31.8%, because setup now runs on 4 sites.
+     - 605 of 682 requests came while tests of two or more workers ran. The old time-only rule would mix them.
+     - `analyze.py` on a copy of the old run gives the same `report.json`, `lines.json` and `summary.txt`. `select-tests.py` runs on old and new runs.
+     - No failed logins. The copy has no changed files after the run.
+   - Test after the code review fixes (DB copy, 4 workers): 2.8 minutes, 47 passed, 2 skipped. 47 of 49 tests ran the same functions as the 1-worker run.
+   - Port clash test: port 8806 held by another program, 5 workers. The run removed the 4 old sites and made 5 new sites on ports 8801 to 8805 in about 2 minutes. 47 passed, 2 skipped.
 3. [ ] Run the sync on a schedule (each night or each week), not only by hand. Run tests only when PHP or test files changed.
 4. [ ] Make adding a plugin easy: the copy, the `.env` file, the test packages, the site link, and the project in the app.
 5. [ ] Decide where the runs happen: this computer, a CI server (Buddy), or a cloud machine.
