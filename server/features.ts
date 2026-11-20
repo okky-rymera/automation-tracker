@@ -39,7 +39,7 @@ export const LABEL_KINDS = { roles: 'role' } as const;
 const ITEM_KIND_VALUES: string[] = Object.values(ITEM_KINDS);
 /** Feature fields that can carry an AI mark. */
 export const FEATURE_AI_FIELDS = ['title', 'description', 'priority', 'group'] as const;
-export const SCOPE_AI_FIELDS = ['title', 'description'] as const;
+export const SCOPE_AI_FIELDS = ['title', 'description', 'group'] as const;
 
 /** Removes fields from a row's AI list: a person changed or checked them. */
 function clearAi(table: 'features' | 'scopes', id: number, fields: string[]) {
@@ -70,8 +70,11 @@ export function featureData(projectId: string) {
     .all(projectId) as any[];
   const scopes = db
     .prepare(
-      'SELECT s.id, s.feature_id, s.title, s.description, s.sort, s.ai_fields FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ? ORDER BY s.sort, s.id',
+      'SELECT s.id, s.feature_id, s.title, s.description, s.group_id AS groupId, s.sort, s.ai_fields FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ? ORDER BY s.sort, s.id',
     )
+    .all(projectId) as any[];
+  const scopeGroups = db
+    .prepare('SELECT g.id, g.feature_id, g.title, g.sort FROM scope_groups g JOIN features f ON f.id = g.feature_id WHERE f.project_id = ? ORDER BY g.sort, g.id')
     .all(projectId) as any[];
   const items = db
     .prepare(
@@ -97,6 +100,7 @@ export function featureData(projectId: string) {
     linkScopes.set(r.link_id, [...(linkScopes.get(r.link_id) ?? []), r.scope_id]);
 
   const scopesBy = byKey(scopes, (s) => s.feature_id);
+  const scopeGroupsBy = byKey(scopeGroups, (g) => g.feature_id);
   const itemsBy = byKey(items, (i) => i.feature_id);
   const labelsBy = byKey(labels, (l) => l.feature_id);
   const linksBy = byKey(links, (l) => l.feature_id);
@@ -126,6 +130,7 @@ export function featureData(projectId: string) {
     const myItems = itemsBy.get(f.id) ?? [];
     const toItem = (i: any) => ({ id: i.id, text: i.text, aiDraft: !!i.aiDraft });
     for (const [key, kind] of Object.entries(ITEM_KINDS)) f[key] = myItems.filter((i) => i.kind === kind && i.scope_id === null).map(toItem);
+    f.scopeGroups = (scopeGroupsBy.get(f.id) ?? []).map(({ feature_id, ...g }) => g);
     f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, ...s }) => {
       const aiFields = json(ai_fields) as string[];
       const requirements = myItems.filter((i) => i.scope_id === s.id).map(toItem);
@@ -222,6 +227,76 @@ function ownScope(projectId: string, id: unknown): { id: number; featureId: numb
     .get(idNumber(id), projectId) as any;
   if (!r) throw new EditError('Scope not found in this project');
   return { id: r.id, featureId: r.feature_id };
+}
+/** A scope group of the project: its ID and its feature. */
+function ownScopeGroup(projectId: string, id: unknown): { id: number; featureId: number } {
+  const r = db
+    .prepare('SELECT g.id, g.feature_id FROM scope_groups g JOIN features f ON f.id = g.feature_id WHERE g.id = ? AND f.project_id = ?')
+    .get(idNumber(id), projectId) as any;
+  if (!r) throw new EditError('Scope group not found in this project');
+  return { id: r.id, featureId: r.feature_id };
+}
+/** A group title: trimmed, one space between words, not empty, and not the title of another group of the feature. */
+function scopeGroupTitle(fid: number, v: unknown, self: number | null = null): string {
+  const t = need(typeof v === 'string' ? v.replace(/\s+/g, ' ') : v, 'Group title');
+  if (t.length > 200) throw new EditError('Group title is too long');
+  if (db.prepare('SELECT 1 FROM scope_groups WHERE feature_id = ? AND lower(title) = lower(?) AND id IS NOT ?').get(fid, t, self))
+    throw new EditError(`This feature has a group "${t}" already`);
+  return t;
+}
+/**
+ * The group of feature fid that a title names (title: trimmed, one space between words):
+ *  - id: a group with this title, or the group that a person renamed from this title
+ *  - deleted: a person deleted the group with this title (id is null)
+ *  - id null and not deleted: an empty title, or a title that the feature does not know
+ */
+export function findScopeGroup(fid: number, title: unknown): { title: string; id: number | null; deleted: boolean } {
+  const t = typeof title === 'string' ? title.trim().replace(/\s+/g, ' ') : '';
+  if (!t) return { title: t, id: null, deleted: false };
+  const now = db.prepare('SELECT id FROM scope_groups WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, t) as any;
+  if (now) return { title: t, id: now.id, deleted: false };
+  const gone = db.prepare('SELECT group_id FROM scope_group_titles_gone WHERE feature_id = ? AND title_key = lower(trim(?))').get(fid, t) as any;
+  if (gone) return { title: t, id: gone.group_id, deleted: gone.group_id === null };
+  return { title: t, id: null, deleted: false };
+}
+/**
+ * The ID of the scope group that a title names in feature fid (findScopeGroup). A new group is made when
+ * the feature does not know the title. Null: an empty title, or a group that a person deleted.
+ * The AI skill (aiMade) and a scope move use it.
+ */
+export function scopeGroupId(fid: number, title: unknown, aiMade = false): number | null {
+  const g = findScopeGroup(fid, title);
+  if (g.id !== null || g.deleted || !g.title) return g.id;
+  // The length limit is for a new title only.
+  if (g.title.length > 200) throw new EditError('Group title is too long');
+  return newScopeGroup(fid, g.title, aiMade);
+}
+/** Adds a group. Its title is not "gone" now, so the AI skills can use it again. */
+function newScopeGroup(fid: number, title: string, aiMade = false): number {
+  db.prepare('DELETE FROM scope_group_titles_gone WHERE feature_id = ? AND title_key = lower(trim(?))').run(fid, title);
+  return Number(
+    db.prepare('INSERT INTO scope_groups (feature_id, title, sort, ai_made) VALUES (?, ?, ?, ?)').run(fid, title, nextSort('scope_groups', 'feature_id = ?', fid), aiMade ? 1 : 0)
+      .lastInsertRowid,
+  );
+}
+/**
+ * Deletes group gid when an AI skill made it, no person changed it, and it has no scopes now.
+ * Returns its title when it went. It is not remembered as "deleted": no person deleted it.
+ */
+export function dropEmptyAiGroup(gid: number | null): string | null {
+  if (gid === null) return null;
+  const g = db.prepare('SELECT title FROM scope_groups WHERE id = ? AND ai_made = 1 AND NOT EXISTS (SELECT 1 FROM scopes WHERE group_id = ?)').get(gid, gid) as any;
+  if (!g) return null;
+  db.prepare('DELETE FROM scope_group_titles_gone WHERE group_id = ?').run(gid);
+  db.prepare('DELETE FROM scope_groups WHERE id = ?').run(gid);
+  return g.title;
+}
+/** groupId from a request: null (no group), or a group of feature fid. */
+function groupOf(projectId: string, fid: number, v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const g = ownScopeGroup(projectId, v);
+  if (g.featureId !== fid) throw new EditError('The group is not in this feature');
+  return g.id;
 }
 /**
  * Remembers an old title of a scope on a feature: a person deleted the scope, moved it away, or
@@ -394,7 +469,8 @@ export const edits = {
     tx(() => {
       db.prepare("UPDATE features SET ai_fields = '[]' WHERE id = ?").run(f);
       db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE feature_id = ?').run(f);
-      db.prepare("UPDATE scopes SET ai_fields = '[]' WHERE feature_id = ?").run(f);
+      // The check accepts each scope's group, or no group, as for one scope (updateScope).
+      db.prepare("UPDATE scopes SET ai_fields = '[]', group_by_person = 1 WHERE feature_id = ?").run(f);
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE screenshots SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
@@ -424,6 +500,25 @@ export const edits = {
       ).run(into, SCOPE_ITEM_KIND);
       const scopeBase = nextSort('scopes', 'feature_id = ?', into);
       db.prepare('UPDATE scopes SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, scopeBase, from);
+      // Scope groups: a group with the title of a target group joins it. The others move after the target's groups.
+      const groupBase = nextSort('scope_groups', 'feature_id = ?', into);
+      for (const g of db.prepare('SELECT id, title FROM scope_groups WHERE feature_id = ?').all(from) as any[]) {
+        const same = db.prepare('SELECT id FROM scope_groups WHERE feature_id = ? AND lower(title) = lower(?)').get(into, g.title) as any;
+        if (same) {
+          db.prepare('UPDATE scopes SET group_id = ? WHERE group_id = ?').run(same.id, g.id);
+          // Old titles of the source group now mean the target group. Without this, the delete
+          // below sets them to NULL, and a renamed title looks like a group that a person deleted.
+          db.prepare('UPDATE scope_group_titles_gone SET group_id = ? WHERE group_id = ?').run(same.id, g.id);
+          // A group that a person made or changed is a person's group after the merge too.
+          db.prepare('UPDATE scope_groups SET ai_made = ai_made * (SELECT ai_made FROM scope_groups WHERE id = ?) WHERE id = ?').run(g.id, same.id);
+          db.prepare('DELETE FROM scope_groups WHERE id = ?').run(g.id);
+        } else {
+          // The title is a group of the target now, so it is not "gone" there.
+          db.prepare('DELETE FROM scope_group_titles_gone WHERE feature_id = ? AND title_key = lower(trim(?))').run(into, g.title);
+          db.prepare('UPDATE scope_groups SET feature_id = ?, sort = sort + ? WHERE id = ?').run(into, groupBase, g.id);
+        }
+      }
+      db.prepare('UPDATE OR IGNORE scope_group_titles_gone SET feature_id = ? WHERE feature_id = ?').run(into, from);
       // A test linked to both: an active link wins over a link that a person removed.
       // Then keep the link of the target feature.
       db.prepare(
@@ -537,8 +632,8 @@ export const edits = {
   // Scopes.
   addScope(p: string, id: string, b: any) {
     const f = own('features', p, id);
-    const r = db.prepare(`INSERT INTO scopes (id, feature_id, title, description, sort) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?)`).run(
-      f, need(b.title, 'Title'), text(b.description), nextSort('scopes', 'feature_id = ?', f),
+    const r = db.prepare(`INSERT INTO scopes (id, feature_id, title, description, group_id, sort) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?, ?)`).run(
+      f, need(b.title, 'Title'), text(b.description), groupOf(p, f, b.groupId), nextSort('scopes', 'feature_id = ?', f),
     );
     return { id: Number(r.lastInsertRowid) };
   },
@@ -553,9 +648,12 @@ export const edits = {
         db.prepare('UPDATE scopes SET title = ? WHERE id = ?').run(title, s);
       }
       if ('description' in b) db.prepare('UPDATE scopes SET description = ? WHERE id = ?').run(text(b.description), s);
+      if ('groupId' in b) db.prepare('UPDATE scopes SET group_id = ?, group_by_person = 1 WHERE id = ?').run(groupOf(p, sc.featureId, b.groupId), s);
       if ('sort' in b) db.prepare('UPDATE scopes SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s);
       // b.check = true: the person checked the scope without a change. Its requirements are checked too.
-      clearAi('scopes', s, b.check ? [...SCOPE_AI_FIELDS] : (['title', 'description'] as const).filter((k) => k in b));
+      clearAi('scopes', s, b.check ? [...SCOPE_AI_FIELDS] : SCOPE_AI_FIELDS.filter((k) => (k === 'group' ? 'groupId' : k) in b));
+      // A check accepts the group of the scope, or no group. The AI skills do not change it then.
+      if (b.check) db.prepare('UPDATE scopes SET group_by_person = 1 WHERE id = ?').run(s);
       if (b.check) db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE scope_id = ?').run(s);
     });
   },
@@ -582,7 +680,13 @@ export const edits = {
       throw new EditError('The target feature has a scope with this title already. Rename one of them first');
     tx(() => {
       buryScope(from, s.id, title);
-      db.prepare('UPDATE scopes SET feature_id = ?, sort = ? WHERE id = ?').run(to, nextSort('scopes', 'feature_id = ?', to), s.id);
+      // The scope goes to the target's group with the same title, or to the group that a person renamed
+      // from that title. The target gets that group if it does not know the title. When a person deleted
+      // a group with that title from the target, the scope has no group there.
+      const oldGroup = db.prepare('SELECT g.id, g.title, g.ai_made FROM scopes s JOIN scope_groups g ON g.id = s.group_id WHERE s.id = ?').get(s.id) as any;
+      const newGroup = scopeGroupId(to, oldGroup?.title, oldGroup?.ai_made === 1);
+      db.prepare('UPDATE scopes SET feature_id = ?, group_id = ?, sort = ? WHERE id = ?').run(to, newGroup, nextSort('scopes', 'feature_id = ?', to), s.id);
+      dropEmptyAiGroup(oldGroup?.id ?? null);
       db.prepare('UPDATE feature_items SET feature_id = ? WHERE scope_id = ?').run(to, s.id);
       // A scope requirement that the target has as a feature requirement goes. A person's check on it stays.
       const same = `SELECT 1 FROM feature_items o WHERE o.feature_id = ? AND o.kind = ? AND o.scope_id = ?
@@ -656,6 +760,43 @@ export const edits = {
       }
     });
     return { featureId: to };
+  },
+  // Scope groups: a feature's scopes show under their group, like the describe blocks of tests.
+  addScopeGroup(p: string, id: string, b: any) {
+    const f = own('features', p, id);
+    const title = scopeGroupTitle(f, b.title);
+    return { id: tx(() => newScopeGroup(f, title)) };
+  },
+  updateScopeGroup(p: string, id: string, b: any) {
+    const g = ownScopeGroup(p, id);
+    tx(() => {
+      if ('title' in b) {
+        const title = scopeGroupTitle(g.featureId, b.title, g.id);
+        const before = (db.prepare('SELECT title FROM scope_groups WHERE id = ?').get(g.id) as any).title as string;
+        db.prepare('UPDATE scope_groups SET title = ? WHERE id = ?').run(title, g.id);
+        // The AI skill can still send the old title: it means this group.
+        db.prepare('DELETE FROM scope_group_titles_gone WHERE feature_id = ? AND title_key = lower(trim(?))').run(g.featureId, title);
+        db.prepare('INSERT OR REPLACE INTO scope_group_titles_gone (feature_id, title_key, group_id) SELECT ?, lower(trim(?)), ? WHERE lower(trim(?)) <> lower(trim(?))').run(
+          g.featureId, before, g.id, before, title,
+        );
+      }
+      if ('sort' in b) db.prepare('UPDATE scope_groups SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, g.id);
+      // A person changed the group: it stays when it has no scopes.
+      db.prepare('UPDATE scope_groups SET ai_made = 0 WHERE id = ?').run(g.id);
+    });
+  },
+  /** Deletes a group. Its scopes stay in the feature, with no group. */
+  deleteScopeGroup(p: string, id: string) {
+    const g = ownScopeGroup(p, id);
+    tx(() => {
+      const scopes = db.prepare('SELECT id FROM scopes WHERE group_id = ?').all(g.id) as any[];
+      // A person decided: no group. The AI skill does not put these scopes in a group again.
+      db.prepare('UPDATE scopes SET group_id = NULL, group_by_person = 1 WHERE group_id = ?').run(g.id);
+      for (const s of scopes) clearAi('scopes', s.id, ['group']);
+      const title = (db.prepare('SELECT title FROM scope_groups WHERE id = ?').get(g.id) as any).title;
+      db.prepare('DELETE FROM scope_groups WHERE id = ?').run(g.id); // old titles of this group become "deleted" (ON DELETE SET NULL)
+      db.prepare('INSERT OR REPLACE INTO scope_group_titles_gone (feature_id, title_key, group_id) VALUES (?, lower(trim(?)), NULL)').run(g.featureId, title);
+    });
   },
   deleteScope(p: string, id: string) {
     const s = ownScope(p, id);

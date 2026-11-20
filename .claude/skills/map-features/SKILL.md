@@ -188,6 +188,15 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   role does not get two names ("Wholesale customer", not "Wholesale buyer").
 - Put a requirement that every scope shares in the feature `requirements`.
   Put a requirement of one scope in that scope's `requirements`.
+- Give a scope a `group` when the feature has two or more topics, so the app
+  shows the scopes of one topic together. Example: the scopes about the
+  "hide column" checkbox go in group "Hide column setting". The describe
+  blocks of the linked tests are a good hint. Use the groups that the feature
+  has already. A feature with one topic needs no groups.
+  When this unit gives a feature its second topic, put the scopes that are
+  already there in groups too. Send each one with its `id`, its `title` and
+  the `group`. Example: F-3 has the groups "Settings page", "Cart page" and
+  "Checkout page".
 
 Choose the feature scope by behavior, not by test file. If the code you read
 does the same thing for several screens or REST routes, look in the sibling
@@ -214,7 +223,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | notes | List: only what no test can check: reasons, code facts, limits. A testable rule is a scope |
 | outOfScope | List: what it does not do; name the feature that does it if there is one |
 | questions | List: only what a person must decide, or what you tried and could not prove |
-| scopes | The separate things it does, like test scenarios, each with a visible result, and its own requirements |
+| scopes | The separate things it does, like test scenarios, each with a visible result, an optional group (topic), and its own requirements |
 | links | Each test, with the scopes it checks |
 | code | The plugin files or functions that do the feature |
 | screenshots | Images of the feature: a PNG file, a caption, and the scopes it shows |

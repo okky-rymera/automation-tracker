@@ -25,7 +25,7 @@
       "questions": ["…"],
       "removeItems": [15],
       "scopes": [
-        { "title": "…", "description": "…", "requirements": ["…true for this scope only…"] },
+        { "title": "…", "group": "…topic, for example Hide column setting…", "description": "…", "requirements": ["…true for this scope only…"] },
         { "id": "S-14", "title": "…", "requirements": [{ "id": 21, "text": "…corrected AI draft requirement…" }] }
       ],
       "links": [
@@ -75,8 +75,21 @@
 - Scope: matched by `id` (`S-14` or `14`), or else by the same title in that
   feature. A new title makes a new scope. The title of an AI draft scope can be
   changed: give its `id` and the new title. The ID, links and screenshot tags stay.
+  A scope always needs its `title`, also when you send its `id` to change only
+  the group. Without it, the tool refuses the payload.
 - Scope `description`: a text replaces an AI draft description. `null`
   deletes an AI draft description. A person's description stays.
+- Scope `group` (optional): the title of a scope group of the feature. The
+  app shows the scopes of a group together, like a describe block of tests.
+  `feature <id>` lists the groups in `scopeGroups`; a person can add a group
+  that has no scopes yet. Use one of these titles when it fits. A new title
+  makes a new group. A new group replaces an AI draft group. A group that a
+  person chose stays, and so does "no group" when a person chose it. The title
+  of a group that a person deleted is refused; the old title of a renamed group
+  means the renamed group. The report says so. An empty or missing `group`
+  does not take a scope out of its group. A new title longer than 200
+  characters is refused for that scope only. When you move the last scope out
+  of a group that the AI made, the tool deletes that empty group.
 - Scope `requirements`: a list like the feature lists, for this scope only.
   `{ "id", "text" }` corrects an item of that scope. `removeItems` on the
   feature deletes scope items too.

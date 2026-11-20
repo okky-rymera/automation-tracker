@@ -15,6 +15,7 @@ import {
   type LabelField,
   type PlaywrightTest,
   type Scope,
+  type ScopeGroup,
   type Screenshot,
   reloadAll,
   screenshotUrl,
@@ -68,6 +69,7 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
           f.description,
           ...f.roles,
           ...f.requirements.map((i) => i.text),
+          ...f.scopeGroups.map((g) => g.title),
           ...f.scopes.flatMap((s) => [s.title, ...s.requirements.map((i) => i.text)]),
         ].some((s) => s.toLowerCase().includes(q)),
     );
@@ -545,6 +547,10 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
     cy: live(byScope(s.id), 'cypress').length,
   }));
   const addScope = () => scope.trim() && act(async () => (await mutate('POST', `${url}/scopes`, { title: scope }), setScope('')));
+  const addGroup = () => {
+    const title = prompt('Group title, for example: “Hide column setting”');
+    if (title?.trim()) act(() => mutate('POST', `${url}/scope-groups`, { title }));
+  };
 
   return (
     <div className="max-w-4xl space-y-6 p-6">
@@ -639,7 +645,7 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
 
       <ScreenshotsSection project={project} f={f} />
 
-      <Section title={`Scope (${f.scopes.length})`}>
+      <Section title={`Scope (${f.scopes.length})`} right={<Button onClick={addGroup}>+ Group</Button>}>
         {f.scopes.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-3 text-xs text-ink-2">
             <Pill tone="good">{counts.filter((c) => c.pw && c.cy).length} in both</Pill>
@@ -648,9 +654,33 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
             <Pill tone="bad">{counts.filter((c) => !c.pw && !c.cy).length} not automated</Pill>
           </div>
         )}
-        <div className="space-y-3">
-          {f.scopes.map((s) => (
-            <ScopeCard key={s.id} project={project} f={f} s={s} links={byScope(s.id)} features={data.features} />
+        <div className="space-y-5">
+          {scopeSections(f).map((g) => (
+            <div key={g.group?.id ?? 'none'}>
+              {g.group ? (
+                <ScopeGroupHeading project={project} group={g.group} count={g.scopes.length} />
+              ) : (
+                f.scopeGroups.length > 0 && (
+                  <div className="mb-2 flex items-baseline gap-2 border-b border-line pb-1">
+                    <span className="flex-1 text-sm font-semibold text-ink-2">No group</span>
+                    <span className="shrink-0 text-xs text-ink-3">{g.scopes.length}</span>
+                  </div>
+                )
+              )}
+              {g.scopes.length > 0 ? (
+                <div className="space-y-3">
+                  {g.scopes.map((s) => (
+                    <ScopeCard key={s.id} project={project} f={f} s={s} links={byScope(s.id)} features={data.features} />
+                  ))}
+                </div>
+              ) : (
+                f.scopeGroups.length > 0 && (
+                  <div className="text-xs text-ink-3">
+                    {g.group ? 'No scopes yet. To add one, choose this group on a scope.' : 'All scopes have a group.'}
+                  </div>
+                )
+              )}
+            </div>
           ))}
         </div>
         <form className="mt-3 flex gap-2" onSubmit={(e) => (e.preventDefault(), addScope())}>
@@ -739,6 +769,58 @@ function Pill({ tone, children }: { tone: 'good' | 'warn' | 'bad'; children: Rea
   );
 }
 
+/** The scopes of a feature under their groups, in the group order. Scopes with no group come last. */
+function scopeSections(f: Feature): { group: ScopeGroup | null; scopes: Scope[] }[] {
+  const groups = f.scopeGroups.map((g) => ({ group: g as ScopeGroup | null, scopes: f.scopes.filter((s) => s.groupId === g.id) }));
+  const loose = f.scopes.filter((s) => s.groupId === null || !f.scopeGroups.some((g) => g.id === s.groupId));
+  return [...groups, { group: null, scopes: loose }];
+}
+
+/** The heading of a scope group: its title (click to rename), the number of scopes, and delete. */
+function ScopeGroupHeading({ project, group, count }: { project: string; group: ScopeGroup; count: number }) {
+  const url = `/api/projects/${project}/scope-groups/${group.id}`;
+  return (
+    <div className="mb-2 flex items-baseline gap-2 border-b border-line pb-1">
+      <div className="min-w-0 flex-1">
+        <InlineText value={group.title} onSave={(title) => mutate('PATCH', url, { title })} className="text-sm font-semibold" />
+      </div>
+      <span className="shrink-0 text-xs text-ink-3">{count}</span>
+      <button
+        type="button"
+        aria-label={`Delete group ${group.title}`}
+        title="Delete the group. Its scopes stay, with no group."
+        onClick={() =>
+          confirm(count ? `Delete group “${group.title}”? Its ${count} scopes stay, with no group.` : `Delete group “${group.title}”?`) &&
+          act(() => mutate('DELETE', url))
+        }
+        className="px-1 text-ink-3 hover:text-bad"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+/** The group of one scope: a select with the feature's groups and "No group". */
+function ScopeGroupSelect({ f, s, url }: { f: Feature; s: Scope; url: string }) {
+  if (!f.scopeGroups.length) return null;
+  return (
+    <select
+      value={s.groupId ?? ''}
+      aria-label={`Group of scope ${scopeCode(s.id)}`}
+      onChange={(e) => act(() => mutate('PATCH', url, { groupId: e.target.value ? Number(e.target.value) : null }))}
+      className="ml-auto max-w-[14rem] rounded-md border border-line bg-bg px-2 py-1 text-xs text-ink-2"
+    >
+      <option value="">No group</option>
+      {f.scopeGroups.map((g) => (
+        <option key={g.id} value={g.id}>
+          {g.title}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /** One scope: its text, its automation state, its linked tests, and a picker to link one more. */
 function ScopeCard({ project, f, s, links, features }: { project: string; f: Feature; s: Scope; links: FeatureLink[]; features: Feature[] }) {
   const base = `/api/projects/${project}`;
@@ -800,6 +882,7 @@ function ScopeCard({ project, f, s, links, features }: { project: string; f: Fea
           <Button onClick={() => setPicking(true)}>+ Link a test</Button>
         )}
         {!picking && <AddScreenshotButton uploader={uploader} label="+ Screenshot" />}
+        {!picking && <ScopeGroupSelect f={f} s={s} url={url} />}
         {!picking && (
           <select
             value=""
@@ -808,13 +891,11 @@ function ScopeCard({ project, f, s, links, features }: { project: string; f: Fea
               const to = features.find((x) => x.id === Number(e.target.value));
               if (
                 to &&
-                confirm(
-                  `Move scope “${s.title}” to “${to.title}”? Its requirements, test links and the screenshots that show only this scope go with it.`,
-                )
+                confirm(`Move scope “${s.title}” to “${to.title}”? Its requirements, test links and the screenshots that show only this scope go with it.`)
               )
                 act(() => mutate('POST', `${url}/move`, { featureId: to.id }));
             }}
-            className="ml-auto max-w-[14rem] rounded-md border border-line bg-bg px-2 py-1 text-xs text-ink-2"
+            className={`${f.scopeGroups.length ? '' : 'ml-auto '}max-w-[14rem] rounded-md border border-line bg-bg px-2 py-1 text-xs text-ink-2`}
           >
             <option value="">Move to feature…</option>
             {features
@@ -1129,8 +1210,19 @@ function Lightbox({ project, f, shot, onClose }: { project: string; f: Feature; 
   }, []);
   const scopes = shot.scopeIds.map((id) => f.scopes.find((s) => s.id === id)).filter(Boolean) as Scope[];
   return (
-    <div role="dialog" aria-modal="true" aria-label={shot.caption || 'Screenshot'} onClick={onClose} className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-2 bg-black/75 p-6">
-      <img src={screenshotUrl(project, shot.id)} alt={shot.caption || 'Screenshot'} className="max-h-[85vh] max-w-full rounded shadow-lg" onClick={(e) => e.stopPropagation()} />
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={shot.caption || 'Screenshot'}
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-2 bg-black/75 p-6"
+    >
+      <img
+        src={screenshotUrl(project, shot.id)}
+        alt={shot.caption || 'Screenshot'}
+        className="max-h-[85vh] max-w-full rounded shadow-lg"
+        onClick={(e) => e.stopPropagation()}
+      />
       <div className="max-w-3xl text-center text-sm text-white">
         {shot.caption}
         {scopes.map((s) => (
@@ -1341,14 +1433,22 @@ function FeatureCodeView({ project, f }: { project: string; f: Feature }) {
       ) : (
         <details className="text-sm">
           <summary className="cursor-pointer text-ink-2">
-            <span style={{ color: CY_ONLY_META.color }}>{CY_ONLY_META.icon}</span>{' '}
-            {cyOnly.length === 1 ? '1 function runs' : `${cyOnly.length} functions run`} only in the linked Cypress tests. The feature’s Playwright
-            tests do not reach {cyOnly.length === 1 ? 'it' : 'them'} yet.
+            <span style={{ color: CY_ONLY_META.color }}>{CY_ONLY_META.icon}</span> {cyOnly.length === 1 ? '1 function runs' : `${cyOnly.length} functions run`}{' '}
+            only in the linked Cypress tests. The feature’s Playwright tests do not reach {cyOnly.length === 1 ? 'it' : 'them'} yet.
           </summary>
           <div className="mt-1 space-y-1">
             {files.map(([file, fns]) => (
               <div key={file}>
-                <a href={href({ project, tab: 'features', pane: 'code', sel: file })} title={file} className="block truncate font-mono text-xs hover:underline">
+                <a
+                  href={href({
+                    project,
+                    tab: 'features',
+                    pane: 'code',
+                    sel: file,
+                  })}
+                  title={file}
+                  className="block truncate font-mono text-xs hover:underline"
+                >
                   {file}
                 </a>
                 <ul className="ml-3">
@@ -1382,7 +1482,15 @@ function MappedCodeNote({ project, f }: { project: string; f: Feature }) {
         {f.code.entries
           ? `${f.code.entries} file${f.code.entries > 1 ? 's or functions' : ' or function'} of plugin code${f.code.aiToCheck ? `, ${f.code.aiToCheck} added by AI and not checked yet` : ''}. `
           : 'No plugin code is in this feature yet. The AI skill adds it when it maps the feature. '}
-        <a href={href({ project, tab: 'features', pane: 'code', sel: `f:${f.id}` })} className="text-accent hover:underline">
+        <a
+          href={href({
+            project,
+            tab: 'features',
+            pane: 'code',
+            sel: `f:${f.id}`,
+          })}
+          className="text-accent hover:underline"
+        >
           See how much of it the tests run
         </a>
       </div>
@@ -1418,7 +1526,7 @@ export function TestFeatures({ project, testId }: { project: string; testId: str
                   ×
                 </button>
               </div>
-<div className="ml-6 mt-0.5 max-w-md">
+              <div className="ml-6 mt-0.5 max-w-md">
                 <LinkScopes project={project} f={f} l={l} withTitles />
               </div>
             </li>

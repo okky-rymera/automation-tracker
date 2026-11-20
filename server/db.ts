@@ -467,6 +467,45 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (feature_id, text_key)
   );
   `,
+  // 18 and 19: empty. Drafts of the scope groups used them, and the tracker database ran them,
+  // so the numbers stay. Step 20 makes the scope groups.
+  'SELECT 1;',
+  'SELECT 1;',
+  // 20: scope groups: a feature's scopes show under their group, like the describe blocks of tests.
+  //     A group belongs to one feature. A person can add a group before it has scopes.
+  //     Deleting a group keeps its scopes, with no group (ON DELETE SET NULL).
+  //     group_by_person = 1: a person chose the group of the scope, or chose no group.
+  //       The AI skills do not change it (map.ts writeScopeGroup).
+  //     scope_group_titles_gone: old titles of groups that a person renamed (group_id = the group now)
+  //       or deleted (group_id NULL). A person who adds a group with the title again removes the row.
+  `
+  CREATE TABLE scope_groups (
+    id INTEGER PRIMARY KEY,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    sort INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX scope_groups_feature ON scope_groups(feature_id);
+  ALTER TABLE scopes ADD COLUMN group_id INTEGER REFERENCES scope_groups(id) ON DELETE SET NULL;
+  ALTER TABLE scopes ADD COLUMN group_by_person INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE scope_group_titles_gone (
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    title_key TEXT NOT NULL,          -- lower(trim(title))
+    group_id INTEGER REFERENCES scope_groups(id) ON DELETE SET NULL,
+    PRIMARY KEY (feature_id, title_key)
+  );
+  `,
+  // 21: ai_made = 1: an AI skill made the group, and no person changed it.
+  //     When the AI moves the last scope out of such a group, the group goes (features.ts dropEmptyAiGroup).
+  //     A group that a person made or changed stays, also with no scopes.
+  //     Groups from before: AI-made when each of their scopes has an AI draft group and no person renamed them.
+  `
+  ALTER TABLE scope_groups ADD COLUMN ai_made INTEGER NOT NULL DEFAULT 0;
+  UPDATE scope_groups SET ai_made = 1
+  WHERE EXISTS (SELECT 1 FROM scopes s WHERE s.group_id = scope_groups.id)
+    AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.group_id = scope_groups.id AND instr(s.ai_fields, '"group"') = 0)
+    AND NOT EXISTS (SELECT 1 FROM scope_group_titles_gone t WHERE t.group_id = scope_groups.id);
+  `,
 ];
 
 function open(): DatabaseSync {

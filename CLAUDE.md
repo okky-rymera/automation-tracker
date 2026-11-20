@@ -35,7 +35,9 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Add, change or delete a feature | `POST /api/projects/:id/features`, `PATCH` or `DELETE .../features/:fid` |
 | Merge feature `from` into `:fid` | `POST .../features/:fid/merge` with `{ "from": <id> }` |
 | Add a scope | `POST .../features/:fid/scopes` with `{ "title", "description" }` |
-| Change or delete a scope | `PATCH` or `DELETE .../scopes/:sid` |
+| Change or delete a scope | `PATCH` or `DELETE .../scopes/:sid`. `{ "groupId": <id> }` puts it in a scope group, `null` takes it out |
+| Add a scope group to a feature | `POST .../features/:fid/scope-groups` with `{ "title" }` |
+| Rename or delete a scope group | `PATCH .../scope-groups/:gid` with `{ "title" }`, or `DELETE`. A delete keeps the scopes, with no group |
 | Move a scope to another feature | `POST .../scopes/:sid/move` with `{ "featureId": <id> }` |
 | Add a requirement or list item | `POST .../features/:fid/items` with `{ "kind", "text", "scopeId"? }` |
 | Link a test | `POST .../links` with `{ "testId", "scopeId" }` or `{ "testId", "featureId" }` |
@@ -54,6 +56,9 @@ The command line can move a scope too. It does not need the server:
 ### What a move does
 
 A scope moves with its requirements, its test links, and the screenshots that show only this scope.
+It goes into the target's scope group with the same title, or into the group that a person renamed from that title.
+The target gets that group if it does not know the title. If a person deleted a group with that title from the target, the scope has no group there.
+An AI-made group that has no scopes after the move is deleted.
 A screenshot that shows other scopes too stays, and loses only the tag of this scope.
 When a test link has no scope left on the old feature, the link is marked removed.
 Then the AI skill does not link the test to the old feature again.

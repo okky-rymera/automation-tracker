@@ -37,7 +37,7 @@ import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
 import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash } from './features.ts';
+import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -398,8 +398,9 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
     aiFields: json(f.ai_fields),
     ...Object.fromEntries(Object.entries(LABEL_KINDS).map(([key, kind]) => [key, labelsOf(f.id, kind)])),
     ...Object.fromEntries(Object.entries(ITEM_KINDS).map(([key, kind]) => [key, itemsOf(f.id, kind)])),
-    scopes: (db.prepare('SELECT id, title, description, ai_fields FROM scopes WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((s) => ({
-      id: `S-${s.id}`, title: s.title, description: s.description, requirements: itemsOf(f.id, SCOPE_ITEM_KIND, s.id), aiFields: json(s.ai_fields),
+    scopeGroups: (db.prepare('SELECT title FROM scope_groups WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((g) => g.title),
+    scopes: (db.prepare('SELECT s.id, s.title, s.description, g.title AS grp, s.ai_fields FROM scopes s LEFT JOIN scope_groups g ON g.id = s.group_id WHERE s.feature_id = ? ORDER BY s.sort, s.id').all(f.id) as any[]).map((s) => ({
+      id: `S-${s.id}`, title: s.title, group: s.grp ?? null, description: s.description, requirements: itemsOf(f.id, SCOPE_ITEM_KIND, s.id), aiFields: json(s.ai_fields),
     })),
     links: links.slice(0, all ? undefined : 25).map((l) => ({
       testId: l.testId, title: l.title, framework: l.framework, source: l.source, removed: !!l.removed, scopes: scopeNames(l.id),
@@ -452,6 +453,8 @@ interface ScopeIn {
   title: string;
   /** null deletes an AI draft description. */
   description?: string | null;
+  /** Group name: scopes about one topic of the feature show together, like a describe block of tests. */
+  group?: string;
   /** What must be true for this scope only, on top of the feature's requirements. */
   requirements?: ItemIn[];
 }
@@ -738,7 +741,7 @@ function goneScope(fid: number, key: { id?: number | null; title?: string }): { 
  * Adds or fills one scope. Returns its ID, or null when a person deleted the scope or moved it to
  * another feature: the skill does not make it again here (goneScope).
  */
-function writeScope(fid: number, s: { id?: number | string; title: string; description?: string | null }, report: string[]): number | null {
+function writeScope(fid: number, s: { id?: number | string; title: string; description?: string | null; group?: string }, report: string[]): number | null {
   const title = str(s.title, 2000);
   if (!title) throw new EditError(`A scope of F-${fid} has no title`);
   const sid = s.id !== undefined ? Number(SCOPE_RE.exec(String(s.id))?.[1] ?? s.id) : null;
@@ -762,9 +765,11 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
   if (!row) {
     const n = (db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM scopes WHERE feature_id = ?').get(fid) as any).n;
     const desc = str(s.description);
+    const group = aiScopeGroup(fid, s.group, `F-${fid} scope "${title}"`, report) ?? null;
+    const ai = ['title', ...(desc ? ['description'] : []), ...(group ? ['group'] : [])].sort();
     const id = db
-      .prepare(`INSERT INTO scopes (id, feature_id, title, description, sort, ai_fields) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?, ?)`)
-      .run(fid, title, desc, n, JSON.stringify(desc ? ['description', 'title'] : ['title'])).lastInsertRowid;
+      .prepare(`INSERT INTO scopes (id, feature_id, title, description, group_id, sort, ai_fields) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?, ?, ?)`)
+      .run(fid, title, desc, group, n, JSON.stringify(ai)).lastInsertRowid;
     report.push(`F-${fid}: new scope S-${id} "${title}".`);
     return Number(id);
   }
@@ -773,8 +778,59 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
   setText('scopes', row, ai, 'title', 'title', title, label, report);
   if (s.description === null) clearScopeDescription(row, ai, label, report);
   else setText('scopes', row, ai, 'description', 'description', str(s.description), label, report);
+  writeScopeGroup(fid, row, ai, s.group, label, report);
   saveAi('scopes', row.id, ai);
   return row.id;
+}
+
+/**
+ * The group that the AI skill names by title, for a scope of feature fid:
+ *  - a group of the feature with this title, or the group that a person renamed from this title
+ *  - undefined when a person deleted the group with this title (with a line in the report)
+ *  - else a new group with this title
+ * Empty title: null.
+ */
+function aiScopeGroup(fid: number, title: unknown, label: string, report: string[], make = true): number | null | undefined {
+  const g = findScopeGroup(fid, title);
+  if (!g.title) return null;
+  if (g.deleted) {
+    report.push(`${label}: a person deleted group "${g.title}". The scope was not put in it.`);
+    return undefined;
+  }
+  if (g.id !== null) return g.id;
+  // A new title that is too long: skip the group only, so the other changes of the payload are saved.
+  if (g.title.length > 200) {
+    report.push(`${label}: group title is longer than 200 characters. The scope was not put in a group.`);
+    return undefined;
+  }
+  return make ? scopeGroupId(fid, g.title, true) : null;
+}
+
+/**
+ * Puts a scope in the group with this title, as setText does for a text: only when no person chose
+ * its group (or chose no group), and the scope has no group or the AI skill chose it.
+ */
+function writeScopeGroup(fid: number, row: any, ai: Set<string>, title: unknown, label: string, report: string[]) {
+  if (typeof title !== 'string' || !title.trim()) return;
+  const known = aiScopeGroup(fid, title, label, report, false);
+  if (known === undefined || (known !== null && known === row.group_id)) return;
+  const name = (id: number | null) => (id === null ? null : ((db.prepare('SELECT title FROM scope_groups WHERE id = ?').get(id) as any)?.title as string));
+  if (!ai.has('group') && (row.group_id !== null || row.group_by_person)) {
+    const was = row.group_id === null ? 'no group' : `group "${name(row.group_id)}"`;
+    report.push(`${label}: kept ${was}, which a person chose or checked. Suggested group "${title.trim()}" was not saved.`);
+    return;
+  }
+  const gid = known ?? scopeGroupId(fid, title, true)!;
+  const before = name(row.group_id);
+  report.push(
+    before
+      ? `${label}: moved from the AI draft group "${before}" to "${name(gid)}".`
+      : `${label}: put in group "${name(gid)}". It shows as AI draft until a person checks it.`,
+  );
+  db.prepare('UPDATE scopes SET group_id = ? WHERE id = ?').run(gid, row.id);
+  ai.add('group');
+  const dropped = dropEmptyAiGroup(row.group_id);
+  if (dropped) report.push(`F-${fid}: deleted the AI draft group "${dropped}". It has no scopes now.`);
 }
 
 /** "description": null in the payload deletes an AI draft description. A person's description stays. */

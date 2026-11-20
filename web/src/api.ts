@@ -79,10 +79,19 @@ export interface FeatureLink {
   missing: boolean;
 }
 
+/** A group of scopes in one feature, like a describe block of tests. */
+export interface ScopeGroup {
+  id: number;
+  title: string;
+  sort: number;
+}
+
 export interface Scope {
   id: number;
   title: string;
   description: string;
+  /** The scope group it is in, or null. */
+  groupId: number | null;
   /** What must be true for this scope only, on top of the feature's requirements. */
   requirements: FeatureItem[];
   sort: number;
@@ -128,6 +137,8 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   /** Fields (title, description, priority, group) the skill wrote that no person checked yet. */
   aiFields: string[];
   aiDraft: boolean;
+  /** Groups of the scopes, in their order. A group can have no scopes yet. */
+  scopeGroups: ScopeGroup[];
   scopes: Scope[];
   links: FeatureLink[];
   screenshots: Screenshot[];

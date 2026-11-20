@@ -203,7 +203,7 @@ export interface Proposal {
   where?: ItemOut[];
   questions?: ItemOut[];
   removeItems?: number[];
-  scopes?: { id?: string; title: string; description?: string; requirements?: ItemOut[] }[];
+  scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[] }[];
   links?: { testId: string; scopes?: string[] }[];
 }
 
@@ -236,7 +236,13 @@ export const SCHEMA = {
         type: 'object',
         additionalProperties: false,
         required: ['title'],
-        properties: { id: { type: 'string', description: 'S-id of an existing scope' }, title: { type: 'string' }, description: { type: 'string' }, requirements: items },
+        properties: {
+          id: { type: 'string', description: 'S-id of an existing scope' },
+          title: { type: 'string' },
+          group: { type: 'string', description: 'Group name of the scope, as in the feature data' },
+          description: { type: 'string' },
+          requirements: items,
+        },
       },
     },
     links: {
@@ -340,7 +346,7 @@ ${diff || '(no changes in these files)'}
   - List fields (requirements, notes, outOfScope, where, questions): a string adds an item. {"id", "text"} changes an AI draft item.
   - "removeItems": IDs of AI draft items that are now wrong. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope.
   - Text that a person wrote or checked (aiDraft false) cannot change. When it is now wrong, add a question that says what is wrong and what the code does now.
-  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. A scope that is now wrong cannot be deleted here: add a question for it.
+  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. A scope that is now wrong cannot be deleted here: add a question for it.
   - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks.
 - "summary": 1–3 plain sentences for the person who checks your work: what changed in the code, and what you changed in the feature.
 
@@ -490,7 +496,13 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
       if (!good) dropped.push(`scope requirements: no item #${v.id} in ${s.id ?? s.title}`);
       return good;
     });
-    return { ...(sid !== undefined ? { id: sid } : {}), title: s.title, ...(s.description?.trim() ? { description: s.description } : {}), ...(reqs.length ? { requirements: reqs } : {}) };
+    return {
+      ...(sid !== undefined ? { id: sid } : {}),
+      title: s.title,
+      ...(s.group?.trim() ? { group: s.group } : {}),
+      ...(s.description?.trim() ? { description: s.description } : {}),
+      ...(reqs.length ? { requirements: reqs } : {}),
+    };
   });
   if (scopes.length) f.scopes = scopes;
   // Scope names that apply can find: the scopes of this answer, the feature's scopes (S-id or title),
