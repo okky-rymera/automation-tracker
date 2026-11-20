@@ -103,8 +103,8 @@ not only a copy of test titles.
 - **For Cypress**: step text maps to code in `tests/Cypress/cypress/step_definitions`
   and `cypress/support`. Many shared steps come from the package
   `@rymera-web-co/automated-test-helper`. If its `node_modules` folder is not
-  installed, do not search the disk for it: judge the step from its words, and
-  put real doubts in `questions`.
+  installed, do not search the disk for it: judge the step from its words.
+  When the words leave a doubt, try the behavior with `playwright-cli`.
 - **For test files**: run `test-code <project> <kind> <ref>`. It lists the
   plugin functions that the tests of the file ran. Use it as a hint for the
   feature's code (step 4), not as the answer: shared helpers and test setup
@@ -121,11 +121,28 @@ not only a copy of test titles.
     those scopes: a gap in the list is useful information.
   - `library`: it runs on every page load (menus, hooks, routes). It proves
     nothing about one feature, so its tests are not candidates.
-- **Try it, when reading leaves a doubt** about what the user sees: run the test,
-  or open the feature with `playwright-cli` (load the `playwright-cli` skill). See
-  `references/running-tests.md` for how and for the safety rules. Do this
-  before you write text that you are not sure of. If you cannot confirm a
-  behavior, put it in `questions` instead of stating it as fact.
+- **Confirm the behavior before you write it.** Reading alone is not enough.
+  See `references/running-tests.md` for how and for the safety rules.
+  - **Playwright unit:** always run the spec file. Put the result in
+    `unit.note` ("Ran the file: 2 passed") and in the report. A failed or
+    flaky test is information: say which test and what failed.
+  - **Cypress unit:** run it only when the user asks (it is slow). Try the
+    main behavior with `playwright-cli` instead (load the `playwright-cli` skill).
+  - **Code unit:** try the main behavior with `playwright-cli`, or run a
+    candidate test from the `code` output.
+- **Answer your own doubts. Do not ask them.** When you are not sure of a
+  behavior, read the code to the result, or try it on the test site. Then
+  write what you found as a scope, note or out-of-scope item. Do not state a
+  guess as fact.
+- **Ask a question only when one of these is true:**
+  - A person must decide, for example "Is this behavior intended, or is it a bug?"
+  - The answer needs something that you do not have, for example a paid
+    add-on that is not on the test site.
+  - Text that a person wrote or checked is now wrong. The tool cannot change
+    it, so the question says what is wrong and what the code does.
+- **Check each question before you send it.** Read the scopes, notes and
+  requirements of the feature: they must not answer it already. Write in the
+  report what you tried for each question, and why it did not give the answer.
 
 ### 3. Match against the features that exist
 
@@ -148,6 +165,18 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   checked: then name the problem in `questions` and in your report.
 - Reuse a scope when it means the same thing: give its `id` (`S-4`). A new
   title makes a new scope, so a reworded copy makes a near copy.
+- **Before you make a scope, read the title and the requirements of each
+  scope that is there.** Do not make a scope that says the same result in
+  other words. But a step to another scope's result can be its own scope,
+  when a person sees its own result and it can fail by itself.
+  Example: S-3 "Checking the hide checkbox and saving removes the column" and
+  S-10 "A checked hide checkbox stays checked after save and page reload" are
+  two scopes. A save can hide the column, while the settings page shows the
+  box unchecked again. Then S-10 fails and S-3 passes.
+  Link a test only to the scopes whose result it asserts. A test that checks
+  the box and reloads the settings page links to S-10, not to S-3.
+  When no test checks the full path of a scope, say so in the scope
+  `description`.
 - Use the role names that `features` lists in `labelsInUse`, so one
   role does not get two names ("Wholesale customer", not "Wholesale buyer").
 - Put a requirement that every scope shares in the feature `requirements`.
@@ -177,7 +206,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | where | List: admin screens, settings tabs, shop pages, REST routes |
 | notes | List: only what no test can check: reasons, code facts, limits. A testable rule is a scope |
 | outOfScope | List: what it does not do; name the feature that does it if there is one |
-| questions | List: what you could not confirm |
+| questions | List: only what a person must decide, or what you tried and could not prove |
 | scopes | The separate things it does, like test scenarios, each with a visible result, and its own requirements |
 | links | Each test, with the scopes it checks |
 | code | The plugin files or functions that do the feature |
@@ -228,8 +257,18 @@ shows it faster than text.
 
 - **When:** the feature has a screen that a person sees: an admin screen, a
   settings section, or a shop page. A REST API or background feature has no
-  screen: send no screenshots. Run `feature <project> <id>` first: if the
-  screenshots that are there already show the scopes, add no more.
+  screen: send no screenshots.
+- **Each scope with a visible result gets a screenshot tag.** This includes
+  each scope you add to or link in this unit. Run `feature <project> <id>`
+  first, and look at the `scopes` of each screenshot, not only the captions.
+  Then, for each scope that no screenshot shows:
+  1. Look at the existing images. Export them with a read-only command (no writes):
+     `sqlite3 -readonly data/tracker.db "select writefile('<scratchpad>/f<id>-shot-' || i.screenshot_id || '.' || replace(replace(s.mime, 'image/', ''), 'jpeg', 'jpg'), i.data), s.caption from screenshot_images i join screenshots s on s.id = i.screenshot_id where s.feature_id = <id> and s.removed = 0"`.
+     Then open the PNG files with the Read tool.
+  2. If an image shows the scope, send that screenshot again with its
+     caption (or its `firstCaption`) and the scope in `scopes`. The tool adds
+     only the tag. It does not need the file for a screenshot that is there.
+  3. If no image shows it, take a new screenshot.
 - **What:** 1–4 screenshots for each feature. Take the place where a person
   sets it up (the settings or the edit screen), and the result that the user
   sees (for example, the shop page with the wholesale price). One screenshot
@@ -263,12 +302,13 @@ If `apply` fails, nothing was saved. Read the error, fix the payload, run it aga
 
 Tell the user, in plain words:
 
-- which unit you processed, and how you checked it (read, ran the test, tried it)
+- which unit you processed, and how you checked it (read, ran the test, tried it), with the test result
 - the features you made or added to, with their IDs (F-12), and the scopes (S-4)
 - which tests you linked, and which you did not link and why
 - the code you put in each feature (files and functions)
-- the screenshots you added, with their captions, or why you added none
-- open questions, and any person's text that the tool kept
+- the screenshots you added or tagged, with their captions and scopes, or why a scope has none
+- each open question you added, what you tried, and why a person must answer it
+- any person's text that the tool kept
 - the progress (`status`): for example "Cypress: 5 of 82 files done"
 
 Then stop. Say the command or phrase to do the next unit.

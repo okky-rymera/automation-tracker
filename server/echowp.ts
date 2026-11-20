@@ -237,7 +237,11 @@ export async function trackerEchowp(p: ProjectConfig, args: string[], log: (l: s
   const cov = await coveragePhp(log, o.signal);
   const env = { ...trackerEchowpEnv(cov), ...o.env };
   fs.mkdirSync(TRACKER_ECHOWP_HOME, { recursive: true });
-  const a = [...args];
+  // The words after "--" go to the command inside (for example "wp site-1 -- post list").
+  // The tracker reads and adds echowp options only before "--".
+  const dashes = args.indexOf('--');
+  const a = dashes < 0 ? [...args] : args.slice(0, dashes);
+  const inner = dashes < 0 ? [] : args.slice(dashes);
   const sub = a[0];
   const configName = optValue(a, 'config') ?? 'echowp.yml';
   const configFile = path.resolve(p.path, configName);
@@ -273,7 +277,8 @@ export async function trackerEchowp(p: ProjectConfig, args: string[], log: (l: s
   // echowp down takes no site names, and it needs --all (echowp internal/cli/commands.go, "down").
   if (sub === 'down' && !a.includes('--all')) a.push('--all');
 
-  const code = await (o.run ?? spawnRunner)(echowpBin(), [...a, '--dir', p.path], env, log);
+  const argv = [...a, '--dir', p.path, ...inner];
+  const code = await (o.run ?? spawnRunner)(echowpBin(), argv, env, log);
 
   if (sub === 'up' && code === 0) {
     const bad = serversWithoutCoverage(cov);

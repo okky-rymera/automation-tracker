@@ -11,7 +11,8 @@
  *   npm run -s map -- feature  <project> <feature id> [--all]
  *   npm run -s map -- code     <project> <repo file>
  *   npm run -s map -- test-code <project> playwright|cypress <test file ref>
- *   npm run -s map -- apply    <project> <payload.json>   (unit kind "update": an AI update, see server/ai-update.ts)
+ *   npm run -s map -- apply    <project> <payload.json>   (unit kind "update": an AI update, see server/ai-update.ts;
+ *                                                            unit kind "answer": the answer-questions skill)
  *   npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  (--files is needed for code)
  *   npm run -s map -- reset    <project> <kind> <ref>
  *   npm run -s map -- move-scope <project> <scope id> <feature id>   (a person's edit: see edits.moveScope)
@@ -23,6 +24,10 @@
  *  - A link that a person removed is never added again.
  *  - Links made here have source "ai", so the app can show them as AI links.
  *  - Mapped code (feature_code) is only added. Code that a person removed is never added again.
+ *  - One exception to the first rule: with unit kind "answer", "answeredQuestions" deletes open questions,
+ *    also a person's. The person asked the answer-questions skill to answer them. The automatic AI update
+ *    cannot send this field (its schema in server/ai-update.ts is closed).
+ *    The text of an answered question is remembered (answered_questions), and a question with that text is never added again.
  *  - Screenshots are only added. The skill finds its own by a key from the first caption it sent
  *    (captionKey), so a person can change the caption. A screenshot that a person deleted is never added again.
  */
@@ -32,7 +37,7 @@ import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
 import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash } from './features.ts';
+import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -315,7 +320,8 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], report: str
   }
 }
 
-const SCOPE_RE = /^S-?(\d+)$/i;
+// "S-14", "S14", or a copied "F-3/S-14" (the feature part is only a help for people).
+const SCOPE_RE = /^(?:F-?\d+\/)?S-?(\d+)$/i;
 const scopeNames = (linkId: number) =>
   (db.prepare('SELECT s.id, s.title FROM link_scopes ls JOIN scopes s ON s.id = ls.scope_id WHERE ls.link_id = ? ORDER BY s.id').all(linkId) as any[]).map(
     (s) => `S-${s.id} ${s.title}`,
@@ -432,6 +438,8 @@ interface FeatureIn {
   questions?: ItemIn[];
   /** IDs of list items to delete (only AI draft items), scope requirements too. */
   removeItems?: number[];
+  /** Unit kind "answer" only: IDs of open questions that the answer-questions skill answered. Deleted also when a person wrote them. */
+  answeredQuestions?: number[];
   scopes?: ScopeIn[];
   links?: LinkIn[];
   /** Plugin code of the feature: a whole file, or functions in it. */
@@ -452,8 +460,12 @@ interface ShotIn {
   scopes?: (string | number)[];
 }
 interface Payload {
-  /** kind "update": an AI update after a code change (server/ai-update.ts). It is not a unit of the mapping order. */
-  unit: { kind: Kind | 'update'; ref: string; files?: string[]; note?: string };
+  /**
+   * kind "update": an AI update after a code change (server/ai-update.ts).
+   * kind "answer": the answer-questions skill answered open questions.
+   * Neither is a unit of the mapping order.
+   */
+  unit: { kind: Kind | 'update' | 'answer'; ref: string; files?: string[]; note?: string };
   features: FeatureIn[];
 }
 
@@ -474,15 +486,16 @@ function apply(p: ProjectConfig, file: string | undefined) {
   }
   const unit = body.unit ?? ({} as Payload['unit']);
   // An update is not in KINDS, so next, skip, reset and status do not see it.
-  const update = unit.kind === 'update';
-  const kind = update ? 'update' : kindOf(unit.kind);
+  const update = unit.kind === 'update' || unit.kind === 'answer';
+  const answer = unit.kind === 'answer';
+  const kind = update ? unit.kind : kindOf(unit.kind);
   const ref = str(unit.ref, 500);
   if (!ref) fail('unit.ref is empty');
   if (!Array.isArray(body.features) || !body.features.length) fail('features is empty. Use the skip command for a unit with no feature.');
 
   // Files the unit read: the test file, or the code files of the area.
   let files = (unit.files ?? []).map((f) => str(f, 500)).filter(Boolean);
-  if (kind === 'update') files = [];
+  if (kind === 'update' || kind === 'answer') files = [];
   else if (kind !== 'code') {
     if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND framework = ? AND file = ? AND removed_at IS NULL').get(p.id, kind, ref))
       fail(`No ${kind} file "${ref}" in the last scan. Use the ref that "next" gave.`);
@@ -500,6 +513,7 @@ function apply(p: ProjectConfig, file: string | undefined) {
     if ((inF as any)?.rules !== undefined) fail('"rules" is gone: write a rule that a test can check as a scope, and other text as "notes". Nothing was saved.');
     for (const s of Array.isArray(inF?.scopes) ? inF.scopes : [])
       if ((s as any)?.rules !== undefined || (s as any)?.notes !== undefined) fail('A scope has only "requirements", no "rules" or "notes". Nothing was saved.');
+    if (!answer && inF?.answeredQuestions !== undefined) fail('"answeredQuestions" works only with unit kind "answer". Nothing was saved.');
   }
 
   const report: string[] = [];
@@ -511,7 +525,10 @@ function apply(p: ProjectConfig, file: string | undefined) {
         touched.push(fid);
         for (const [key, kind] of Object.entries(LABEL_KINDS)) writeLabels(p, fid, kind, list<string>((inF as any)[key], key), report);
         // Remove first: a payload that removes an item and adds the same text again keeps the text.
-        removeItems(fid, list<number>(inF.removeItems, 'removeItems'), report);
+        // An ID in both lists is an answered question: removeAnswered deletes it and remembers its text.
+        const answered = list<number>(inF.answeredQuestions, 'answeredQuestions').map(Number);
+        removeItems(fid, list<number>(inF.removeItems, 'removeItems').filter((id) => !answered.includes(Number(id))), report);
+        removeAnswered(fid, answered, report);
         for (const [key, kind] of Object.entries(ITEM_KINDS)) writeItems(fid, kind, list<ItemIn>((inF as any)[key], key), report);
         const scopeIds = new Map<string, number | null>();
         for (const s of list<ScopeIn>(inF.scopes, 'scopes')) {
@@ -606,6 +623,13 @@ function writeLabels(p: ProjectConfig, fid: number, kind: string, values: string
   if (added.length) report.push(`F-${fid}: added ${kind} ${added.map((a) => `"${a}"`).join(', ')}.`);
 }
 
+/** True when a question with this text was answered or removed on this feature before (answered_questions). */
+const answeredBefore = (fid: number, text: string) =>
+  !!db.prepare('SELECT 1 FROM answered_questions WHERE feature_id = ? AND text_key = lower(trim(?))').get(fid, text);
+/** Remembers the text of a removed question, so the AI skills do not ask it again on this feature. */
+const rememberAnswered = (fid: number, text: string) =>
+  db.prepare('INSERT OR IGNORE INTO answered_questions (feature_id, text_key) VALUES (?, lower(trim(?)))').run(fid, text);
+
 /**
  * A string adds an item (the same text again adds nothing). { id, text } changes an AI draft item.
  * scopeId: the items are requirements of that scope. null: the feature's own list.
@@ -617,6 +641,10 @@ function writeItems(fid: number, kind: string, values: ItemIn[], report: string[
       const t = str(v, 2000);
       if (!t) continue;
       if (db.prepare('SELECT 1 FROM feature_items WHERE feature_id = ? AND scope_id IS ? AND kind = ? AND lower(text) = lower(?)').get(fid, scopeId, kind, t)) continue;
+      if (kind === 'question' && answeredBefore(fid, t)) {
+        report.push(`${label}: did not add the question "${t}": it was answered or removed on this feature before.`);
+        continue;
+      }
       // A scope does not repeat a requirement of its feature, and the reverse.
       const clash = requirementClash(fid, scopeId, kind, t);
       if (clash) {
@@ -634,6 +662,7 @@ function writeItems(fid: number, kind: string, values: ItemIn[], report: string[
       if (!t || t === row.text) continue;
       const clash = requirementClash(fid, scopeId, kind, t, row.id);
       if (!row.ai_draft) report.push(`${label}: kept the ${kind} item #${row.id} that a person wrote or checked.`);
+      else if (kind === 'question' && answeredBefore(fid, t)) report.push(`${label}: did not change question #${row.id} to "${t}": that question was answered before.`);
       else if (clash) report.push(`${label}: did not change item #${row.id} to "${t}": ${clash}`);
       else {
         db.prepare('UPDATE feature_items SET text = ? WHERE id = ?').run(t, row.id);
@@ -644,14 +673,28 @@ function writeItems(fid: number, kind: string, values: ItemIn[], report: string[
 }
 
 function removeItems(fid: number, ids: number[], report: string[]) {
-  for (const id of ids) {
+  for (const id of new Set(ids.map(Number))) {
     const row = db.prepare('SELECT * FROM feature_items WHERE id = ? AND feature_id = ?').get(Number(id), fid) as any;
     if (!row) throw new EditError(`No list item #${id} in F-${fid}`);
     if (!row.ai_draft) report.push(`F-${fid}: kept item #${id}: a person wrote or checked it. Name the problem in "questions".`);
     else {
       db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
+      // A removed question is answered or wrong: do not ask it again on this feature.
+      if (row.kind === 'question') rememberAnswered(fid, row.text);
       report.push(`F-${fid}: removed AI draft item #${id}.`);
     }
+  }
+}
+
+/** Open questions that the answer-questions skill answered. A person's question is deleted too: the person asked for the answer. */
+function removeAnswered(fid: number, ids: number[], report: string[]) {
+  // The same ID two times removes the question once.
+  for (const id of new Set(ids.map(Number))) {
+    const row = db.prepare("SELECT * FROM feature_items WHERE id = ? AND feature_id = ? AND kind = 'question'").get(Number(id), fid) as any;
+    if (!row) throw new EditError(`No open question #${id} in F-${fid}`);
+    db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
+    rememberAnswered(fid, row.text);
+    report.push(`F-${fid}: removed answered question #${id} (${row.ai_draft ? 'AI draft' : 'a person wrote it'}): "${row.text}"`);
   }
 }
 
@@ -893,7 +936,8 @@ const commands: Record<string, () => void> = {
   'move-scope': () => {
     if (!args[0] || !args[1]) fail('Usage: move-scope <project> <scope id> <feature id>');
     try {
-      out(edits.moveScope(projectOf(projectId).id, args[0].replace(/^S-/i, ''), { featureId: args[1].replace(/^F-/i, '') }));
+      // idNumber reads "40", "S-40" and a copied "F-12/S-40" (server/features.ts).
+      out(edits.moveScope(projectOf(projectId).id, String(idNumber(args[0])), { featureId: String(idNumber(args[1])) }));
     } catch (e) {
       fail(e instanceof Error ? e.message : String(e));
     }

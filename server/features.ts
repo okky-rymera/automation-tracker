@@ -200,15 +200,26 @@ const text = (v: unknown) => (typeof v === 'string' ? v.trim().slice(0, 20000) :
 export const nextSort = (table: string, where: string, arg: string | number) =>
   ((db.prepare(`SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM ${table} WHERE ${where}`).get(arg) as any).n as number);
 
+/**
+ * The number of an ID as people copy it from the web page: "40", "S-40", "F-12/S-40" or "F-12/IMG-7".
+ * The last part names the thing; its feature (before "/") is only a help for people.
+ */
+export function idNumber(id: unknown): number {
+  if (typeof id === 'number') return id;
+  const last = String(id ?? '').trim().split('/').pop() ?? '';
+  const m = /^(?:[a-z]+-)?(\d+)$/i.exec(last.trim());
+  return m ? Number(m[1]) : NaN;
+}
+
 function own(table: 'feature_groups' | 'features', projectId: string, id: unknown): number {
-  const n = Number(id);
+  const n = idNumber(id);
   if (!db.prepare(`SELECT 1 FROM ${table} WHERE id = ? AND project_id = ?`).get(n, projectId)) throw new EditError('Not found in this project');
   return n;
 }
 function ownScope(projectId: string, id: unknown): { id: number; featureId: number } {
   const r = db
     .prepare('SELECT s.id, s.feature_id FROM scopes s JOIN features f ON f.id = s.feature_id WHERE s.id = ? AND f.project_id = ?')
-    .get(Number(id), projectId) as any;
+    .get(idNumber(id), projectId) as any;
   if (!r) throw new EditError('Scope not found in this project');
   return { id: r.id, featureId: r.feature_id };
 }
@@ -234,7 +245,7 @@ export function scopeOf(projectId: string, featureId: number, id: unknown): numb
 function ownItem(projectId: string, id: unknown): any {
   const r = db
     .prepare('SELECT i.* FROM feature_items i JOIN features f ON f.id = i.feature_id WHERE i.id = ? AND f.project_id = ?')
-    .get(Number(id), projectId);
+    .get(idNumber(id), projectId);
   if (!r) throw new EditError('Item not found in this project');
   return r;
 }
@@ -257,7 +268,7 @@ export function requirementClash(fid: number, scopeId: number | null, kind: stri
     : 'The feature has this requirement already, and it applies to every scope.';
 }
 function ownScreenshot(projectId: string, id: unknown): { id: number; featureId: number } {
-  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), projectId) as any;
+  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(idNumber(id), projectId) as any;
   if (!r) throw new EditError('Screenshot not found in this project');
   return { id: r.id, featureId: r.feature_id };
 }
@@ -306,7 +317,7 @@ export function imageType(data: Buffer): string {
 
 /** Type and upload time of one screenshot, or null. Cheap: it does not read the image. */
 export function screenshotInfo(projectId: string, id: unknown): { id: number; mime: string; createdAt: string } | null {
-  return (db.prepare('SELECT id, mime, created_at AS createdAt FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), projectId) as any) ?? null;
+  return (db.prepare('SELECT id, mime, created_at AS createdAt FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(idNumber(id), projectId) as any) ?? null;
 }
 /** The image bytes of a screenshot (an ID from screenshotInfo). */
 export function screenshotData(id: number): Uint8Array {
@@ -472,6 +483,8 @@ export const edits = {
       db.prepare('UPDATE screenshots SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, shotBase, from);
       // The deleted and moved scopes of the source stay remembered, on the target.
       db.prepare('UPDATE OR IGNORE scope_titles_gone SET feature_id = ? WHERE feature_id = ?').run(into, from);
+      // The answered questions of the source stay answered, on the target.
+      db.prepare('UPDATE OR IGNORE answered_questions SET feature_id = ? WHERE feature_id = ?').run(into, from);
       db.prepare('DELETE FROM features WHERE id = ?').run(from);
     });
   },

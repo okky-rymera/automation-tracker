@@ -156,8 +156,11 @@ that has them:
 > "Minimum order quantities (see F-22)."
 > "Price tiers by quantity: premium add-on only."
 
-**questions**: one item for each thing you could not confirm, as a question.
-> "Does the wholesale price show in the mini cart widget?"
+**questions**: only what a person must decide, or what you tried and could
+not prove. First read the code, or try it on the test site (SKILL.md, step 2).
+A fact that you can check is not a question.
+> "The wholesale price does not show in the mini cart widget. Is this intended?"
+> "Without Premium, the column shows no wholesale sale price. Does Premium add it?"
 
 **screenshots**: 1–4 images for a feature that has a screen. The caption names
 the place and what the image shows.
@@ -225,7 +228,7 @@ This feature is made up. It shows the form only: do not copy its facts.
       "where": ["Plugin settings > Orders tab > \"Order note\" field", "WooCommerce > Orders > order screen"],
       "notes": ["Staff asked for the note, so they can find wholesale orders without opening each customer."],
       "outOfScope": ["Emails to the customer (see F-30)."],
-      "questions": ["Is the note added to orders made in the admin for a wholesale customer?"],
+      "questions": ["An order that an admin makes for a wholesale customer gets no note. Is this intended?"],
       "scopes": [
         {
           "title": "A new wholesale order shows the note text",

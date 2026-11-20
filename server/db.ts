@@ -457,6 +457,16 @@ const MIGRATIONS: string[] = [
   ALTER TABLE ai_updates ADD COLUMN claude_pid INTEGER;  -- the claude run of this feature, while it runs
   UPDATE ai_updates SET status = 'failed', error = 'The update stopped before the end' WHERE status = 'running';
   `,
+  // 17: open questions that an AI skill answered or removed (server/map.ts, removeAnswered and removeItems).
+  //     The question row is deleted. Its text stays here, so the AI skills do not ask it again on this feature.
+  `
+  CREATE TABLE answered_questions (
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    text_key TEXT NOT NULL,           -- lower(trim(text))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (feature_id, text_key)
+  );
+  `,
 ];
 
 function open(): DatabaseSync {
