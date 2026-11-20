@@ -23,7 +23,7 @@ import { db, now } from './db.ts';
 import { changeReport, type ChangeReport } from './changes.ts';
 import { ITEM_KINDS } from './features.ts';
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
-import { childEnv, processAlive, run, syncRunning, type Job } from './sync.ts';
+import { childEnv, mapLoopRunning, processAlive, run, syncRunning, type Job } from './sync.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -173,6 +173,7 @@ export function aiUpdateState(projectId: string) {
 export function startAiUpdate(p: ProjectConfig, o: { model?: string; budgetUsd?: number }): { syncId: number } {
   if (aiRunning(p.id)) throw new AiUpdateError('An AI update runs already for this project.');
   if (syncRunning(p.id)) throw new AiUpdateError('A sync runs now. Start the AI update when it ends.');
+  if (mapLoopRunning(p.id)) throw new AiUpdateError('A mapping loop runs now. Start the AI update when it ends.');
   const s = db.prepare('SELECT id, report FROM syncs WHERE project_id = ? AND report IS NOT NULL ORDER BY id DESC LIMIT 1').get(p.id) as any;
   if (!s) throw new AiUpdateError('No sync has a change report yet. Sync first.');
   const saved = JSON.parse(s.report) as ChangeReport;
@@ -562,6 +563,7 @@ export async function aiUpdate(p: ProjectConfig, o: AiUpdateOptions): Promise<Ai
   const say = o.onLine ?? (() => {});
   if (aiRunning(p.id)) throw new AiUpdateError('An AI update runs already for this project.');
   if (syncRunning(p.id)) throw new AiUpdateError('A sync runs now. Start the AI update when it ends.');
+  if (mapLoopRunning(p.id)) throw new AiUpdateError('A mapping loop runs now. Start the AI update when it ends.');
   preparing.add(p.id);
   const ids: number[] = [];
   const rowOf = new Map<number, number>();

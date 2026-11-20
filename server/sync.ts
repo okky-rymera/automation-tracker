@@ -235,6 +235,15 @@ export function syncRunning(projectId: string): boolean {
 /** True when the process is alive. For the AI update rows too (server/ai-update.ts). */
 export const processAlive = (pid: number | null) => alive(pid);
 
+/**
+ * True when a process (server or command line) runs a mapping loop of the project now
+ * (server/map-loop.ts). The loop uses the copy and the test site, as a sync and an AI update do.
+ */
+export function mapLoopRunning(projectId: string): boolean {
+  const rows = db.prepare("SELECT owner_pid FROM map_loops WHERE project_id = ? AND status = 'running'").all(projectId) as any[];
+  return rows.some((r) => r.owner_pid === process.pid || alive(r.owner_pid));
+}
+
 export function syncState(projectId: string) {
   markInterrupted(projectId);
   const p = getProject(projectId)!;
@@ -283,6 +292,7 @@ export function startSync(projectId: string, mode: TestMode = 'auto', onLog?: (l
   // one (server or command line), so the check reads the database, not a list in memory.
   const ai = db.prepare("SELECT owner_pid FROM ai_updates WHERE project_id = ? AND status IN ('running', 'waiting')").all(projectId) as any[];
   if (ai.some((r) => alive(r.owner_pid))) throw new SyncError('An AI update runs now. Sync when it ends.');
+  if (mapLoopRunning(projectId)) throw new SyncError('A mapping loop runs now. Sync when it ends, or stop it.');
   const syncId = Number(
     db.prepare("INSERT INTO syncs (project_id, started_at, status, step, owner_pid) VALUES (?, ?, 'running', 'check', ?)").run(projectId, now(), process.pid).lastInsertRowid,
   );

@@ -279,7 +279,7 @@ shows it faster than text.
   first, and look at the `scopes` of each screenshot, not only the captions.
   Then, for each scope that no screenshot shows:
   1. Look at the existing images. Export them with a read-only command (no writes):
-     `sqlite3 -readonly data/tracker.db "select writefile('<scratchpad>/f<id>-shot-' || i.screenshot_id || '.' || replace(replace(s.mime, 'image/', ''), 'jpeg', 'jpg'), i.data), s.caption from screenshot_images i join screenshots s on s.id = i.screenshot_id where s.feature_id = <id> and s.removed = 0"`.
+     `npm run -s map -- screenshots <project> <id> <scratchpad>`. It lists each file with its caption.
      Then open the PNG files with the Read tool.
   2. If an image shows the scope, send that screenshot again with its
      caption (or its `firstCaption`) and the scope in `scopes`. The tool adds

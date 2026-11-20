@@ -144,6 +144,10 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   screenshots: Screenshot[];
   /** Mapped code: number of entries, and AI entries that no person checked. */
   code: { entries: number; aiToCheck: number };
+  /** When a person last reviewed the feature. null: never. */
+  reviewedAt: string | null;
+  /** When an AI skill last saved something in the feature. */
+  aiChangedAt: string | null;
 }
 
 /** One piece of a feature's code: a whole file (function ''), or the functions with one name in a file. */

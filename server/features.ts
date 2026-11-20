@@ -26,7 +26,7 @@
  * skill wrote and no person checked yet. A person who changes a field removes it
  * from the list. "Mark as checked" clears the lists, the item marks and the links.
  */
-import { db, json, tx } from './db.ts';
+import { db, json, now, tx } from './db.ts';
 
 export const PRIORITIES = ['', 'high', 'medium', 'low'];
 
@@ -49,6 +49,31 @@ function clearAi(table: 'features' | 'scopes', id: number, fields: string[]) {
   db.prepare(`UPDATE ${table} SET ai_fields = ? WHERE id = ?`).run(JSON.stringify(left), id);
 }
 
+/**
+ * SQL condition: feature f has no open AI mark (no AI field, list item, scope, link, code or screenshot
+ * that no person checked). The same rule as needsReview in the app (FeaturesTab.tsx).
+ */
+const NO_OPEN_MARKS = `f.ai_fields = '[]'
+  AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.feature_id = f.id AND i.ai_draft = 1)
+  AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.feature_id = f.id AND s.ai_fields <> '[]')
+  AND NOT EXISTS (SELECT 1 FROM links l WHERE l.feature_id = f.id AND l.source = 'ai' AND l.checked = 0 AND l.removed = 0)
+  AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.source = 'ai' AND c.checked = 0 AND c.removed = 0)
+  AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.feature_id = f.id AND x.source = 'ai' AND x.checked = 0 AND x.removed = 0)`;
+
+/**
+ * Review state, after a person changed something in the app. A feature with no open AI mark is
+ * reviewed now, when no person reviewed it yet, or when the AI changed it after the last review.
+ * So a person who checks the AI marks one by one reviews the feature too, and a feature that a
+ * person made counts as reviewed. A feature that was reviewed and did not change keeps its time.
+ */
+export function sweepReviewed(projectId: string) {
+  db.prepare(
+    `UPDATE features AS f SET reviewed_at = ?
+     WHERE f.project_id = ? AND (f.reviewed_at IS NULL OR (f.ai_changed_at IS NOT NULL AND f.ai_changed_at > f.reviewed_at))
+       AND ${NO_OPEN_MARKS}`,
+  ).run(now(), projectId);
+}
+
 /** Groups rows by a key, in one pass. */
 function byKey<T>(rows: T[], key: (r: T) => number) {
   const m = new Map<number, T[]>();
@@ -66,7 +91,7 @@ const LABEL_KIND_VALUES: string[] = Object.values(LABEL_KINDS);
 export function featureData(projectId: string) {
   const groups = db.prepare('SELECT id, title, description, sort FROM feature_groups WHERE project_id = ? ORDER BY sort, id').all(projectId);
   const features = db
-    .prepare('SELECT id, group_id AS groupId, title, description, priority, sort, ai_fields FROM features WHERE project_id = ? ORDER BY sort, id')
+    .prepare('SELECT id, group_id AS groupId, title, description, priority, sort, ai_fields, reviewed_at AS reviewedAt, ai_changed_at AS aiChangedAt FROM features WHERE project_id = ? ORDER BY sort, id')
     .all(projectId) as any[];
   const scopes = db
     .prepare(
@@ -463,7 +488,7 @@ export const edits = {
       clearAi('features', f, [...(['title', 'description', 'priority'] as const).filter((k) => k in b), ...(groupId !== undefined ? ['group'] : [])]);
     });
   },
-  /** "Mark as checked": a person read the AI draft. Clears the marks on the feature, its lists, its scopes and its AI links. */
+  /** "Mark as reviewed": a person read the AI draft. Clears the marks on the feature, its lists, its scopes and its AI links, and saves the review time. */
   checkFeature(p: string, id: string) {
     const f = own('features', p, id);
     tx(() => {
@@ -474,6 +499,7 @@ export const edits = {
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE screenshots SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
+      db.prepare('UPDATE features SET reviewed_at = ? WHERE id = ?').run(now(), f);
     });
   },
   deleteFeature(p: string, id: string) {
@@ -589,10 +615,13 @@ export const edits = {
     const f = own('features', p, id);
     const kind = labelKind(b.kind);
     db.prepare('INSERT OR IGNORE INTO feature_labels (feature_id, kind, value) VALUES (?, ?, ?)').run(f, kind, labelValue(p, kind, b.value));
+    clearAi('features', f, [`${kind}s`]); // a person changed the roles: they are checked now
   },
   deleteLabel(p: string, id: string, b: any) {
     const f = own('features', p, id);
-    db.prepare('DELETE FROM feature_labels WHERE feature_id = ? AND kind = ? AND value = ?').run(f, labelKind(b.kind), need(b.value, 'Label'));
+    const kind = labelKind(b.kind);
+    db.prepare('DELETE FROM feature_labels WHERE feature_id = ? AND kind = ? AND value = ?').run(f, kind, need(b.value, 'Label'));
+    clearAi('features', f, [`${kind}s`]);
   },
 
   // List items (requirements, notes, out of scope, where, open questions).

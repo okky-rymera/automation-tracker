@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, writeCoverageConfig, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, featureData, screenshotData, screenshotInfo } from './features.ts';
+import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepReviewed } from './features.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
 import { listCypress } from './cypress.ts';
@@ -12,6 +12,7 @@ import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
 import { aiUpdateState, AiUpdateError, startAiUpdate } from './ai-update.ts';
+import { mapLoopState, MapLoopError, startMapLoop, stopMapLoop } from './map-loop.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
@@ -188,7 +189,10 @@ app.get('/api/projects/:id/feature-code', (req, res) => res.json(featureCodeCove
 
 const edit = (fn: (req: express.Request) => unknown) => (req: express.Request, res: express.Response) => {
   try {
-    res.json(fn(req) ?? { ok: true });
+    const out = fn(req);
+    // A person changed something: a feature with no open AI mark left is reviewed now.
+    if (req.method !== 'GET') sweepReviewed(proj(req).id);
+    res.json(out ?? { ok: true });
   } catch (e) {
     if (e instanceof EditError) return res.status(400).json({ error: e.message });
     console.error(e);
@@ -225,6 +229,25 @@ app.post('/api/projects/:id/ai-update', (req, res) => {
     res.status(500).json({ error: (e as Error).message });
   }
 });
+// ---- Mapping loop: headless map-features (server/map-loop.ts) ----
+app.get('/api/projects/:id/map-loop', (req, res) => res.json(mapLoopState(P(req))));
+const loopEdit = (fn: (req: express.Request) => unknown) => (req: express.Request, res: express.Response) => {
+  try {
+    res.json(fn(req) ?? { ok: true });
+  } catch (e) {
+    if (e instanceof MapLoopError) return res.status(409).json({ error: e.message });
+    console.error(e);
+    res.status(500).json({ error: (e as Error).message });
+  }
+};
+app.post('/api/projects/:id/map-loop', loopEdit((req) => {
+  const b = req.body ?? {};
+  // No value: the default. A bad value or a value above the limit: startMapLoop refuses it with a message.
+  const n = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
+  const model = ['sonnet', 'opus'].includes(b.model) ? b.model : undefined;
+  return { loopId: startMapLoop(proj(req), { model, maxUnits: n(b.maxUnits), unitBudgetUsd: n(b.unitBudgetUsd), totalBudgetUsd: n(b.totalBudgetUsd), startedBy: 'app' }).loopId };
+}));
+app.post('/api/projects/:id/map-loop/stop', loopEdit((req) => stopMapLoop(P(req))));
 app.post('/api/projects/:id/rescan', edit((req) => syncProject(proj(req), true)));
 app.post('/api/projects/:id/groups', edit((req) => edits.addGroup(P(req), req.body)));
 app.patch('/api/projects/:id/groups/:gid', edit((req) => edits.updateGroup(P(req), req.params.gid, req.body)));

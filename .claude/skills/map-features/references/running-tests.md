@@ -33,17 +33,22 @@ test. Give the failed assert. Do not guess the cause without proof.
 ## Playwright (one spec file)
 
 The plugin's own guide is `tests/Playwright/CLAUDE.md` in the plugin repo. Read it.
-In short, from `<plugin>/tests/Playwright/`:
+Run the spec file from the tracker repo root with:
 
 ```bash
-npx playwright test specs/<path from the unit ref> --reporter=line
+npm run -s project -- run-spec <project> <unit ref>
 ```
 
-The unit `ref` of a Playwright unit is relative to the specs folder, so the
-command path is `specs/<ref>`. The `.env` file there picks the site
-(`ECHOWP=true` uses the echowp test sites; else `BASE_URL`). With
-`ECHOWP=true`, the run starts the echowp sites itself, so "stopped" sites
-before the run are normal.
+Give the Bash call a timeout of 600000 (10 minutes). The command:
+
+- starts the tracker's own echowp site `site-1` (profile `test`) with a clean database,
+- opens a few pages first (a new site sends the first admin visit to the WooCommerce home page),
+- runs the spec file on that site with 1 worker, and prints the result,
+- leaves the site on, so you can try the feature with `playwright-cli`. The last line gives its URL.
+
+Do not run `npx playwright test` yourself. The `.env` file of the plugin can say
+`ECHOWP=true`: then the plugin's own echowp setup runs, in the person's own echowp
+home, and it can call `sudo`. `run-spec` always turns that off.
 
 A test made in a loop (for example one run for each user role) has one test ID
 in the tracker, but Playwright counts each run. So "5 passed" for a file with
@@ -68,6 +73,9 @@ Prefer reading the step definitions (in `cypress/step_definitions` and
 package when `node_modules` is installed) and trying the feature with `playwright-cli`. Run Cypress only when the user
 asks for it.
 
+In the mapping loop (a headless run), no user can ask, so never run Cypress
+there. The loop refuses `npx cypress`.
+
 ## The test site (for playwright-cli and test data)
 
 Use the tracker's own echowp site. Run these from the tracker repo root:
@@ -75,9 +83,14 @@ Use the tracker's own echowp site. Run these from the tracker repo root:
 ```bash
 npm run -s project -- echowp <project> up --count 1 --profile test      # start site-1; the output gives its URL
 npm run -s project -- echowp <project> wp site-1 --profile test -- <wp-cli command>   # make or change data
-npm run -s project -- echowp <project> down --profile test              # stop the sites when you finish
+npm run -s project -- echowp <project> stop site-1 --profile test       # stop the site when you finish
 ```
 
+- Do not use `echowp down`: it deletes the sites, and the next start makes them again.
+- echowp sets the admin login when it makes the site. The `up` command above
+  uses the login of the plugin's Playwright tests (`ADMIN_USERNAME` and
+  `ADMIN_PASSWORD` in `tests/Playwright/.env`) for this. Do not read the
+  `.env` file into the command yourself.
 - Run `faillock --user $USER` before you start the site and after you stop it.
 - Make test data with WP-CLI (`wp post create`, `wp post meta update`,
   `wp option update`). Write down each thing you make or change. Delete it or

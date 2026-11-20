@@ -80,11 +80,31 @@ The Claude Code skill `map-features` (in `.claude/skills/`) writes a first draft
 - It adds to the features that exist before it makes new ones, and it links each test to the scopes it checks.
 - It puts the plugin code of each feature (files or functions) in the feature, for "Code by feature".
 - It adds 1 to 4 screenshots to each feature that has a screen.
-- Text it writes shows "AI draft" in the app. Its links show "linked by AI". Click "Mark as checked", or change the text, to remove the mark.
+- Text it writes shows "AI draft" in the app. Its links show "linked by AI". Click the mark, or change the text, to remove the mark. "Mark as reviewed" on a feature removes all its marks.
 - It does not change or remove text that a person wrote or checked. It does not add again a link that a person removed, and it does not change a link that a person made.
 - It records each unit it did. A unit shows again when its files change.
 
 The skill writes through `npm run -s map -- <command>` (see `server/map.ts`). To see the progress: `npm run -s map -- status <project>`.
+
+### Let Claude map the list without you
+
+Features tab > "Map with AI" > "Start mapping". Claude Code runs the skill headless (`claude -p`), one unit after the other, with your claude.ai login. You can also start it on the command line: `npm run project -- map-loop <project> [--units 10] [--unit-budget 5] [--budget 25] [--model opus]`.
+
+- It stops when no unit is left, at the unit limit, at the spend limit, when a unit fails two times, at the plan usage limit, or when you click "Stop". When a unit takes more than 60 minutes, the loop stops it, and the unit counts as failed.
+- It can use only the read tools, the `map` steps of the skill, the `run-spec` command, the tracker's echowp commands, and `playwright-cli`. The tool refuses all other commands. It does not run Cypress tests. This is a guard, not a sandbox: for example, the echowp `wp` command can still run PHP on the test site. The same guard against `sudo` as in the sync applies.
+- It runs a spec file only on the tracker's own echowp site (`npm run project -- run-spec <project> <unit ref>`), and it stops the site after each unit.
+- It makes a database backup before it starts. A sync and an AI update wait while it runs.
+- The panel shows each unit, its cost (a list-price estimate of the plan use), the features it saved to, and the report of the run.
+
+### Review state
+
+Each feature in the list shows its review state:
+
+- **New**: no person reviewed the feature yet.
+- **Changed**: a person reviewed it, and the AI changed it after that. The "AI draft" marks show what changed, so you read only those parts.
+- No tag: reviewed, and no AI change since.
+
+Click "Mark as reviewed" on a feature to save your review. When you clear the last AI mark of a feature one by one, that also counts as a review. A feature that a person made counts as reviewed. The buttons above the list show only the features in one state.
 
 ## Coverage views
 

@@ -506,6 +506,61 @@ const MIGRATIONS: string[] = [
     AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.group_id = scope_groups.id AND instr(s.ai_fields, '"group"') = 0)
     AND NOT EXISTS (SELECT 1 FROM scope_group_titles_gone t WHERE t.group_id = scope_groups.id);
   `,
+  // 22: review state of a feature, and the mapping loop (server/map-loop.ts).
+  //     reviewed_at: when a person last reviewed the feature ("Mark as reviewed", or the last AI mark cleared).
+  //       NULL: no person reviewed it yet. Features with no AI marks now count as reviewed.
+  //     ai_changed_at: when an AI skill last saved something in the feature (map.ts apply).
+  //     The state comes from these and the AI marks: new (never reviewed), changed (reviewed, and AI marks
+  //     are open again), reviewed (no open AI marks).
+  //     map_loops: one row for each start of the loop. map_runs: one row for each unit that headless Claude mapped.
+  `
+  ALTER TABLE features ADD COLUMN reviewed_at TEXT;
+  ALTER TABLE features ADD COLUMN ai_changed_at TEXT;
+  UPDATE features SET reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE ai_fields = '[]'
+    AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.feature_id = features.id AND i.ai_draft = 1)
+    AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.feature_id = features.id AND s.ai_fields <> '[]')
+    AND NOT EXISTS (SELECT 1 FROM links l WHERE l.feature_id = features.id AND l.source = 'ai' AND l.checked = 0 AND l.removed = 0)
+    AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = features.id AND c.source = 'ai' AND c.checked = 0 AND c.removed = 0)
+    AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.feature_id = features.id AND x.source = 'ai' AND x.checked = 0 AND x.removed = 0);
+  CREATE TABLE map_loops (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,             -- running | done | stopped | failed
+    started_by TEXT NOT NULL,         -- app | cli | sync
+    model TEXT NOT NULL,
+    unit_budget_usd REAL NOT NULL,    -- spend limit for one unit (list price)
+    total_budget_usd REAL NOT NULL,   -- spend limit for the whole loop (list price)
+    max_units INTEGER NOT NULL,
+    stop_reason TEXT,
+    owner_pid INTEGER
+  );
+  CREATE INDEX map_loops_project ON map_loops(project_id, id);
+  CREATE TABLE map_runs (
+    id INTEGER PRIMARY KEY,
+    loop_id INTEGER NOT NULL REFERENCES map_loops(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    unit_kind TEXT NOT NULL,          -- playwright | cypress | code
+    unit_ref TEXT NOT NULL,           -- for code: the candidate file that "next" gave first
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,             -- running | done | skipped | failed
+    cost_usd REAL,
+    duration_ms INTEGER,
+    features TEXT,                    -- JSON list of feature IDs the unit saved to
+    report TEXT NOT NULL DEFAULT '',  -- the final message of the run (what it did, open questions)
+    error TEXT,
+    claude_pid INTEGER
+  );
+  CREATE INDEX map_runs_loop ON map_runs(loop_id, id);
+  `,
+  // 23: the first form of step 22 wrote reviewed_at as "YYYY-MM-DD HH:MM:SS" (UTC, no zone). The app
+  //     reads such a value as local time. Write it in the ISO form of now(), with "Z".
+  `
+  UPDATE features SET reviewed_at = replace(reviewed_at, ' ', 'T') || '.000Z' WHERE reviewed_at NOT LIKE '%Z';
+  `,
 ];
 
 function open(): DatabaseSync {

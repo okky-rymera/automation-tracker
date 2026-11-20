@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { MapLoopPanel } from './MapLoopPanel';
 import {
   ITEM_KIND,
   LABEL_KIND,
@@ -44,6 +45,33 @@ const needsReview = (f: Feature) =>
   f.code.aiToCheck > 0 ||
   f.screenshots.some((s) => s.aiDraft);
 
+/**
+ * Review state of a feature:
+ *  - new: no person reviewed it yet
+ *  - changed: a person reviewed it, and the AI changed it after that (the AI draft marks show what)
+ *  - reviewed: no AI change waits for a review
+ */
+type ReviewState = 'new' | 'changed' | 'reviewed';
+const reviewState = (f: Feature): ReviewState => (!needsReview(f) ? 'reviewed' : f.reviewedAt ? 'changed' : 'new');
+const REVIEW_LABEL: Record<ReviewState, string> = { new: 'New', changed: 'Changed', reviewed: 'Reviewed' };
+const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+
+/** Tag for a feature that waits for a review. A reviewed feature has no tag. */
+function ReviewTag({ f }: { f: Feature }) {
+  const st = reviewState(f);
+  if (st === 'reviewed') return null;
+  const title =
+    st === 'new'
+      ? 'No person reviewed this feature yet.'
+      : `The AI changed this feature after your review on ${day(f.reviewedAt!)}. The “AI draft” marks show what changed.`;
+  const style = st === 'new' ? { background: 'color-mix(in oklab, var(--accent) 16%, transparent)', color: 'var(--accent)' } : { background: 'var(--warn-tint)', color: 'var(--warn)' };
+  return (
+    <span title={title} className="shrink-0 rounded px-1 py-px text-[10px] font-medium" style={style}>
+      {REVIEW_LABEL[st]}
+    </span>
+  );
+}
+
 /** Runs a change and shows the error text if the API refuses it. */
 export async function act(fn: () => Promise<unknown>) {
   try {
@@ -57,13 +85,15 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
   const base = `/api/projects/${project}`;
   const { data, error } = useApi<FeatureData>(`${base}/features`);
   const [query, setQuery] = useState('');
+  const [review, setReview] = useState<ReviewState | 'all'>('all');
   const go = (s: string | null) => (location.hash = href({ project, tab: 'features', sel: s }));
 
   const shown = useMemo(() => {
     const q = query.toLowerCase();
     return (data?.features ?? []).filter(
       (f) =>
-        !q || [
+        (review === 'all' || reviewState(f) === review) &&
+        (!q || [
           featureCode(f.id),
           f.title,
           f.description,
@@ -71,9 +101,9 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
           ...f.requirements.map((i) => i.text),
           ...f.scopeGroups.map((g) => g.title),
           ...f.scopes.flatMap((s) => [s.title, ...s.requirements.map((i) => i.text)]),
-        ].some((s) => s.toLowerCase().includes(q)),
+        ].some((s) => s.toLowerCase().includes(q))),
     );
-  }, [data, query]);
+  }, [data, query, review]);
 
   if (!data) return <Loading error={error} />;
   const sections = [
@@ -90,7 +120,7 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
   ];
   const feature = sel?.startsWith('f:') ? data.features.find((f) => f.id === Number(sel.slice(2))) : undefined;
   const group = sel?.startsWith('g:') ? data.groups.find((g) => g.id === Number(sel.slice(2))) : undefined;
-  const toReview = data.features.filter(needsReview).length;
+  const reviewCount = (st: ReviewState) => data.features.filter((f) => reviewState(f) === st).length;
 
   const newFeature = (groupId: number | null = null) => {
     const title = prompt('Feature title');
@@ -111,16 +141,32 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
             placeholder="Filter by title, role, scope or ID…"
             className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-sm outline-none focus:border-accent"
           />
+          <div className="flex flex-wrap gap-1 text-xs" role="group" aria-label="Show features by review state">
+            {(['all', 'new', 'changed', 'reviewed'] as const).map((st) => (
+              <button
+                key={st}
+                type="button"
+                aria-pressed={review === st}
+                onClick={() => setReview(st)}
+                title={st === 'new' ? 'No person reviewed these yet' : st === 'changed' ? 'The AI changed these after the last review' : st === 'reviewed' ? 'No AI change waits for a review' : undefined}
+                className={`rounded-md border px-2 py-0.5 ${review === st ? 'border-accent bg-surface-2 text-ink' : 'border-line text-ink-3 hover:bg-surface-2'}`}
+              >
+                {st === 'all' ? 'All' : REVIEW_LABEL[st]} <span className="tabular-nums">{st === 'all' ? data.features.length : reviewCount(st)}</span>
+              </button>
+            ))}
+          </div>
           <div className="flex items-center gap-2 text-xs">
             <span className="flex-1 text-ink-3">
               {shown.length} of {data.features.length} features
-              {toReview > 0 && <> · {toReview} to check</>}
             </span>
             <Button onClick={() => newFeature()}>+ Feature</Button>
             <Button onClick={newGroup}>+ Group</Button>
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-1 text-[13px]">
+          <SideItem active={sel === 'mapping'} onClick={() => go('mapping')}>
+            Map with AI
+          </SideItem>
           <SideItem active={sel === 'unlinked'} onClick={() => go('unlinked')} meta={`${data.unlinked.playwright + data.unlinked.cypress}`}>
             Tests with no feature
           </SideItem>
@@ -137,10 +183,19 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
                   <span className="tabular-nums">{s.items.length}</span>
                 </button>
                 {s.items.map((f) => (
-                  <SideItem key={f.id} active={sel === `f:${f.id}`} onClick={() => go(`f:${f.id}`)} meta={<Counts f={f} />}>
+                  <SideItem
+                    key={f.id}
+                    active={sel === `f:${f.id}`}
+                    onClick={() => go(`f:${f.id}`)}
+                    meta={
+                      <>
+                        <ReviewTag f={f} />
+                        <Counts f={f} />
+                      </>
+                    }
+                  >
                     <span className="mr-1.5 font-mono text-[11px] text-ink-3">{featureCode(f.id)}</span>
                     {f.title}
-                    {needsReview(f) && <AiBadge />}
                   </SideItem>
                 ))}
               </div>
@@ -153,6 +208,8 @@ export function FeaturesTab({ project, sel }: { project: string; sel: string | n
           <FeatureDetail key={feature.id} project={project} f={feature} data={data} />
         ) : group ? (
           <GroupDetail key={group.id} project={project} g={group} data={data} onNewFeature={() => newFeature(group.id)} />
+        ) : sel === 'mapping' ? (
+          <MapLoopPanel project={project} />
         ) : sel === 'unlinked' ? (
           <UnlinkedView project={project} data={data} />
         ) : (
@@ -181,7 +238,7 @@ export function SideItem({ active, onClick, meta, children }: { active: boolean;
       className={`flex w-full items-center gap-2 rounded px-2 py-[3px] text-left hover:bg-surface-2 ${active ? 'bg-surface-2 ring-1 ring-accent/40' : ''}`}
     >
       <span className="min-w-0 flex-1 truncate">{children}</span>
-      {meta && <span className="shrink-0">{meta}</span>}
+      {meta && <span className="flex shrink-0 items-center gap-1.5">{meta}</span>}
     </button>
   );
 }
@@ -452,7 +509,11 @@ function Intro({ data }: { data: FeatureData }) {
           . What it wrote shows “AI draft” until you check it.
         </p>
       )}
-      <p>Select a feature on the left, or open “Tests with no feature” to link the rest.</p>
+      <p>
+        Each feature shows its review state: “New” (no person reviewed it yet), “Changed” (the AI changed it after your review), or no tag (reviewed, no change since).
+        “Mark as reviewed” on a feature saves your review. Use the buttons above the list to show only one state.
+      </p>
+      <p>Select a feature on the left, open “Map with AI” to let Claude map the next files, or open “Tests with no feature” to link the rest.</p>
     </div>
   );
 }
@@ -557,12 +618,13 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
       <div>
         <div className="flex items-center gap-2 font-mono text-xs text-ink-3">
           <CopyId label={featureCode(f.id)} />
-          {needsReview(f) && (
-            <>
-              <AiBadge />
-              <Button onClick={() => act(() => mutate('POST', `${url}/check`, {}))}>Mark as checked</Button>
-            </>
-          )}
+          <ReviewTag f={f} />
+          <span className="font-sans">
+            {reviewState(f) === 'new' && 'Not reviewed yet.'}
+            {reviewState(f) === 'changed' && <>Changed by the AI after your review on {day(f.reviewedAt!)}. The “AI draft” marks show what changed.</>}
+            {reviewState(f) === 'reviewed' && f.reviewedAt && <>Reviewed on {day(f.reviewedAt)}. No change since.</>}
+          </span>
+          {needsReview(f) && <Button onClick={() => act(() => mutate('POST', `${url}/check`, {}))}>Mark as reviewed</Button>}
         </div>
         <InlineText value={f.title} onSave={(title) => mutate('PATCH', url, { title })} className="mt-1 text-lg font-semibold" />
         <InlineText
@@ -614,7 +676,14 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
         <dl className="mt-4 grid grid-cols-[8rem_1fr] gap-x-3 gap-y-2 text-sm">
           {FIELDS.map((fd) => (
             <div key={fd.key} className="contents">
-              <dt className="pt-1 text-xs text-ink-3">{fd.label}</dt>
+              <dt className="pt-1 text-xs text-ink-3">
+                {fd.label}
+                {fd.kind === 'label' && f.aiFields.includes(fd.key) && (
+                  <div className="mt-0.5">
+                    <AiBadge title="The AI skill added roles here. Add or remove a role, or use “Mark as reviewed”, to check them." />
+                  </div>
+                )}
+              </dt>
               <dd className="min-w-0">
                 {fd.kind === 'label' ? (
                   <LabelInput

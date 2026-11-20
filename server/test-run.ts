@@ -419,3 +419,139 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     active = null;
   }
 }
+
+export interface SpecResult {
+  /** Exit code of the Playwright command (0 = all passed, 1 = some failed). */
+  exit: number | string;
+  /** The URL of the test site. The site stays on after the run, for playwright-cli. */
+  siteUrl: string;
+  /** The last lines of the Playwright output. */
+  tail: string;
+}
+
+/**
+ * The admin login of the plugin's Playwright tests (ADMIN_USERNAME and ADMIN_PASSWORD in its .env).
+ * echowp sets it when it makes a site, so the tests and playwright-cli can log in.
+ * The values stay in this process: they are never logged.
+ */
+export function pluginAdminLogin(p: ProjectConfig): { user: string; password: string } {
+  const dotenv = readEnv(path.join(p.path, playwrightRoot(p), '.env'));
+  return { user: dotenv.ADMIN_USERNAME || 'admin', password: dotenv.ADMIN_PASSWORD || 'test' };
+}
+
+/**
+ * Runs one Playwright spec file of the copy on the tracker's own echowp site (site-1, profile
+ * "test"), for the map-features skill. The site starts with a clean database. It stays on after the
+ * run, so the skill can try the feature with playwright-cli. The caller stops it (echowp stop site-1 --profile test, or
+ * the mapping loop after each unit). No coverage: the site mark is not written.
+ * The copy's .env can say ECHOWP=true. Here it is always false, so the plugin's own echowp setup
+ * (which can call sudo, and uses the person's own echowp home) does nothing.
+ */
+export async function runSpec(p: ProjectConfig, ref: string, ctx: Ctx): Promise<SpecResult> {
+  const pwRoot = path.join(p.path, playwrightRoot(p));
+  const specDir = path.join(p.path, p.playwrightDir ?? playwrightRoot(p));
+  const spec = path.resolve(specDir, ref);
+  if (!spec.startsWith(specDir + path.sep) || !fs.existsSync(spec)) throw new Error(`No spec file "${ref}" in ${specDir}. Give the unit ref that "map next" gave.`);
+  takeLock(p.id);
+  // A stop (the mapping loop's Stop, or a timeout of the caller) ends the process with process.exit:
+  // then "finally" does not run, so the exit handler removes the lock.
+  const dropLock = () => fs.rmSync(LOCK, { force: true });
+  process.on('exit', dropLock);
+  try {
+    const pwConfig = PW_CONFIGS.find((f) => fs.existsSync(path.join(pwRoot, f)));
+    if (!pwConfig) throw new Error(`No Playwright config (${PW_CONFIGS.join(', ')}) in ${pwRoot}`);
+    const login = pluginAdminLogin(p);
+    const creds = { ADMIN_USERNAME: login.user, ADMIN_PASSWORD: login.password };
+    ctx.log('Start the echowp test site site-1 (profile test) with a clean database');
+    const { sites } = await startTestSites(p, 1, { user: creds.ADMIN_USERNAME, password: creds.ADMIN_PASSWORD }, ctx.log, async (cmd, args, env, onLine) => {
+      const r = await ctx.run(cmd, args, { cwd: ROOT, env, quiet: true, onLine });
+      return r.code ?? 1;
+    }, ctx.signal);
+    if (ctx.cancelled()) throw new Error('Cancelled');
+    const site = sites[0].url;
+    ctx.log(`Test site: ${site}`);
+    // The first admin page load of a new site goes to the WooCommerce home page. The sync run has
+    // these page loads first too, so a test that runs first sees the same site as in a sync.
+    const warm = await ctx.run('bash', [path.join(ROOT, 'coverage', 'baseline.sh'), site], { cwd: ROOT, env: ctx.env(creds), quiet: true });
+    if (warm.code !== 0) ctx.log(`The first page loads failed (exit ${warm.code ?? warm.signal}). The tests run anyway.`);
+    const rel = path.relative(pwRoot, spec);
+    // Playwright reads a file argument as a regex. Escape it, so that a name with "(", "[" or "+"
+    // matches only this file.
+    const filter = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    ctx.log(`Run: npx playwright test ${filter} --reporter=line --workers=1`);
+    const r = await ctx.run('npx', ['playwright', 'test', filter, '--reporter=line', '--workers=1'], {
+      cwd: pwRoot,
+      env: ctx.env({ ...creds, ECHOWP: 'false', BASE_URL: site }),
+      onLine: (l) => ctx.log(l),
+      quiet: true,
+    });
+    return { exit: r.code ?? r.signal ?? 'unknown', siteUrl: site, tail: r.out.trim().split('\n').slice(-15).join('\n') };
+  } finally {
+    process.off('exit', dropLock);
+    dropLock();
+  }
+}
+
+/**
+ * Stops a run-spec command that still runs after its caller stopped (for example a mapping unit
+ * that timed out). It stops only a run-spec of another process: it reads the command line of the
+ * lock holder (Linux /proc). SIGTERM first: sync.ts turns it into process.exit, so the run-spec
+ * stops its Playwright process groups and removes the lock. SIGKILL after 15 s.
+ * Gives a line for the log, or null when no run-spec was left.
+ */
+export async function stopLeftoverRunSpec(): Promise<string | null> {
+  let pid: number;
+  try {
+    pid = Number(JSON.parse(fs.readFileSync(LOCK, 'utf8')).pid);
+  } catch {
+    return null;
+  }
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return null;
+  let cmdline = '';
+  try {
+    cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' ');
+  } catch {
+    clearDeadLock();
+    return null;
+  }
+  if (!/\brun-spec\b/.test(cmdline)) return null;
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    /* gone */
+  }
+  for (let i = 0; i < 30 && alive(); i++) await new Promise((r) => setTimeout(r, 500));
+  let how = 'stopped';
+  if (alive()) {
+    try {
+      process.kill(pid, 'SIGKILL');
+      how = 'killed (it did not stop in 15 s)';
+    } catch {
+      /* gone */
+    }
+  }
+  clearDeadLock();
+  return `A test run (run-spec, process ${pid}) still ran after the unit: ${how}.`;
+}
+
+/** Removes the test-run lock when the process that holds it is gone (a run that was killed). */
+export function clearDeadLock() {
+  try {
+    const held = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
+    try {
+      process.kill(held.pid, 0);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ESRCH') fs.rmSync(LOCK, { force: true });
+    }
+  } catch {
+    /* no lock, or a half-written one: takeLock handles it */
+  }
+}

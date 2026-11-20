@@ -13,12 +13,16 @@
  *   npm run project -- sync <id> [--tests auto|always|never]
  *   npm run project -- ai-update <id> [--from <commit> --to <commit>] [--feature 1,2] [--model opus] [--budget 1] [--bare] [--no-apply]
  *     (no --from/--to: the commits of the last sync that saved a change report)
+ *   npm run project -- map-loop <id> [--units 10] [--unit-budget 5] [--budget 25] [--model opus]   (headless map-features, one unit after the other)
+ *   npm run project -- run-spec <id> <unit ref>   (one Playwright spec on the tracker echowp site-1; the site stays on)
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { db } from './db.ts';
 import { changeReport, reportText } from './changes.ts';
-import { startSync, type TestMode } from './sync.ts';
+import { childEnv, run, startSync, type Job, type TestMode } from './sync.ts';
+import { pluginAdminLogin, runSpec } from './test-run.ts';
+import { MapLoopError, startMapLoop } from './map-loop.ts';
 import { aiUpdate, DEFAULTS } from './ai-update.ts';
 import { checkCoveragePhp, prepareCoveragePhp } from './coverage-php.ts';
 import { trackerEchowp } from './echowp.ts';
@@ -156,7 +160,79 @@ if (cmd === 'add') {
   const [id, ...rest] = args;
   const p = loadProjects().find((x) => x.id === id);
   if (!p || !rest.length) throw new Error('Usage: echowp <id> <echowp command> [echowp options], for example: echowp wwp up');
-  process.exitCode = await trackerEchowp(p, rest);
+  // echowp sets the admin login when it makes a site. Use the login of the plugin's Playwright
+  // tests, so the tests and playwright-cli can log in. A login in the environment wins.
+  const env: Record<string, string> = {};
+  if (rest[0] === 'up' && !process.env.ECHOWP_ADMIN_USER && !process.env.ECHOWP_ADMIN_PASSWORD) {
+    const login = pluginAdminLogin(p);
+    env.ECHOWP_ADMIN_USER = login.user;
+    env.ECHOWP_ADMIN_PASSWORD = login.password;
+  }
+  process.exitCode = await trackerEchowp(p, rest, console.log, { env });
+} else if (cmd === 'map-loop') {
+  // Headless Claude maps one unit after the other with the map-features skill (server/map-loop.ts).
+  const [id] = args;
+  const p = loadProjects().find((x) => x.id === id);
+  const usage = 'Usage: map-loop <id> [--units 10] [--unit-budget 5] [--budget 25] [--model opus]';
+  if (!p) throw new Error(usage);
+  // A flag with no value (or a bad value) becomes NaN, and startMapLoop refuses it.
+  const num = (k: string) => {
+    if (!args.includes(`--${k}`)) return undefined;
+    const v = opt(k);
+    return v ? Number(v) : NaN;
+  };
+  let started: ReturnType<typeof startMapLoop>;
+  try {
+    started = startMapLoop(p, {
+      model: opt('model') ?? undefined,
+      maxUnits: num('units'),
+      unitBudgetUsd: num('unit-budget'),
+      totalBudgetUsd: num('budget'),
+      startedBy: 'cli',
+      onLine: (l) => console.log(l),
+    });
+  } catch (e) {
+    // A bad limit or a running job: a short message, not a stack trace.
+    if (!(e instanceof MapLoopError)) throw e;
+    console.error(`${e.message}\n${usage}`);
+    process.exit(1);
+  }
+  const { done } = started;
+  await done;
+  const loop = db.prepare('SELECT * FROM map_loops WHERE project_id = ? ORDER BY id DESC LIMIT 1').get(p.id) as any;
+  for (const r of db.prepare('SELECT * FROM map_runs WHERE loop_id = ? ORDER BY id').all(loop.id) as any[]) {
+    console.log(`\n=== ${r.unit_kind} ${r.unit_ref}: ${r.status}${r.cost_usd !== null ? `, $${r.cost_usd.toFixed(2)}` : ''}${r.error ? ` (${r.error})` : ''}\n${r.report}`);
+  }
+  if (loop.status === 'failed') process.exitCode = 1;
+} else if (cmd === 'run-spec') {
+  // One Playwright spec file on the tracker's echowp site-1, for the map-features skill (test-run.ts runSpec).
+  // The site stays on after the run. Stop it with: npm run project -- echowp <id> stop site-1 --profile test (not "down": it deletes the sites)
+  const [id, ref] = args;
+  const p = loadProjects().find((x) => x.id === id);
+  if (!p || !ref) throw new Error('Usage: run-spec <id> <unit ref>, for example: run-spec wwp backend/settings/x.spec.js');
+  const job: Job = { syncId: 0, child: null, cancelled: false, abort: new AbortController() };
+  // The commands run in their own process group. Stop them when this command stops (a timeout of the caller).
+  const stop = () => {
+    job.cancelled = true;
+    job.abort.abort();
+    for (const c of new Set([...(job.children ?? []), ...(job.child ? [job.child] : [])])) {
+      try {
+        if (c.pid) process.kill(-c.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+  };
+  process.on('exit', stop);
+  const r = await runSpec(p, ref, {
+    run: (c, a, o) => run(job, c, a, o),
+    env: (extra) => childEnv(extra),
+    log: (l) => console.log(l),
+    cancelled: () => job.cancelled,
+    signal: job.abort.signal,
+  });
+  console.log(`\nPlaywright exit code: ${r.exit} (0 = all passed). The test site ${r.siteUrl} is still on.`);
+  process.exitCode = r.exit === 0 ? 0 : 1;
 } else {
-  console.log('Commands: add, set-run, set-path, coverage-config, coverage-php, echowp, list, changes, set-sync, sync, ai-update. See server/cli.ts.');
+  console.log('Commands: add, set-run, set-path, coverage-config, coverage-php, echowp, list, changes, set-sync, sync, ai-update, map-loop, run-spec. See server/cli.ts.');
 }

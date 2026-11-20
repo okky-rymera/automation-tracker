@@ -1,6 +1,6 @@
 # Plan: keep the tracker in sync with new plugin code
 
-Status on 19 Nov 2026: the trial and phases 1 to 3 are done. The next step is phase 4.
+Status on 20 Nov 2026: the trial and phases 1 to 3 are done. Phase 4 is in progress. Phase 5 (mapping loop and review state) is built.
 
 ## Goal
 
@@ -9,7 +9,8 @@ The tracker must stay correct when the plugin code or the tests change. It must 
 ## Decisions
 
 - The tracker reads its own copy of each plugin, on `trunk`. It does not read the working copy of a developer.
-- Headless Claude (`claude -p`) updates the feature data after a sync. It updates existing data. It does not map from the start.
+- Headless Claude (`claude -p`) updates the feature data after a sync. It updates existing data.
+- Changed on 20 Nov 2026: headless Claude also maps new units (the map-features skill), in a loop. See phase 5.
 - The AI step is separate from the fixed steps (get code, scan, run tests). The fixed steps never need the AI.
 
 ## Done in the trial
@@ -135,6 +136,43 @@ Built on 19 Nov 2026 in `server/ai-update.ts`. Command: `npm run project -- ai-u
 4. [ ] Make adding a plugin easy: the copy, the `.env` file, the test packages, the site link, and the project in the app.
 5. [ ] Decide where the runs happen: this computer, a CI server (Buddy), or a cloud machine.
 
+## Phase 5: Mapping loop and review state
+
+Built on 20 Nov 2026. The user asked for: a loop that runs the map-features skill headless, a mark for features that a person reviewed, and a way to see which features changed since the review.
+
+1. [x] Review state of each feature (migration 22): `features.reviewed_at` and `features.ai_changed_at`.
+   - "Mark as reviewed" (was "Mark as checked") clears the AI marks and saves the time.
+   - After each change in the app, a feature with no open AI mark is reviewed now, when it was never reviewed or the AI changed it after the review (`sweepReviewed` in `server/features.ts`). So marks cleared one by one count as a review, and a feature that a person made counts as reviewed.
+   - `map apply` sets `ai_changed_at` on each feature it saves to.
+   - State in the app: New (never reviewed), Changed (reviewed, and AI marks are open again), no tag (reviewed). Filter buttons above the list.
+   - Each AI write leaves a mark (checked in `server/map.ts`): new text and items are AI draft, a new scope on a checked AI link un-checks the link. A link that a person made, and a checked screenshot, are not changed: the tool only suggests.
+   - Roles had no mark. Now a role that the AI adds puts "roles" in the feature's `ai_fields`. A person who adds or removes a role clears it. Tested on a copy: review F-1, AI adds a role → Changed; the person removes it → Reviewed.
+   - Not a "Changed" reason: a linked test or code that is gone after a sync. The feature page shows these on their own.
+   - Tested on a database copy: New → Reviewed → Changed (AI adds a note) → Reviewed (the person checks the note). A change to another feature does not change the time.
+2. [x] `npm run project -- run-spec <project> <unit ref>` (`runSpec` in `server/test-run.ts`): one spec file on the tracker's echowp `site-1`, with a clean database, `ECHOWP=false`, 1 worker. The site stays on for playwright-cli. The skill used the plugin's `.env` before (`ECHOWP=true`: the person's own echowp home, and a path to `sudo`).
+   - The first admin visit of a new site goes to the WooCommerce home page. A spec that runs first then fails. `runSpec` loads the pages of `coverage/baseline.sh` first, as the sync does. Before the fix: 1 failed, 2 passed. After: 3 passed.
+   - The skill guide said `echowp down` to stop the site. `down` deletes the sites. The guide now says `stop site-1`.
+3. [x] Mapping loop (`server/map-loop.ts`, tables `map_loops` and `map_runs`, command `map-loop`, Features tab > "Map with AI").
+   - The runner picks the unit with `map next`, and gives one unit to each `claude -p` run. After the run, it checks `processed_units`: a unit that was not saved or skipped is "failed". A unit that fails two times stops the loop.
+   - Limits: units, dollars for each unit (`--max-budget-usd`), dollars in total, 60 minutes for each unit, the plan usage limit.
+   - Tools: `--permission-mode dontAsk` with an allow list (read tools, Skill, Write in the run's scratch folder, the `map` steps of the skill (not `reset` or `move-scope`), `run-spec`, the tracker's `echowp`, `playwright-cli`, `faillock`). setpriv and the no-sudo stubs, as in the sync. No MCP servers.
+   - A sync and an AI update do not start while a loop runs, and the reverse.
+   - The runner stops the test site and closes the browser after each unit, and makes a database backup at the start.
+4. [x] Trials on a database copy, 20 Nov 2026, Opus, unit `frontend/per-product-wholesale-price/cart-page.spec.js`:
+   - Trial 1: $2.66, 4 minutes, "failed". The run did all the work, but could not save: a `Write(...)` permission rule does not allow the Write tool in `dontAsk` mode. An `Edit(...)` rule does (tested with a small Haiku run). Also `faillock --user $USER` was refused (a variable in the command). The prompt now gives the user name.
+   - Trial 2: $1.18, 3 minutes, "done". New feature F-5 with 5 scopes in one scope group, 3 notes, 3 test links, 7 functions and 1 JS file, 2 screenshots. The spec ran with `run-spec` (4 passed). The run made test data on the site and deleted it. 0 failed logins. The copy has no changed files. The site stopped after the unit.
+   - Rough estimate for wwp (real database, 20 Nov): 7 Playwright files and 82 Cypress files are left. Only Playwright units were measured ($1.18 saved, $2.66 when the save failed). No Cypress unit and no code unit was measured yet, so a total is a guess.
+   - Start and Stop from the app, on a copy: a sync and an AI update are refused (409) while the loop runs. After Stop: no claude, run-spec or Playwright process is left, site-1 is stopped, the loop row says "Stopped by a person". A killed run-spec can leave the test-run lock: the loop removes a lock whose process is gone after each unit.
+6. [x] Fixes after a code review on 20 Nov 2026:
+   - A stop while the loop picks the next unit now stops it before a new claude run starts. Tested: start and stop at once, no unit, no claude run.
+   - `sqlite3` is not in the allow list now (its `.shell` and `.system` run any command). The skill exports screenshots with `npm run -s map -- screenshots <project> <id> <folder>`.
+   - The loop does not start without setpriv.
+   - When the loop fails, its open unit rows become "failed".
+   - Migration 23: review times in the ISO form of now() (the first form of step 22 wrote "YYYY-MM-DD HH:MM:SS").
+   - A unit that runs longer than 60 minutes counts as failed, and the loop goes on. A unit with no known cost counts as its full limit. A unit limit above the total is lowered to the total. The panel checks every 30 s for a loop that the command line started.
+   - Not changed: the review said that run-spec does not clean up on SIGTERM. It does: `server/sync.ts` catches SIGINT, SIGTERM and SIGHUP and calls process.exit, so the exit handlers run. Only a SIGKILL leaves the lock, and the loop removes a dead lock after each unit.
+5. [x] Decided on 20 Nov 2026: button only (and the `map-loop` command). The loop does not start after a sync. Default limits stay: Opus, 10 units, $5 for each unit, $25 in total.
+
 ## Later
 
 - [ ] JS coverage from the browser (Playwright can record V8 coverage in Chromium). Then JS changes can select tests too.
@@ -147,6 +185,7 @@ Built on 19 Nov 2026 in `server/ai-update.ts`. Command: `npm run project -- ai-u
 - Where the tests run (phase 4).
 - (Decided: Opus, $1 for each feature, with the claude.ai login. See phase 3.)
 - Whether to keep the test selection script, or to keep only the change report.
+- Whether the mapping loop also runs after each sync (decided for now: button only).
 
 ## Safety
 

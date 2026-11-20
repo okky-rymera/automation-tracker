@@ -18,7 +18,7 @@
  * has its own certificate, which browsers do not trust), picks ports from 8801 that neither
  * echowp home uses, and checks that the server runs the coverage PHP.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -417,30 +417,65 @@ export async function startTestSites(
   }
 }
 
-/**
- * Stops the running test sites of a project, and waits for it. For the exit of the server,
- * where async code does not run. It does not make the coverage PHP. Gives the errors.
- */
-export function stopTestSitesSync(p: ProjectConfig): string[] {
-  const cov = currentCoveragePhp();
-  const bin = findEchowp();
-  if (!cov || !bin || !SETPRIV) return [];
-  const env = trackerEchowpEnv(cov);
-  const go = (args: string[]) =>
-    spawnSync(SETPRIV!, ['--no-new-privs', '--', bin, ...args, '--profile', TEST_PROFILE, '--dir', p.path], { env, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] });
-  const ls = go(['ls', '--json']);
-  let sites: any[] = [];
+type EchowpCall = { status: number | null; stdout: string; stderr: string; error?: Error };
+
+const runningNames = (sites: any[]): string[] => sites.filter((s) => s.status === 'running').map((s) => s.name);
+
+function parseSites(ls: EchowpCall): any[] | string {
   try {
     const v = JSON.parse(ls.stdout);
-    sites = Array.isArray(v) ? v : (v.instances ?? []);
+    return Array.isArray(v) ? v : (v.instances ?? []);
   } catch {
-    return [`echowp ls failed: ${String(ls.stderr || ls.error?.message || '').trim().slice(-300)}`];
+    return `echowp ls failed: ${String(ls.stderr || ls.error?.message || '').trim().slice(-300)}`;
   }
+}
+
+function stopSitesSetup(p: ProjectConfig) {
+  const cov = currentCoveragePhp();
+  const bin = findEchowp();
+  if (!cov || !bin || !SETPRIV) return null;
+  return { env: trackerEchowpEnv(cov), argv: (args: string[]) => ['--no-new-privs', '--', bin, ...args, '--profile', TEST_PROFILE, '--dir', p.path] };
+}
+
+/**
+ * Stops the running test sites of a project, and waits for it. For the exit of the server,
+ * where async code does not run. It blocks the process: in a running server, use stopTestSites.
+ * It does not make the coverage PHP. Gives the errors.
+ */
+export function stopTestSitesSync(p: ProjectConfig): string[] {
+  const setup = stopSitesSetup(p);
+  if (!setup) return [];
+  const go = (args: string[]): EchowpCall => {
+    const r = spawnSync(SETPRIV!, setup.argv(args), { env: setup.env, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error };
+  };
+  const sites = parseSites(go(['ls', '--json']));
+  if (typeof sites === 'string') return [sites];
   const errors: string[] = [];
-  for (const s of sites) {
-    if (s.status !== 'running') continue;
-    const r = go(['stop', s.name]);
-    if (r.status !== 0) errors.push(`echowp stop ${s.name} failed: ${String(r.stderr || r.error?.message || '').trim().slice(-300)}`);
+  for (const name of runningNames(sites)) {
+    const r = go(['stop', name]);
+    if (r.status !== 0) errors.push(`echowp stop ${name} failed: ${String(r.stderr || r.error?.message || '').trim().slice(-300)}`);
+  }
+  return errors;
+}
+
+/** Stops the running test sites of a project, like stopTestSitesSync, but does not block the server. */
+export async function stopTestSites(p: ProjectConfig): Promise<string[]> {
+  const setup = stopSitesSetup(p);
+  if (!setup) return [];
+  const go = (args: string[]) =>
+    new Promise<EchowpCall>((resolve) => {
+      execFile(SETPRIV!, setup.argv(args), { env: setup.env, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const code = err ? (typeof (err as any).code === 'number' ? (err as any).code : null) : 0;
+        resolve({ status: code, stdout: stdout ?? '', stderr: stderr ?? '', error: err ?? undefined });
+      });
+    });
+  const sites = parseSites(await go(['ls', '--json']));
+  if (typeof sites === 'string') return [sites];
+  const errors: string[] = [];
+  for (const name of runningNames(sites)) {
+    const r = await go(['stop', name]);
+    if (r.status !== 0) errors.push(`echowp stop ${name} failed: ${String(r.stderr || r.error?.message || '').trim().slice(-300)}`);
   }
   return errors;
 }

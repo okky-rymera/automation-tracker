@@ -16,6 +16,7 @@
  *   npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  (--files is needed for code)
  *   npm run -s map -- reset    <project> <kind> <ref>
  *   npm run -s map -- move-scope <project> <scope id> <feature id>   (a person's edit: see edits.moveScope)
+ *   npm run -s map -- screenshots <project> <feature id> <folder>   (writes the images of the feature, to look at them)
  *
  * Output is JSON, so the skill can read it. Rules that protect people's work:
  *  - Text that a person wrote or checked is never replaced or removed. Empty fields can be filled.
@@ -522,9 +523,14 @@ function apply(p: ProjectConfig, file: string | undefined) {
 
   const report: string[] = [];
   const touched: number[] = [];
+  // The features that got a real change. A feature in the payload with no new data must not get a
+  // new ai_changed_at: then the next edit of a person would mark it "reviewed" (sweepReviewed).
+  const changed = new Set<number>();
+  const totalChanges = () => (db.prepare('SELECT total_changes() AS n').get() as any).n as number;
   try {
     tx(() => {
       for (const inF of body.features) {
+        const before = totalChanges();
         const fid = writeFeature(p, inF, report);
         touched.push(fid);
         for (const [key, kind] of Object.entries(LABEL_KINDS)) writeLabels(p, fid, kind, list<string>((inF as any)[key], key), report);
@@ -544,7 +550,11 @@ function apply(p: ProjectConfig, file: string | undefined) {
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
         for (const x of list<ShotIn>(inF.screenshots, 'screenshots')) writeScreenshot(p, fid, x, scopeIds, report);
+        if (totalChanges() > before) changed.add(fid);
       }
+      // The review state in the app: the AI changed these features after their last review.
+      const stamp = now();
+      for (const fid of changed) db.prepare('UPDATE features SET ai_changed_at = ? WHERE id = ?').run(stamp, fid);
       if (!update) db.prepare(
         `INSERT INTO processed_units (project_id, kind, ref, status, files, hash, features, note, processed_at)
          VALUES (?, ?, ?, 'done', ?, ?, ?, ?, ?)
@@ -585,8 +595,15 @@ function setText(table: 'features' | 'scopes', row: any, ai: Set<string>, field:
   ai.add(field);
   return true;
 }
-const saveAi = (table: 'features' | 'scopes', id: number, ai: Set<string>) =>
-  db.prepare(`UPDATE ${table} SET ai_fields = ? WHERE id = ?`).run(JSON.stringify([...ai].sort()), id);
+/**
+ * Saves the AI field list. It writes only when the list changed (in any order): apply counts the
+ * changed rows to know which features the AI changed.
+ */
+function saveAi(table: 'features' | 'scopes', row: { id: number; ai_fields: string | null }, ai: Set<string>) {
+  const next = JSON.stringify([...ai].sort());
+  if (JSON.stringify([...(json(row.ai_fields) ?? [])].sort()) === next) return;
+  db.prepare(`UPDATE ${table} SET ai_fields = ? WHERE id = ?`).run(next, row.id);
+}
 
 /** Title, description, priority and group. The lists, labels, scopes and links are written after it. */
 function writeFeature(p: ProjectConfig, f: FeatureIn, report: string[]): number {
@@ -620,7 +637,7 @@ function writeFeature(p: ProjectConfig, f: FeatureIn, report: string[]): number 
     if (g !== undefined) setText('features', row, ai, 'group', 'group_id', g, label, report);
     else report.push(`${label}: kept the group that a person wrote or checked. Suggested group "${groupTitle}" was not saved.`);
   }
-  saveAi('features', row.id, ai);
+  saveAi('features', row, ai);
   return row.id;
 }
 
@@ -631,7 +648,13 @@ function writeLabels(p: ProjectConfig, fid: number, kind: string, values: string
     const value = labelValue(p.id, kind, v);
     if (db.prepare('INSERT OR IGNORE INTO feature_labels (feature_id, kind, value) VALUES (?, ?, ?)').run(fid, kind, value).changes) added.push(value);
   }
-  if (added.length) report.push(`F-${fid}: added ${kind} ${added.map((a) => `"${a}"`).join(', ')}.`);
+  if (added.length) {
+    report.push(`F-${fid}: added ${kind} ${added.map((a) => `"${a}"`).join(', ')}.`);
+    // A label has no mark of its own: the field ("roles") gets the AI mark, so a person reviews it.
+    const field = `${kind}s`;
+    const ai = new Set<string>(json((db.prepare('SELECT ai_fields FROM features WHERE id = ?').get(fid) as any).ai_fields));
+    if (!ai.has(field)) db.prepare('UPDATE features SET ai_fields = ? WHERE id = ?').run(JSON.stringify([...ai, field]), fid);
+  }
 }
 
 /** True when a question with this text was answered or removed on this feature before (answered_questions). */
@@ -779,7 +802,7 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
   if (s.description === null) clearScopeDescription(row, ai, label, report);
   else setText('scopes', row, ai, 'description', 'description', str(s.description), label, report);
   writeScopeGroup(fid, row, ai, s.group, label, report);
-  saveAi('scopes', row.id, ai);
+  saveAi('scopes', row, ai);
   return row.id;
 }
 
@@ -1009,6 +1032,33 @@ const commands: Record<string, () => void> = {
     skip(projectOf(projectId), kindOf(args[0]), args[1], args.slice(2).join(' '), files);
   },
   reset: () => reset(projectOf(projectId), kindOf(args[0]), args[1]),
+  // Writes the image of each screenshot of a feature (not the deleted ones) to a folder, so the skill
+  // can look at them. Only the files f<id>-shot-<screenshot id>.<ext> are written.
+  screenshots: () => {
+    const fid = idNumber(args[0] ?? '');
+    const dir = args[1];
+    if (!fid || !dir) fail('Usage: screenshots <project> <feature id> <folder>');
+    // In the mapping loop (server/map-loop.ts), the run may write only in its scratch folder.
+    const scratch = process.env.MAP_LOOP_SCRATCH;
+    if (scratch) {
+      const rel = path.relative(path.resolve(scratch), path.resolve(dir));
+      if (rel.startsWith('..') || path.isAbsolute(rel)) fail(`In the mapping loop, write the screenshots only in ${scratch}`);
+    }
+    const p = projectOf(projectId);
+    if (!db.prepare('SELECT 1 FROM features WHERE id = ? AND project_id = ?').get(fid, p.id)) fail(`No feature F-${fid} in ${p.id}`);
+    fs.mkdirSync(dir, { recursive: true });
+    const rows = db
+      .prepare('SELECT s.id, s.caption, s.mime, i.data FROM screenshots s JOIN screenshot_images i ON i.screenshot_id = s.id WHERE s.feature_id = ? AND s.removed = 0 ORDER BY s.sort, s.id')
+      .all(fid) as any[];
+    out(
+      rows.map((r) => {
+        const ext = String(r.mime).replace('image/', '').replace('jpeg', 'jpg');
+        const file = path.join(path.resolve(dir), `f${fid}-shot-${r.id}.${ext}`);
+        fs.writeFileSync(file, r.data);
+        return { id: `IMG-${r.id}`, caption: r.caption, file };
+      }),
+    );
+  },
   // A person's edit, not a skill step: same code as the "Move to feature" select in the app.
   'move-scope': () => {
     if (!args[0] || !args[1]) fail('Usage: move-scope <project> <scope id> <feature id>');
@@ -1021,7 +1071,7 @@ const commands: Record<string, () => void> = {
   },
 };
 if (!commands[cmd]) {
-  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset, move-scope. See server/map.ts.');
+  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset, move-scope, screenshots. See server/map.ts.');
   process.exit(cmd ? 1 : 0);
 }
 // A fresh scan first for the commands that use test IDs and files, so they match the repo now.
