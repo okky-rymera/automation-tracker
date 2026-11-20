@@ -36,9 +36,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
-import { getProject, importProjectsJson, safeRepoPath, type ProjectConfig } from './projects.ts';
+import { getProject, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup } from './features.ts';
+import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -59,30 +59,6 @@ function projectOf(id: string | undefined): ProjectConfig {
   return p;
 }
 const kindOf = (k: string | undefined): Kind => (KINDS.includes(k as Kind) ? (k as Kind) : fail(`Kind must be one of: ${KINDS.join(', ')}`));
-
-/** Repo-relative path of a test file (the tests table keeps it relative to the framework folder). */
-function testRepoPath(p: ProjectConfig, kind: 'playwright' | 'cypress', file: string) {
-  const dir = kind === 'playwright' ? p.playwrightDir : p.cypressDir;
-  return dir ? path.posix.join(dir, file) : file;
-}
-
-/**
- * Absolute path of a repo-relative file the skill may read: any file type, but
- * inside the repo and not hidden (.git, .env). The file can be missing.
- */
-function repoFile(p: ProjectConfig, rel: string): string | null {
-  if (!rel || path.isAbsolute(rel) || rel.split(/[\\/]/).some((part) => part.startsWith('.'))) return null;
-  const root = path.resolve(p.path);
-  const full = path.resolve(root, rel);
-  if (!full.startsWith(root + path.sep)) return null;
-  try {
-    const real = fs.realpathSync(full);
-    if (!real.startsWith(fs.realpathSync(root) + path.sep)) return null; // symlink that leaves the repo
-  } catch {
-    /* missing file: allowed, it hashes as empty */
-  }
-  return full;
-}
 
 /** One hash of the files' contents. A missing file counts as empty. */
 function hashFiles(p: ProjectConfig, files: string[]) {
@@ -529,6 +505,9 @@ function apply(p: ProjectConfig, file: string | undefined) {
   const totalChanges = () => (db.prepare('SELECT total_changes() AS n').get() as any).n as number;
   try {
     tx(() => {
+      // Old "before" values whose row is gone or whose mark went: an ID can come back for a new row.
+      // Before the loop: the change count of each feature must not see it.
+      sweepBefore();
       for (const inF of body.features) {
         const before = totalChanges();
         const fid = writeFeature(p, inF, report);
@@ -591,6 +570,8 @@ function setText(table: 'features' | 'scopes', row: any, ai: Set<string>, field:
   }
   if (!empty) report.push(`${label}: replaced the earlier AI draft ${field}.`);
   else if (!row.isNew) report.push(`${label}: filled the empty ${field}. It shows as AI draft until a person checks it.`);
+  // The value from before, so a person can change it back. A row that this apply made has none.
+  if (!row.isNew) keepBefore(table === 'features' ? 'feature' : 'scope', row.id, field, row[col], !ai.has(field));
   db.prepare(`UPDATE ${table} SET ${col} = ? WHERE id = ?`).run(value, row.id);
   ai.add(field);
   return true;
@@ -713,6 +694,7 @@ function removeItems(fid: number, ids: number[], report: string[]) {
     if (!row.ai_draft) report.push(`F-${fid}: kept item #${id}: a person wrote or checked it. Name the problem in "questions".`);
     else {
       db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
+      dropBefore('item', row.id);
       // A removed question is answered or wrong: do not ask it again on this feature.
       if (row.kind === 'question') rememberAnswered(fid, row.text);
       report.push(`F-${fid}: removed AI draft item #${id}.`);
@@ -727,6 +709,7 @@ function removeAnswered(fid: number, ids: number[], report: string[]) {
     const row = db.prepare("SELECT * FROM feature_items WHERE id = ? AND feature_id = ? AND kind = 'question'").get(Number(id), fid) as any;
     if (!row) throw new EditError(`No open question #${id} in F-${fid}`);
     db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
+    dropBefore('item', row.id);
     rememberAnswered(fid, row.text);
     report.push(`F-${fid}: removed answered question #${id} (${row.ai_draft ? 'AI draft' : 'a person wrote it'}): "${row.text}"`);
   }
@@ -850,6 +833,7 @@ function writeScopeGroup(fid: number, row: any, ai: Set<string>, title: unknown,
       ? `${label}: moved from the AI draft group "${before}" to "${name(gid)}".`
       : `${label}: put in group "${name(gid)}". It shows as AI draft until a person checks it.`,
   );
+  keepBefore('scope', row.id, 'group', row.group_id, !ai.has('group'));
   db.prepare('UPDATE scopes SET group_id = ? WHERE id = ?').run(gid, row.id);
   ai.add('group');
   const dropped = dropEmptyAiGroup(row.group_id);
@@ -865,6 +849,7 @@ function clearScopeDescription(row: any, ai: Set<string>, label: string, report:
   }
   db.prepare("UPDATE scopes SET description = '' WHERE id = ?").run(row.id);
   ai.delete('description');
+  dropBefore('scope', row.id, ['description']); // no AI mark now, so no "before" value
   report.push(`${label}: deleted the AI draft description.`);
 }
 

@@ -3,7 +3,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, writeCoverageConfig, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepReviewed } from './features.ts';
+import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBefore, sweepReviewed } from './features.ts';
+import { listMarks, markEdits } from './line-marks.ts';
+import { testSource } from './test-source.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
 import { listCypress } from './cypress.ts';
@@ -51,7 +53,7 @@ function runInfo(p: ProjectConfig) {
   );
 }
 
-const lineKeys = ['runnable', 'library', 'tested', 'setup', 'background', 'never', 'runByTests', 'cypressOnly'] as const;
+const lineKeys = ['runnable', 'library', 'tested', 'setup', 'background', 'never', 'runByTests', 'cypressOnly', 'markedLibrary', 'markedCovered'] as const;
 const lineTotals = (php: FileEntry[]) => Object.fromEntries(lineKeys.map((k) => [k, php.reduce((n, f) => n + f.lines[k], 0)]));
 
 /**
@@ -144,6 +146,12 @@ app.get('/api/projects/:id/file', (req, res) => {
   res.json(fileDetail(p, rel, full, viewOf(req)));
 });
 app.get('/api/projects/:id/playwright', (req, res) => res.json(listPlaywright((req as any).project)));
+/** The file of one test (?id=PW-… or CY-…), with the first and last line of the test. */
+app.get('/api/projects/:id/test-source', (req, res) => {
+  const out = testSource((req as any).project, String(req.query.id ?? ''));
+  if (!out) return res.status(404).json({ error: 'Unknown test, or its file is not in the repo' });
+  res.json(out);
+});
 app.get('/api/projects/:id/cypress', (req, res) => res.json(listCypress((req as any).project)));
 
 // ---- Features ----
@@ -191,7 +199,10 @@ const edit = (fn: (req: express.Request) => unknown) => (req: express.Request, r
   try {
     const out = fn(req);
     // A person changed something: a feature with no open AI mark left is reviewed now.
-    if (req.method !== 'GET') sweepReviewed(proj(req).id);
+    if (req.method !== 'GET') {
+      sweepReviewed(proj(req).id);
+      sweepBefore(); // "before" values of AI marks that went
+    }
     res.json(out ?? { ok: true });
   } catch (e) {
     if (e instanceof EditError) return res.status(400).json({ error: e.message });
@@ -257,6 +268,7 @@ app.patch('/api/projects/:id/features/:fid', edit((req) => edits.updateFeature(P
 app.delete('/api/projects/:id/features/:fid', edit((req) => edits.deleteFeature(P(req), req.params.fid)));
 app.post('/api/projects/:id/features/:fid/merge', edit((req) => edits.mergeFeature(P(req), req.params.fid, req.body)));
 app.post('/api/projects/:id/features/:fid/check', edit((req) => edits.checkFeature(P(req), req.params.fid)));
+app.post('/api/projects/:id/features/:fid/uncheck', edit((req) => edits.uncheckFeature(P(req), req.params.fid)));
 app.post('/api/projects/:id/features/:fid/labels', edit((req) => edits.addLabel(P(req), req.params.fid, req.body)));
 app.delete('/api/projects/:id/features/:fid/labels/:kind/:value', edit((req) => edits.deleteLabel(P(req), req.params.fid, req.params)));
 app.post('/api/projects/:id/features/:fid/items', edit((req) => edits.addItem(P(req), req.params.fid, req.body)));
@@ -272,7 +284,13 @@ app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(re
 app.post('/api/projects/:id/links', edit((req) => edits.addLink(P(req), req.body)));
 app.post('/api/projects/:id/links/move-test', edit((req) => edits.moveTestLinks(P(req), req.body)));
 app.patch('/api/projects/:id/links/:lid', edit((req) => edits.updateLink(P(req), req.params.lid, req.body)));
+app.patch('/api/projects/:id/feature-code/:cid', edit((req) => edits.updateFeatureCode(P(req), req.params.cid, req.body)));
 app.delete('/api/projects/:id/feature-code/:cid', edit((req) => edits.deleteFeatureCode(P(req), req.params.cid)));
+app.post('/api/projects/:id/revert', edit((req) => edits.revert(P(req), req.body)));
+// Hand marks on code lines (server/line-marks.ts). The coverage data reads them on the next request.
+app.get('/api/projects/:id/line-marks', (req, res) => res.json(listMarks(proj(req))));
+app.post('/api/projects/:id/line-marks', edit((req) => markEdits.mark(proj(req), req.body)));
+app.delete('/api/projects/:id/line-marks', edit((req) => markEdits.unmark(proj(req), req.body)));
 app.post(SCREENSHOT_UPLOAD, edit((req) => edits.addScreenshot(P(req), req.params.fid, req.body)));
 app.patch('/api/projects/:id/screenshots/:sid', edit((req) => edits.updateScreenshot(P(req), req.params.sid, req.body)));
 app.delete('/api/projects/:id/screenshots/:sid', edit((req) => edits.deleteScreenshot(P(req), req.params.sid)));

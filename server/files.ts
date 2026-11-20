@@ -4,14 +4,18 @@ import { ROOT, SOURCE_EXT, type ProjectConfig } from './projects.ts';
 import { db } from './db.ts';
 import { syncProject } from './scan.ts';
 import { loadCoverage, runTestPath, type FunctionState, type LineState, type View } from './coverage.ts';
+import { fileMarks, lineTexts } from './line-marks.ts';
 
 // Folders that the file list and coverage/analyze.py leave out. Hidden folders (.git, .github) are always left out.
 export const DEFAULT_EXCLUDE: string[] = JSON.parse(fs.readFileSync(path.join(ROOT, 'coverage', 'exclude-dirs.json'), 'utf8'));
 const LINE_STATES: LineState[] = ['library', 'tested', 'setup', 'background', 'never'];
 const FN_STATES: FunctionState[] = [...LINE_STATES, 'unknown'];
 
-/** cypressOnly: "tested" lines that only Cypress tests ran ("both" view only, else 0). */
-export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly', number>;
+/**
+ * cypressOnly: "tested" lines that only Cypress tests ran ("both" view only, else 0).
+ * markedLibrary, markedCovered: lines that a person's mark made "library" or "tested". They are in those counts too.
+ */
+export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly' | 'markedLibrary' | 'markedCovered', number>;
 
 export interface FileEntry {
   path: string;
@@ -60,6 +64,8 @@ export function listFiles(project: ProjectConfig, view: View | null): FileEntry[
     lines.runnable = LINE_STATES.reduce((n, s) => n + lines[s], 0);
     lines.runByTests = fl?.runByTests?.length ?? 0;
     lines.cypressOnly = fl?.cypressOnly?.length ?? 0;
+    lines.markedLibrary = fl?.markedLibrary?.length ?? 0;
+    lines.markedCovered = fl?.markedCovered?.length ?? 0;
     const functions = Object.fromEntries(FN_STATES.map((s) => [s, fns.filter((f) => f.state === s).length])) as FileEntry['functions'];
     functions.total = fns.length;
     return {
@@ -90,13 +96,15 @@ export function fileDetail(project: ProjectConfig, rel: string, full: string, vi
       return { id, title: t ? runTestPath(t).slice(-1)[0] : id, file: t?.file ?? '', framework: t?.framework ?? null };
     }),
   }));
-  const empty = { library: [], tested: [], setup: [], background: [], never: [], runByTests: [], cypressOnly: [] };
+  const empty = { library: [], tested: [], setup: [], background: [], never: [], runByTests: [] };
   return {
     path: rel,
     source,
     measured: rel.endsWith('.php') && !!cov?.files.has(rel),
     loaded: !!cov?.lines[rel] && !cov.neverLoaded.has(rel),
     functions,
-    lines: { cypressOnly: [], ...(cov?.lines[rel] ?? empty) },
+    lines: { cypressOnly: [], markedLibrary: [], markedCovered: [], ...(cov?.lines[rel] ?? empty) },
+    /** All line marks of the file, stale ones too, so a person can remove them. */
+    marks: fileMarks(project.id, rel, lineTexts(source)),
   };
 }

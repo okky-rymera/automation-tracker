@@ -4,6 +4,7 @@ import path from 'node:path';
 import { ROOT, type Framework, type ProjectConfig, type RunRef } from './projects.ts';
 import { db, json, now, tx } from './db.ts';
 import { SCAN_TTL_MS } from './cache.ts';
+import { isStale, marksByFile, marksVersion, repoLines } from './line-marks.ts';
 
 /** One function from the analysis (coverage/analyze.py → report.json). */
 interface ReportFunction {
@@ -45,8 +46,10 @@ interface Report {
 /**
  * Per file: runnable lines by state, plus all lines run by tests (library included).
  * cypressOnly (the "both" view only): "tested" lines that only Cypress tests ran.
+ * markedLibrary, markedCovered: lines that a person's mark moved to "library" or "tested" (line-marks.ts).
+ * A line that had that state already is not in these lists.
  */
-export type FileLines = Record<LineState | 'runByTests', number[]> & { cypressOnly?: number[] };
+export type FileLines = Record<LineState | 'runByTests', number[]> & { cypressOnly?: number[]; markedLibrary?: number[]; markedCovered?: number[] };
 type LinesByFile = Record<string, FileLines>;
 
 export type FunctionState = LineState | 'unknown';
@@ -212,8 +215,14 @@ export function resolveView(project: ProjectConfig, asked: unknown): View | null
   return views.includes('both') ? 'both' : (views[0] ?? null);
 }
 
-/** Coverage of one view. Null when the project has no run for it. */
+/** Coverage of one view, with the line marks of people (withMarks). Null when the project has no run for it. */
 export function loadCoverage(project: ProjectConfig, view: View): CoverageData | null {
+  const base = loadBase(project, view);
+  return base && withMarks(project, view, base);
+}
+
+/** Coverage of one view as the runs saw it, without line marks. */
+function loadBase(project: ProjectConfig, view: View): CoverageData | null {
   if (view !== 'both') {
     const run = project.runs[view];
     return run ? loadRun(project, run, view) : null;
@@ -291,6 +300,32 @@ function stateMap(fl: FileLines | undefined): Map<number, LineState> {
 }
 
 /**
+ * Line counts and state of a function, from the states of the lines in it. Same rules as coverage/analyze.py.
+ * st: line states of the file (undefined: the run has no lines of the file). cyOnly: the Cypress-only lines.
+ */
+function functionLines(f: { start: number; end: number }, st: Map<number, LineState> | undefined, cyOnly: Set<number>) {
+  const counts: Record<LineState, number> = { library: 0, tested: 0, setup: 0, background: 0, never: 0 };
+  let feature = 0;
+  let cypressOnly = 0;
+  for (let n = f.start; n <= f.end; n++) {
+    const s = st?.get(n);
+    if (!s) continue;
+    counts[s]++;
+    if (s !== 'library') feature++;
+    if (cyOnly.has(n)) cypressOnly++;
+  }
+  const any = STATES.some((s) => counts[s] > 0);
+  const state: FunctionState = !any
+    ? st ? 'never' : 'unknown'
+    : !feature ? 'library'
+    : counts.tested ? 'tested'
+    : counts.setup ? 'setup'
+    : counts.background ? 'background'
+    : 'never';
+  return { counts, state, cypressOnly };
+}
+
+/**
  * Puts the Playwright run and the Cypress run together, line by line.
  * - library in either run: library (the two baselines can differ a little)
  * - else the state that says the most: tested, then setup, then background, then never
@@ -336,25 +371,7 @@ function mergeRuns(pw: CoverageData, cy: CoverageData): CoverageData {
     const st = merged.get(file);
     const cyOnly = new Set(lines[file]?.cypressOnly ?? []);
     const list = [...byKey.values()].map((f) => {
-      const counts: Record<LineState, number> = { library: 0, tested: 0, setup: 0, background: 0, never: 0 };
-      let feature = 0;
-      let cypressOnly = 0;
-      for (let n = f.start; n <= f.end; n++) {
-        const s = st?.get(n);
-        if (!s) continue;
-        counts[s]++;
-        if (s !== 'library') feature++;
-        if (cyOnly.has(n)) cypressOnly++;
-      }
-      const any = STATES.some((s) => counts[s] > 0);
-      // Same rules as coverage/analyze.py.
-      const state: FunctionState = !any
-        ? st ? 'never' : 'unknown'
-        : !feature ? 'library'
-        : counts.tested ? 'tested'
-        : counts.setup ? 'setup'
-        : counts.background ? 'background'
-        : 'never';
+      const { counts, state, cypressOnly } = functionLines(f, st, cyOnly);
       return { ...f, category: state, state, lines: counts, cypressOnly };
     });
     functionsByFile.set(file, list.sort((x, y) => x.start - y.start));
@@ -371,4 +388,90 @@ function mergeRuns(pw: CoverageData, cy: CoverageData): CoverageData {
     functionsPerTest: new Map([...pw.functionsPerTest, ...cy.functionsPerTest]),
     files,
   };
+}
+
+const markedCache = new Map<string, { key: string; base: CoverageData['lines']; data: CoverageData }>();
+
+/**
+ * The coverage data with the line marks of people. The cached base data does not change: files with
+ * marks get new line lists, and the other files share the base lists.
+ * Only a mark whose line text is the same now (not stale) counts, and only on a runnable line:
+ *  - library: the line becomes "library". covered: it becomes "tested".
+ *  - markedLibrary, markedCovered: the lines that a mark changed: a new state, or not Cypress-only now.
+ *    A line that had that state already (for example a line that Playwright ran, marked "covered") is not
+ *    in the list, so it stays in "run by tests" of the app and is not counted twice.
+ *  - the marked lines count as run by tests. They are not Cypress-only now. A library mark counts too:
+ *    "run by tests" includes library lines (they run on every request, so also in each test), and a
+ *    library mark says that the line is such a line.
+ *  - the functions with a changed line get new counts and a new state (functionLines).
+ * Made again when a mark changes, a marked file changes, or the base data changes.
+ */
+function withMarks(project: ProjectConfig, view: View, base: CoverageData): CoverageData {
+  const marks = marksByFile(project.id);
+  if (!marks.size) return base;
+  const mtime = (f: string) => {
+    try {
+      return fs.statSync(path.join(project.path, f)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  const key = `${marksVersion()}|${[...marks.keys()].map((f) => `${f}:${mtime(f)}`).join('|')}`;
+  const cacheKey = `${project.id}:${view}`;
+  const hit = markedCache.get(cacheKey);
+  // base.lines is the same object while the run is not imported again (a new label copies only the top object).
+  if (hit && hit.key === key && hit.base === base.lines) return hit.data.label === base.label ? hit.data : { ...hit.data, label: base.label };
+
+  const lines: CoverageData['lines'] = { ...base.lines };
+  const functionsByFile = new Map(base.functionsByFile);
+  let any = false;
+  for (const [file, list] of marks) {
+    const fl = base.lines[file];
+    if (!fl) continue;
+    const texts = repoLines(project, file);
+    const st = stateMap(fl);
+    const library: number[] = [];
+    const covered: number[] = [];
+    // marked: all lines with a mark that counts.
+    const marked = new Set<number>();
+    // changed: lines whose state or Cypress-only mark changed. Only their functions get new counts.
+    const changed = new Set<number>();
+    const cyBefore = new Set(fl.cypressOnly ?? []);
+    for (const m of list) {
+      const was = st.get(m.line);
+      if (was === undefined || isStale(m, texts)) continue; // not runnable, or the line changed
+      const to: LineState = m.kind === 'library' ? 'library' : 'tested';
+      st.set(m.line, to);
+      marked.add(m.line);
+      // A Cypress-only line is not Cypress-only after the mark, so the mark changes it too.
+      if (was !== to || cyBefore.has(m.line)) {
+        changed.add(m.line);
+        (m.kind === 'library' ? library : covered).push(m.line);
+      }
+    }
+    if (!marked.size) continue;
+    any = true;
+    const out: FileLines = { library: [], tested: [], setup: [], background: [], never: [], runByTests: [] };
+    for (const n of [...st.keys()].sort((x, y) => x - y)) out[st.get(n)!].push(n);
+    out.runByTests = [...new Set([...(fl.runByTests ?? []), ...marked])].sort((x, y) => x - y);
+    if (fl.cypressOnly) out.cypressOnly = fl.cypressOnly.filter((n) => !marked.has(n));
+    out.markedLibrary = library.sort((x, y) => x - y);
+    out.markedCovered = covered.sort((x, y) => x - y);
+    lines[file] = out;
+    const cyOnly = new Set(out.cypressOnly ?? []);
+    const fns = base.functionsByFile.get(file);
+    if (fns) {
+      functionsByFile.set(
+        file,
+        fns.map((f) => {
+          if (![...changed].some((n) => n >= f.start && n <= f.end)) return f;
+          const r = functionLines(f, st, cyOnly);
+          return { ...f, category: r.state, state: r.state, lines: r.counts, ...(f.cypressOnly !== undefined ? { cypressOnly: r.cypressOnly } : {}) };
+        }),
+      );
+    }
+  }
+  const data = any ? { ...base, lines, functionsByFile } : base;
+  markedCache.set(cacheKey, { key, base: base.lines, data });
+  return data;
 }

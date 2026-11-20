@@ -41,12 +41,50 @@ const ITEM_KIND_VALUES: string[] = Object.values(ITEM_KINDS);
 export const FEATURE_AI_FIELDS = ['title', 'description', 'priority', 'group'] as const;
 export const SCOPE_AI_FIELDS = ['title', 'description', 'group'] as const;
 
-/** Removes fields from a row's AI list: a person changed or checked them. */
+/** Removes fields from a row's AI list: a person changed or checked them. Their "before" values go too. */
 function clearAi(table: 'features' | 'scopes', id: number, fields: string[]) {
   if (!fields.length) return;
   const row = db.prepare(`SELECT ai_fields FROM ${table} WHERE id = ?`).get(id) as any;
   const left = (json(row.ai_fields) as string[]).filter((f) => !fields.includes(f));
   db.prepare(`UPDATE ${table} SET ai_fields = ? WHERE id = ?`).run(JSON.stringify(left), id);
+  dropBefore(table === 'features' ? 'feature' : 'scope', id, fields);
+}
+
+/**
+ * "Before" values (table ai_before): the value of a field before the AI skill changed it.
+ * The review screen shows it and offers "Change back". A row stays while the field has its AI mark.
+ * kind: feature, scope or item. For an item, the field is "text". For a group, the value is the group ID as text.
+ */
+export type BeforeKind = 'feature' | 'scope' | 'item';
+
+/**
+ * Saves the value of a field right before the AI skill writes a new one (map.ts).
+ * fresh: the field has no AI mark now, so the value is from a person (or empty). Only such a value is saved,
+ * and it replaces an old row. When the field has an AI mark, the value is an earlier AI draft: a row that
+ * holds the value of a person stays, and an AI value is not saved.
+ */
+export function keepBefore(kind: BeforeKind, rowId: number, field: string, value: unknown, fresh: boolean) {
+  if (!fresh) return;
+  const v = value === null || value === undefined ? null : String(value);
+  db.prepare('INSERT OR REPLACE INTO ai_before (kind, row_id, field, before, at) VALUES (?, ?, ?, ?, ?)').run(kind, rowId, field, v, now());
+}
+/** Deletes the "before" values of a row: of the given fields, or of all fields. */
+export function dropBefore(kind: BeforeKind, rowId: number, fields?: string[]) {
+  if (!fields) return void db.prepare('DELETE FROM ai_before WHERE kind = ? AND row_id = ?').run(kind, rowId);
+  const del = db.prepare('DELETE FROM ai_before WHERE kind = ? AND row_id = ? AND field = ?');
+  for (const f of fields) del.run(kind, rowId, f);
+}
+/**
+ * Deletes the "before" values whose row is gone or whose field has no AI mark now.
+ * A safety net after deletes, merges and moves: an ID can come back for a new row.
+ */
+export function sweepBefore() {
+  db.prepare(
+    `DELETE FROM ai_before WHERE
+       (kind = 'item' AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.id = ai_before.row_id AND i.ai_draft = 1))
+       OR (kind = 'feature' AND NOT EXISTS (SELECT 1 FROM features f, json_each(f.ai_fields) j WHERE f.id = ai_before.row_id AND j.value = ai_before.field))
+       OR (kind = 'scope' AND NOT EXISTS (SELECT 1 FROM scopes s, json_each(s.ai_fields) j WHERE s.id = ai_before.row_id AND j.value = ai_before.field))`,
+  ).run();
 }
 
 /**
@@ -69,7 +107,7 @@ const NO_OPEN_MARKS = `f.ai_fields = '[]'
 export function sweepReviewed(projectId: string) {
   db.prepare(
     `UPDATE features AS f SET reviewed_at = ?
-     WHERE f.project_id = ? AND (f.reviewed_at IS NULL OR (f.ai_changed_at IS NOT NULL AND f.ai_changed_at > f.reviewed_at))
+     WHERE f.project_id = ? AND f.review_wanted = 0 AND (f.reviewed_at IS NULL OR (f.ai_changed_at IS NOT NULL AND f.ai_changed_at > f.reviewed_at))
        AND ${NO_OPEN_MARKS}`,
   ).run(now(), projectId);
 }
@@ -91,7 +129,7 @@ const LABEL_KIND_VALUES: string[] = Object.values(LABEL_KINDS);
 export function featureData(projectId: string) {
   const groups = db.prepare('SELECT id, title, description, sort FROM feature_groups WHERE project_id = ? ORDER BY sort, id').all(projectId);
   const features = db
-    .prepare('SELECT id, group_id AS groupId, title, description, priority, sort, ai_fields, reviewed_at AS reviewedAt, ai_changed_at AS aiChangedAt FROM features WHERE project_id = ? ORDER BY sort, id')
+    .prepare('SELECT id, group_id AS groupId, title, description, priority, sort, ai_fields, reviewed_at AS reviewedAt, review_wanted AS reviewWanted, ai_changed_at AS aiChangedAt FROM features WHERE project_id = ? ORDER BY sort, id')
     .all(projectId) as any[];
   const scopes = db
     .prepare(
@@ -144,11 +182,28 @@ export function featureData(projectId: string) {
     (r) => r.screenshot_id,
   );
   const shotsBy = byKey(shots, (s) => s.feature_id);
+  // "Before" values of the AI changes. Only a field that has its AI mark now shows one.
+  const before = new Map<string, Record<string, string | null>>();
+  for (const r of db
+    .prepare(
+      `SELECT b.kind, b.row_id, b.field, b.before FROM ai_before b WHERE
+         (b.kind = 'feature' AND b.row_id IN (SELECT id FROM features WHERE project_id = ?))
+         OR (b.kind = 'scope' AND b.row_id IN (SELECT s.id FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ?))
+         OR (b.kind = 'item' AND b.row_id IN (SELECT i.id FROM feature_items i JOIN features f ON f.id = i.feature_id WHERE f.project_id = ?))`,
+    )
+    .all(projectId, projectId, projectId) as any[]) {
+    const k = `${r.kind}:${r.row_id}`;
+    before.set(k, { ...before.get(k), [r.field]: r.before });
+  }
+  const beforeOf = (kind: BeforeKind, id: number, aiFields: string[]) =>
+    Object.fromEntries(Object.entries(before.get(`${kind}:${id}`) ?? {}).filter(([field]) => aiFields.includes(field)));
   for (const f of features) {
     // Mapped code: number of entries, and how many the AI added that no person checked.
     f.code = { entries: codeBy.get(f.id)?.n ?? 0, aiToCheck: codeBy.get(f.id)?.ai ?? 0 };
     f.aiFields = json(f.ai_fields);
     f.aiDraft = f.aiFields.length > 0;
+    f.reviewWanted = !!f.reviewWanted;
+    f.before = beforeOf('feature', f.id, f.aiFields);
     delete f.ai_fields;
     const myLabels = labelsBy.get(f.id) ?? [];
     for (const [key, kind] of Object.entries(LABEL_KINDS)) f[key] = myLabels.filter((l) => l.kind === kind).map((l) => l.value);
@@ -159,7 +214,7 @@ export function featureData(projectId: string) {
     f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, ...s }) => {
       const aiFields = json(ai_fields) as string[];
       const requirements = myItems.filter((i) => i.scope_id === s.id).map(toItem);
-      return { ...s, requirements, aiFields, aiDraft: aiFields.length > 0 };
+      return { ...s, requirements, aiFields, aiDraft: aiFields.length > 0, before: beforeOf('scope', s.id, aiFields) };
     });
     f.links = (linksBy.get(f.id) ?? []).map(({ feature_id, checked, ...l }) => ({
       ...l,
@@ -478,6 +533,7 @@ export const edits = {
     if ('title' in b) need(b.title, 'Title');
     if ('priority' in b && !PRIORITIES.includes(text(b.priority))) throw new EditError('Priority must be high, medium, low or empty');
     const groupId = 'groupId' in b ? (b.groupId ? own('feature_groups', p, b.groupId) : null) : undefined;
+    if ('check' in b && (!Array.isArray(b.check) || b.check.some((k: unknown) => typeof k !== 'string'))) throw new EditError('check must be a list of field names');
     tx(() => {
       if ('title' in b) db.prepare('UPDATE features SET title = ? WHERE id = ?').run(String(b.title).trim(), f);
       if ('description' in b) db.prepare('UPDATE features SET description = ? WHERE id = ?').run(text(b.description), f);
@@ -486,6 +542,8 @@ export const edits = {
       if ('sort' in b) db.prepare('UPDATE features SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, f);
       // A person set these fields: they are not AI draft now. Other AI fields keep their mark.
       clearAi('features', f, [...(['title', 'description', 'priority'] as const).filter((k) => k in b), ...(groupId !== undefined ? ['group'] : [])]);
+      // check: a person checked these fields (names from aiFields, for example "title" or "roles") without a change.
+      if (b.check) clearAi('features', f, b.check);
     });
   },
   /** "Mark as reviewed": a person read the AI draft. Clears the marks on the feature, its lists, its scopes and its AI links, and saves the review time. */
@@ -499,11 +557,28 @@ export const edits = {
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE screenshots SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
-      db.prepare('UPDATE features SET reviewed_at = ? WHERE id = ?').run(now(), f);
+      db.prepare('UPDATE features SET reviewed_at = ?, review_wanted = 0 WHERE id = ?').run(now(), f);
+      db.prepare(
+        `DELETE FROM ai_before WHERE (kind = 'feature' AND row_id = ?)
+           OR (kind = 'scope' AND row_id IN (SELECT id FROM scopes WHERE feature_id = ?))
+           OR (kind = 'item' AND row_id IN (SELECT id FROM feature_items WHERE feature_id = ?))`,
+      ).run(f, f, f);
     });
   },
+  /**
+   * "Mark as not reviewed": a person wants to review the feature again. It shows as not reviewed until
+   * a person uses "Mark as reviewed". The AI marks that a review cleared do not come back.
+   */
+  uncheckFeature(p: string, id: string) {
+    // The date of the last review stays: the app uses it to find the tests that changed after it.
+    db.prepare('UPDATE features SET review_wanted = 1 WHERE id = ?').run(own('features', p, id));
+  },
   deleteFeature(p: string, id: string) {
-    db.prepare('DELETE FROM features WHERE id = ?').run(own('features', p, id)); // labels, lists, scopes and links go too
+    const f = own('features', p, id);
+    tx(() => {
+      db.prepare('DELETE FROM features WHERE id = ?').run(f); // labels, lists, scopes and links go too
+      sweepBefore();
+    });
   },
   /** Moves labels, lists, scopes and links of feature "from" into feature id, then deletes "from". */
   mergeFeature(p: string, id: string, b: any) {
@@ -607,6 +682,7 @@ export const edits = {
       // The answered questions of the source stay answered, on the target.
       db.prepare('UPDATE OR IGNORE answered_questions SET feature_id = ? WHERE feature_id = ?').run(into, from);
       db.prepare('DELETE FROM features WHERE id = ?').run(from);
+      sweepBefore();
     });
   },
 
@@ -651,11 +727,16 @@ export const edits = {
       // A person changed the text: it is not an AI draft now. A move only (sort) keeps the mark.
       if (t !== null) db.prepare('UPDATE feature_items SET text = ?, ai_draft = 0 WHERE id = ?').run(t, i.id);
       if (b.check) db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE id = ?').run(i.id); // checked without a change
+      if (t !== null || b.check) dropBefore('item', i.id);
       if ('sort' in b) db.prepare('UPDATE feature_items SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, i.id);
     });
   },
   deleteItem(p: string, id: string) {
-    db.prepare('DELETE FROM feature_items WHERE id = ?').run(ownItem(p, id).id);
+    const i = ownItem(p, id).id;
+    tx(() => {
+      db.prepare('DELETE FROM feature_items WHERE id = ?').run(i);
+      dropBefore('item', i);
+    });
   },
 
   // Scopes.
@@ -684,6 +765,7 @@ export const edits = {
       // A check accepts the group of the scope, or no group. The AI skills do not change it then.
       if (b.check) db.prepare('UPDATE scopes SET group_by_person = 1 WHERE id = ?').run(s);
       if (b.check) db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE scope_id = ?').run(s);
+      if (b.check) db.prepare("DELETE FROM ai_before WHERE kind = 'item' AND row_id IN (SELECT id FROM feature_items WHERE scope_id = ?)").run(s);
     });
   },
   /**
@@ -787,6 +869,9 @@ export const edits = {
         if (dup) dropShot.run(dup.id); // a live screenshot wins over a deleted marker, as in mergeFeature
         moveShot.run(to, sort++, sh.id);
       }
+      // The group from before the AI change is a group of the old feature: it cannot come back here.
+      dropBefore('scope', s.id, ['group']);
+      sweepBefore();
     });
     return { featureId: to };
   },
@@ -832,6 +917,7 @@ export const edits = {
     tx(() => {
       buryScope(s.featureId, s.id, (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s.id) as any).title);
       db.prepare('DELETE FROM scopes WHERE id = ?').run(s.id); // its tests stay linked to the feature
+      sweepBefore();
     });
   },
 
@@ -895,12 +981,17 @@ export const edits = {
       return { moved: links.length, merged };
     });
   },
-  /** Sets the scopes of a link: body { scopeIds: number[] }. */
+  /**
+   * Sets the scopes of a link: body { scopeIds: number[] }.
+   * Body { check: true }: a person checked an AI link without a change. Its source and scopes stay.
+   */
   updateLink(p: string, id: string, b: any) {
     const l = ownLink(p, id);
+    if (b.check && !('scopeIds' in b)) return void db.prepare('UPDATE links SET checked = 1 WHERE id = ?').run(l.id);
     if (!Array.isArray(b.scopeIds)) throw new EditError('scopeIds must be a list');
     const ids: number[] = [...new Set<number>(b.scopeIds.map((s: unknown) => scopeOf(p, l.feature_id, s)))];
     tx(() => {
+      if (b.check) db.prepare('UPDATE links SET checked = 1 WHERE id = ?').run(l.id);
       db.prepare('DELETE FROM link_scopes WHERE link_id = ?').run(l.id);
       const add = db.prepare('INSERT INTO link_scopes (link_id, scope_id) VALUES (?, ?)');
       for (const s of ids) add.run(l.id, s);
@@ -956,6 +1047,66 @@ export const edits = {
     });
   },
 
+  /**
+   * "Change back": sets fields to their values from before the AI change.
+   * Body { kind, id, field } or { kind, id, fields: [] }. kind: feature or scope.
+   * All fields are checked first, then changed in one transaction: all change, or none.
+   * A field loses its AI mark, as for a change by a person: the normal edit does the change
+   * (updateFeature, updateScope), so a scope title change is remembered for the AI skill too.
+   * A list item has no "before" value: the AI changes only its own drafts, never the text of a person.
+   */
+  revert(p: string, b: any) {
+    const kind = b?.kind as BeforeKind;
+    if (kind !== 'feature' && kind !== 'scope') throw new EditError('kind must be feature or scope');
+    const list: string[] = Array.isArray(b?.fields) ? b.fields.map(String) : [String(b?.field ?? '')];
+    if (!list.length) throw new EditError('Send "field" or a list of "fields"');
+    const allowed: readonly string[] = kind === 'feature' ? FEATURE_AI_FIELDS : SCOPE_AI_FIELDS;
+    const id = kind === 'feature' ? own('features', p, b.id) : ownScope(p, b.id).id;
+    const aiFields = json((db.prepare(`SELECT ai_fields FROM ${kind === 'feature' ? 'features' : 'scopes'} WHERE id = ?`).get(id) as any).ai_fields) as string[];
+    const getBefore = db.prepare('SELECT before FROM ai_before WHERE kind = ? AND row_id = ? AND field = ?');
+    // Check every field before a change.
+    const bodies: Array<{ field: string; body: Record<string, unknown> }> = [];
+    for (const field of new Set(list)) {
+      if (!allowed.includes(field)) throw new EditError(`field must be one of: ${allowed.join(', ')}`);
+      const r = aiFields.includes(field) ? (getBefore.get(kind, id, field) as any) : null;
+      if (!r) throw new EditError(`The field "${field}" has no value from before the AI change`);
+      const value: string | null = r.before;
+      if (field === 'title' && !value?.trim()) {
+        throw new EditError('This title was empty before the AI change. Delete the scope or feature instead.');
+      }
+      const body: Record<string, unknown> = {};
+      if (field === 'group') {
+        const gid = value === null ? null : Number(value);
+        if (gid !== null) {
+          const ok =
+            kind === 'feature'
+              ? db.prepare('SELECT 1 FROM feature_groups WHERE id = ? AND project_id = ?').get(gid, p)
+              : db.prepare('SELECT 1 FROM scope_groups WHERE id = ? AND feature_id = (SELECT feature_id FROM scopes WHERE id = ?)').get(gid, id);
+          if (!ok) throw new EditError('The group from before the AI change does not exist now. Choose a group by hand.');
+        }
+        body.groupId = gid;
+      } else body[field] = value ?? '';
+      bodies.push({ field, body });
+    }
+    return tx(() => {
+      for (const { field, body } of bodies) {
+        // The AI group that the scope leaves is deleted when it has no scopes now, as in a move.
+        const left = kind === 'scope' && field === 'group' ? ((db.prepare('SELECT group_id FROM scopes WHERE id = ?').get(id) as any).group_id as number | null) : null;
+        if (kind === 'feature') edits.updateFeature(p, String(id), body);
+        else edits.updateScope(p, String(id), body);
+        dropEmptyAiGroup(left);
+        dropBefore(kind, id, [field]);
+      }
+      return { ok: true };
+    });
+  },
+  /** Body { check: true }: a person checked an AI code entry. */
+  updateFeatureCode(p: string, id: string, b: any) {
+    const r = db.prepare('SELECT id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;
+    if (!r) throw new EditError('Unknown code entry');
+    if (b.check !== true) throw new EditError('Send { "check": true }');
+    db.prepare('UPDATE feature_code SET checked = 1 WHERE id = ?').run(r.id);
+  },
   /** Removes code from a feature. The row stays as a marker, so the AI skill does not add it again. */
   deleteFeatureCode(p: string, id: string) {
     const r = db.prepare('SELECT id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;

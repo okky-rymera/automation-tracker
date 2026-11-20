@@ -146,6 +146,8 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   code: { entries: number; aiToCheck: number };
   /** When a person last reviewed the feature. null: never. */
   reviewedAt: string | null;
+  /** A person used "Mark as not reviewed". The feature waits for a review, with or without AI marks. */
+  reviewWanted: boolean;
   /** When an AI skill last saved something in the feature. */
   aiChangedAt: string | null;
 }

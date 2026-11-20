@@ -164,3 +164,27 @@ export function safeRepoPath(project: ProjectConfig, rel: string): string | null
   }
   return full.startsWith(root + path.sep) && fs.statSync(full).isFile() ? full : null;
 }
+
+/** Repo-relative path of a test file (the tests table keeps it relative to the framework folder). */
+export function testRepoPath(p: ProjectConfig, kind: 'playwright' | 'cypress', file: string) {
+  const dir = kind === 'playwright' ? p.playwrightDir : p.cypressDir;
+  return dir ? path.posix.join(dir, file) : file;
+}
+
+/**
+ * Absolute path of a repo-relative file the skill may read: any file type, but
+ * inside the repo and not hidden (.git, .env). The file can be missing.
+ */
+export function repoFile(p: ProjectConfig, rel: string): string | null {
+  if (!rel || path.isAbsolute(rel) || rel.split(/[\\/]/).some((part) => part.startsWith('.'))) return null;
+  const root = path.resolve(p.path);
+  const full = path.resolve(root, rel);
+  if (!full.startsWith(root + path.sep)) return null;
+  try {
+    const real = fs.realpathSync(full);
+    if (!real.startsWith(fs.realpathSync(root) + path.sep)) return null; // symlink that leaves the repo
+  } catch {
+    /* missing file: allowed, it hashes as empty */
+  }
+  return full;
+}

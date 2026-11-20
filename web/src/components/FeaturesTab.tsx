@@ -47,12 +47,13 @@ const needsReview = (f: Feature) =>
 
 /**
  * Review state of a feature:
- *  - new: no person reviewed it yet
+ *  - new: no person reviewed it yet, or a person used "Mark as not reviewed"
  *  - changed: a person reviewed it, and the AI changed it after that (the AI draft marks show what)
  *  - reviewed: no AI change waits for a review
  */
 type ReviewState = 'new' | 'changed' | 'reviewed';
-const reviewState = (f: Feature): ReviewState => (!needsReview(f) ? 'reviewed' : f.reviewedAt ? 'changed' : 'new');
+const reviewState = (f: Feature): ReviewState =>
+  f.reviewWanted ? 'new' : !needsReview(f) ? 'reviewed' : f.reviewedAt ? 'changed' : 'new';
 const REVIEW_LABEL: Record<ReviewState, string> = { new: 'New', changed: 'Changed', reviewed: 'Reviewed' };
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -62,7 +63,9 @@ function ReviewTag({ f }: { f: Feature }) {
   if (st === 'reviewed') return null;
   const title =
     st === 'new'
-      ? 'No person reviewed this feature yet.'
+      ? f.reviewWanted
+        ? 'A person marked this feature as not reviewed.'
+        : 'No person reviewed this feature yet.'
       : `The AI changed this feature after your review on ${day(f.reviewedAt!)}. The “AI draft” marks show what changed.`;
   const style = st === 'new' ? { background: 'color-mix(in oklab, var(--accent) 16%, transparent)', color: 'var(--accent)' } : { background: 'var(--warn-tint)', color: 'var(--warn)' };
   return (
@@ -511,7 +514,7 @@ function Intro({ data }: { data: FeatureData }) {
       )}
       <p>
         Each feature shows its review state: “New” (no person reviewed it yet), “Changed” (the AI changed it after your review), or no tag (reviewed, no change since).
-        “Mark as reviewed” on a feature saves your review. Use the buttons above the list to show only one state.
+        “Mark as reviewed” on a feature saves your review. “Mark as not reviewed” shows a reviewed feature as “New” again. Use the buttons above the list to show only one state.
       </p>
       <p>Select a feature on the left, open “Map with AI” to let Claude map the next files, or open “Tests with no feature” to link the rest.</p>
     </div>
@@ -624,7 +627,11 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
             {reviewState(f) === 'changed' && <>Changed by the AI after your review on {day(f.reviewedAt!)}. The “AI draft” marks show what changed.</>}
             {reviewState(f) === 'reviewed' && f.reviewedAt && <>Reviewed on {day(f.reviewedAt)}. No change since.</>}
           </span>
-          {needsReview(f) && <Button onClick={() => act(() => mutate('POST', `${url}/check`, {}))}>Mark as reviewed</Button>}
+          {reviewState(f) === 'reviewed' ? (
+            <Button onClick={() => act(() => mutate('POST', `${url}/uncheck`, {}))}>Mark as not reviewed</Button>
+          ) : (
+            <Button onClick={() => act(() => mutate('POST', `${url}/check`, {}))}>Mark as reviewed</Button>
+          )}
         </div>
         <InlineText value={f.title} onSave={(title) => mutate('PATCH', url, { title })} className="mt-1 text-lg font-semibold" />
         <InlineText

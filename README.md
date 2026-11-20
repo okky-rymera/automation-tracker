@@ -108,7 +108,7 @@ Each feature in the list shows its review state:
 - **Changed**: a person reviewed it, and the AI changed it after that. The "AI draft" marks show what changed, so you read only those parts.
 - No tag: reviewed, and no AI change since.
 
-Click "Mark as reviewed" on a feature to save your review. When you clear the last AI mark of a feature one by one, that also counts as a review. A feature that a person made counts as reviewed. The buttons above the list show only the features in one state.
+Click "Mark as reviewed" on a feature to save your review. When you clear the last AI mark of a feature one by one, that also counts as a review. A feature that a person made counts as reviewed. Click "Mark as not reviewed" on a reviewed feature to show it as "New" again. It stays "New" until you click "Mark as reviewed". The buttons above the list show only the features in one state.
 
 ## Coverage views
 

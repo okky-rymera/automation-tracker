@@ -566,6 +566,39 @@ const MIGRATIONS: string[] = [
   ALTER TABLE map_loops DROP COLUMN unit_budget_usd;
   ALTER TABLE map_loops DROP COLUMN total_budget_usd;
   `,
+  // 25: review_wanted = 1: a person used "Mark as not reviewed". The feature shows as not reviewed
+  //     until a person uses "Mark as reviewed" again. A change that clears the last AI mark does not
+  //     mark it as reviewed (sweepReviewed).
+  `
+  ALTER TABLE features ADD COLUMN review_wanted INTEGER NOT NULL DEFAULT 0;
+  `,
+  // 26: hand marks on code lines. A person marks a runnable line as library code (it runs on every
+  //     request) or as covered (a test checks it, but coverage did not see it). text: the trimmed
+  //     line when it was marked. When the line text is not the same now, the mark is stale and does not count.
+  `
+  CREATE TABLE line_marks (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('library', 'covered')),
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, file, line)
+  );
+  `,
+  // 27: the value of a field before the AI skill changed it, so a person can see it and change it back.
+  //     One row per field, kept until the AI mark of the field goes. kind: feature, scope or item.
+  //     field: title, description, priority, group (group_id as text, NULL: no group), or text (items).
+  `
+  CREATE TABLE ai_before (
+    kind TEXT NOT NULL CHECK (kind IN ('feature', 'scope', 'item')),
+    row_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    before TEXT,
+    at TEXT NOT NULL,
+    PRIMARY KEY (kind, row_id, field)
+  );
+  `,
 ];
 
 function open(): DatabaseSync {
