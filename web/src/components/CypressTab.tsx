@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useApi, type CypressScenario } from '../api';
 import { href } from '../router';
 import { buildTree, leaves, Tree } from './Tree';
-import { Empty, Loading, Tag } from './ui';
+import { CopyId, Empty, Loading, Tag } from './ui';
 import { TestFeatures } from './FeaturesTab';
 
 export function CypressTab({ project, sel }: { project: string; sel: string | null }) {
@@ -79,7 +79,7 @@ function ScenarioDetail({ project, s }: { project: string; s: CypressScenario })
   return (
     <div className="max-w-3xl space-y-5 p-6">
       <div>
-        <div className="font-mono text-xs text-ink-3">{s.id}</div>
+        <CopyId label={s.id} className="text-xs text-ink-3" />
         <h2 className="mt-1 text-lg font-semibold">{s.title}</h2>
         <div className="mt-1 text-sm text-ink-2">
           {s.keyword} in feature “{s.feature}”{s.rule ? ` › rule “${s.rule}”` : ''}

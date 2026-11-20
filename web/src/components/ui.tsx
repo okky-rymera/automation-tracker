@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { featurePct, featureTotal, type FunctionState, type LineCounts, type View } from '../api';
 
 export const STATE_META: Record<FunctionState | 'none', { label: string; icon: string; color: string; tint: string }> = {
@@ -102,4 +102,84 @@ export function Empty({ children }: { children: ReactNode }) {
 
 export function Loading({ error }: { error?: string | null }) {
   return <Empty>{error ? `Could not load: ${error}` : 'Loading…'}</Empty>;
+}
+
+/** Puts text on the clipboard. The fallback works on a plain-http address, where the clipboard API is not available. */
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const before = document.activeElement as HTMLElement | null;
+    const box = document.createElement('textarea');
+    box.value = text;
+    box.style.position = 'fixed';
+    box.style.opacity = '0';
+    document.body.appendChild(box);
+    box.focus();
+    box.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    box.remove();
+    before?.focus();
+    return ok;
+  }
+}
+
+/**
+ * An ID (F-1, S-3, a test ID) with a small button that copies it.
+ * text is what goes on the clipboard. It can say more than the label, for example "F-1/S-3".
+ */
+export function CopyId({ label, text = label, className = '' }: { label: string; text?: string; className?: string }) {
+  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
+  // One timer at a time. A new click restarts it, and leaving the page stops it.
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
+  const copy = async (e: MouseEvent) => {
+    // The ID can be inside a link or a clickable row. Copy only, do not open it.
+    e.preventDefault();
+    e.stopPropagation();
+    const ok = await copyText(text);
+    // The ID can leave the page while the copy runs. Then do not show the mark or start the timer.
+    if (!mounted.current) return;
+    setState(ok ? 'done' : 'failed');
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState('idle'), 1200);
+  };
+  return (
+    <span className={`inline-flex items-center gap-0.5 font-mono ${className}`}>
+      {label}
+      <button
+        type="button"
+        onClick={copy}
+        title={state === 'done' ? 'Copied' : state === 'failed' ? 'Could not copy' : `Copy “${text}”`}
+        aria-label={`Copy ${text}`}
+        className="rounded px-0.5 text-ink-3 opacity-60 hover:bg-surface-2 hover:text-ink hover:opacity-100"
+      >
+        {state === 'done' ? (
+          <span style={{ color: 'var(--good)' }}>✓</span>
+        ) : state === 'failed' ? (
+          <span style={{ color: 'var(--bad)' }}>✕</span>
+        ) : (
+          <svg aria-hidden width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="inline-block align-[-1px]">
+            <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+            <path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" />
+          </svg>
+        )}
+      </button>
+      {/* Always on the page: screen readers read a change of text in a status area, not a new area. */}
+      <span className="sr-only" role="status">{state === 'done' ? 'Copied' : state === 'failed' ? 'Could not copy' : ''}</span>
+    </span>
+  );
 }

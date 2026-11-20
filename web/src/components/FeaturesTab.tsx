@@ -20,11 +20,12 @@ import {
   screenshotUrl,
 } from '../api';
 import { href } from '../router';
-import { CY_ONLY_META, Empty, Loading, Tag } from './ui';
+import { CopyId, CY_ONLY_META, Empty, Loading, Tag } from './ui';
 
 // Display IDs. The number is the database ID, so it stays when the title changes.
 export const featureCode = (id: number) => `F-${id}`;
 export const scopeCode = (id: number) => `S-${id}`;
+export const shotCode = (id: number) => `IMG-${id}`;
 
 const FW_LABEL: Record<Framework, string> = {
   playwright: 'Playwright',
@@ -460,7 +461,9 @@ function GroupDetail({ project, g, data, onNewFeature }: { project: string; g: F
   return (
     <div className="max-w-3xl space-y-5 p-6">
       <div>
-        <div className="font-mono text-xs text-ink-3">Group G-{g.id}</div>
+        <div className="text-xs text-ink-3">
+          Group <CopyId label={`G-${g.id}`} />
+        </div>
         <InlineText value={g.title} onSave={(title) => mutate('PATCH', url, { title })} className="mt-1 text-lg font-semibold" />
         <InlineText
           value={g.description}
@@ -547,7 +550,7 @@ function FeatureDetail({ project, f, data }: { project: string; f: Feature; data
     <div className="max-w-4xl space-y-6 p-6">
       <div>
         <div className="flex items-center gap-2 font-mono text-xs text-ink-3">
-          {featureCode(f.id)}
+          <CopyId label={featureCode(f.id)} />
           {needsReview(f) && (
             <>
               <AiBadge />
@@ -749,7 +752,7 @@ function ScopeCard({ project, f, s, links, features }: { project: string; f: Fea
   return (
     <div className="rounded-lg border border-line bg-surface p-3">
       <div className="flex items-start gap-2">
-        <span className="mt-0.5 font-mono text-[11px] text-ink-3">{scopeCode(s.id)}</span>
+        <CopyId label={scopeCode(s.id)} text={`${featureCode(f.id)}/${scopeCode(s.id)}`} className="mt-0.5 shrink-0 text-[11px] text-ink-3" />
         {(s.aiDraft || s.requirements.some((r) => r.aiDraft)) && (
           <button type="button" onClick={() => act(() => mutate('PATCH', url, { check: true }))} className="mt-0.5">
             <AiBadge title="The AI skill wrote this scope or its requirements. Click to mark all as checked." />
@@ -848,7 +851,7 @@ function LinkTable({ project, f, links, className = '' }: { project: string; f: 
                 </a>
               )}
               <div className="truncate font-mono text-[11px] text-ink-3">
-                {l.testId} · {l.file} {aiLink(l) && '· linked by AI'}
+                <CopyId label={l.testId} /> · {l.file} {aiLink(l) && '· linked by AI'}
               </div>
             </td>
             <td className="w-56 py-1 pr-2">
@@ -1054,6 +1057,7 @@ function ShotCard({ project, f, shot, onOpen }: { project: string; f: Feature; s
       <button type="button" onClick={onOpen} title="Show full size" className="block overflow-hidden rounded border border-line bg-bg">
         <img src={url} alt={shot.caption || 'Screenshot'} loading="lazy" className="h-32 w-full object-contain" />
       </button>
+      <CopyId label={shotCode(shot.id)} text={`${featureCode(f.id)}/${shotCode(shot.id)}`} className="text-[11px] text-ink-3" />
       <div className="flex items-start gap-1">
         {shot.aiDraft && (
           <button type="button" onClick={() => act(() => mutate('PATCH', url, { check: true }))} className="mt-0.5">
@@ -1270,7 +1274,7 @@ function UnlinkedView({ project, data }: { project: string; data: FeatureData })
                     {t.title}
                   </a>
                   <div className="truncate font-mono text-[11px] text-ink-3">
-                    {t.id} · {t.file}
+                    <CopyId label={t.id} /> · {t.file}
                   </div>
                   <div className="mt-0.5 flex flex-wrap gap-1">
                     {t.tags.slice(0, 6).map((x) => (

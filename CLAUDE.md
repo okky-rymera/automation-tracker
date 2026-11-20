@@ -43,7 +43,10 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Move all links of a renamed test | `POST .../links/move-test` with `{ "from": "<old test ID>", "to": "<new test ID>" }` |
 | Sync the copy with the remote branch | `POST .../sync` with `{ "tests": "auto" \| "always" \| "never" }`. `GET .../sync` shows the state. |
 
-IDs: `F-12` is feature 12, and `S-40` is scope 40. Send only the number.
+IDs: `F-12` is feature 12, `S-40` is scope 40, `G-3` is group 3, and `IMG-7` is screenshot 7. Send only the number.
+Test IDs start with `PW-` (Playwright) or `CY-` (Cypress). Send them in full.
+The web page has a copy button next to each ID. A copied scope or screenshot ID tells its feature too, for example `F-12/S-40` or `F-12/IMG-7`.
+The command line and the request bodies accept a copied ID (`F-12/S-40` is scope 40). In a URL path, send only the number (`.../scopes/40`).
 
 The command line can move a scope too. It does not need the server:
 `npm run -s map -- move-scope <project> <scope id> <feature id>`.

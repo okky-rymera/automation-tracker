@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useApi, type PlaywrightTest } from '../api';
 import { href } from '../router';
 import { buildTree, leaves, Tree } from './Tree';
-import { Empty, Loading, Tag } from './ui';
+import { CopyId, Empty, Loading, Tag } from './ui';
 import { TestFeatures } from './FeaturesTab';
 
 export function PlaywrightTab({ project, sel }: { project: string; sel: string | null }) {
@@ -74,7 +74,7 @@ function TestDetail({ project, t }: { project: string; t: PlaywrightTest }) {
   return (
     <div className="max-w-3xl space-y-5 p-6">
       <div>
-        <div className="font-mono text-xs text-ink-3">{t.id}</div>
+        <CopyId label={t.id} className="text-xs text-ink-3" />
         <h2 className="mt-1 text-lg font-semibold">{t.title}</h2>
         {t.describes.length > 0 && <div className="mt-1 text-sm text-ink-2">{t.describes.join(' › ')}</div>}
         <div className="mt-1 font-mono text-xs text-ink-3">
