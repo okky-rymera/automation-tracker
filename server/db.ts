@@ -561,6 +561,11 @@ const MIGRATIONS: string[] = [
   `
   UPDATE features SET reviewed_at = replace(reviewed_at, ' ', 'T') || '.000Z' WHERE reviewed_at NOT LIKE '%Z';
   `,
+  // 24: the mapping loop uses the claude.ai plan, with no dollar limits. It stops at the plan limit.
+  `
+  ALTER TABLE map_loops DROP COLUMN unit_budget_usd;
+  ALTER TABLE map_loops DROP COLUMN total_budget_usd;
+  `,
 ];
 
 function open(): DatabaseSync {
@@ -568,6 +573,13 @@ function open(): DatabaseSync {
   const db = new DatabaseSync(DB_FILE);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;');
   const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  // A step can delete data (for example a dropped column). The database is the only copy of the
+  // tracker data, so make a backup before the steps of an existing database run.
+  if (version > 0 && version < MIGRATIONS.length) {
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
+    const backup = path.join(path.dirname(DB_FILE), `tracker-backup-${stamp}-before-migration-${version + 1}.db`);
+    if (!fs.existsSync(backup)) db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+  }
   for (let v = version; v < MIGRATIONS.length; v++) {
     db.exec('BEGIN');
     try {

@@ -13,7 +13,7 @@
  *   npm run project -- sync <id> [--tests auto|always|never]
  *   npm run project -- ai-update <id> [--from <commit> --to <commit>] [--feature 1,2] [--model opus] [--budget 1] [--bare] [--no-apply]
  *     (no --from/--to: the commits of the last sync that saved a change report)
- *   npm run project -- map-loop <id> [--units 10] [--unit-budget 5] [--budget 25] [--model opus]   (headless map-features, one unit after the other)
+ *   npm run project -- map-loop <id> [--units 10] [--model opus]   (headless map-features, one unit after the other; stops at the plan limit)
  *   npm run project -- run-spec <id> <unit ref>   (one Playwright spec on the tracker echowp site-1; the site stays on)
  */
 import fs from 'node:fs';
@@ -173,8 +173,15 @@ if (cmd === 'add') {
   // Headless Claude maps one unit after the other with the map-features skill (server/map-loop.ts).
   const [id] = args;
   const p = loadProjects().find((x) => x.id === id);
-  const usage = 'Usage: map-loop <id> [--units 10] [--unit-budget 5] [--budget 25] [--model opus]';
+  const usage = 'Usage: map-loop <id> [--units 10] [--model opus]';
   if (!p) throw new Error(usage);
+  // The dollar limits are gone: the loop uses the claude.ai plan, and it stops at the plan limit.
+  for (const gone of ['--budget', '--unit-budget']) {
+    if (args.includes(gone)) {
+      console.error(`${gone} is gone: the loop uses your Claude plan, and it stops at the 5-hour or weekly limit.\n${usage}`);
+      process.exit(1);
+    }
+  }
   // A flag with no value (or a bad value) becomes NaN, and startMapLoop refuses it.
   const num = (k: string) => {
     if (!args.includes(`--${k}`)) return undefined;
@@ -186,8 +193,6 @@ if (cmd === 'add') {
     started = startMapLoop(p, {
       model: opt('model') ?? undefined,
       maxUnits: num('units'),
-      unitBudgetUsd: num('unit-budget'),
-      totalBudgetUsd: num('budget'),
       startedBy: 'cli',
       onLine: (l) => console.log(l),
     });

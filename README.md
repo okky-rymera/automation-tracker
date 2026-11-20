@@ -88,9 +88,13 @@ The skill writes through `npm run -s map -- <command>` (see `server/map.ts`). To
 
 ### Let Claude map the list without you
 
-Features tab > "Map with AI" > "Start mapping". Claude Code runs the skill headless (`claude -p`), one unit after the other, with your claude.ai login. You can also start it on the command line: `npm run project -- map-loop <project> [--units 10] [--unit-budget 5] [--budget 25] [--model opus]`.
+Features tab > "Map with AI" > "Start mapping". Claude Code runs the skill headless (`claude -p`), one unit after the other, with your claude.ai login. You can also start it on the command line: `npm run project -- map-loop <project> [--units 10] [--model opus]`.
 
-- It stops when no unit is left, at the unit limit, at the spend limit, when a unit fails two times, at the plan usage limit, or when you click "Stop". When a unit takes more than 60 minutes, the loop stops it, and the unit counts as failed.
+- It stops when no unit is left, at the unit limit, when a unit fails two times, or when you click "Stop". When a unit takes more than 60 minutes, the loop stops it, and the unit counts as failed.
+- It uses your Claude plan, so it has no dollar limit.
+- At the 5-hour or weekly limit of the plan, the loop stops the unit at once and ends. It does the same when the run starts to use paid extra usage.
+- The loop does not save the stopped unit. That unit runs again at the next start. The loop shows when the limit resets.
+- A limit of one model (for example the weekly Opus limit) stops only a loop that uses that model.
 - It can use only the read tools, the `map` steps of the skill, the `run-spec` command, the tracker's echowp commands, and `playwright-cli`. The tool refuses all other commands. It does not run Cypress tests. This is a guard, not a sandbox: for example, the echowp `wp` command can still run PHP on the test site. The same guard against `sudo` as in the sync applies.
 - It runs a spec file only on the tracker's own echowp site (`npm run project -- run-spec <project> <unit ref>`), and it stops the site after each unit.
 - It makes a database backup before it starts. A sync and an AI update wait while it runs.

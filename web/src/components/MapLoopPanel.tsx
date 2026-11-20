@@ -9,7 +9,7 @@ interface MapRun {
   unit_ref: string;
   started_at: string;
   finished_at: string | null;
-  status: 'running' | 'done' | 'skipped' | 'failed';
+  status: 'running' | 'done' | 'skipped' | 'failed' | 'stopped';
   cost_usd: number | null;
   duration_ms: number | null;
   features: number[];
@@ -23,8 +23,6 @@ interface MapLoop {
   status: 'running' | 'done' | 'stopped' | 'failed';
   started_by: string;
   model: string;
-  unit_budget_usd: number;
-  total_budget_usd: number;
   max_units: number;
   stop_reason: string | null;
 }
@@ -34,9 +32,9 @@ interface MapLoopState {
   runs: MapRun[];
   totalUsd: number;
   count: number;
-  defaults: { model: string; unitBudgetUsd: number; totalBudgetUsd: number; maxUnits: number };
-  /** The highest value of each limit. The server refuses a value above it. */
-  limits: { unitBudgetUsd: number; totalBudgetUsd: number; maxUnits: number };
+  defaults: { model: string; maxUnits: number };
+  /** The highest unit limit. The server refuses a value above it. */
+  limits: { maxUnits: number };
   log: string[];
   error: string | null;
 }
@@ -49,6 +47,8 @@ const STATUS: Record<MapRun['status'], [string, string]> = {
   done: ['saved', 'var(--good)'],
   skipped: ['skipped (no feature)', 'var(--text-2)'],
   failed: ['failed', 'var(--bad)'],
+  // A plan limit or a person stopped the unit. It was not saved, and it runs again at the next start.
+  stopped: ['stopped (not saved)', 'var(--text-2)'],
 };
 
 /**
@@ -62,7 +62,7 @@ export function MapLoopPanel({ project }: { project: string }) {
   useEffect(() => {
     if (data) setS(data);
   }, [data]);
-  const [form, setForm] = useState<{ model: string; maxUnits: number; unitBudgetUsd: number; totalBudgetUsd: number } | null>(null);
+  const [form, setForm] = useState<{ model: string; maxUnits: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const running = !!s?.running;
   // While no loop runs, check every 30 s: a loop can start from the command line.
@@ -92,7 +92,7 @@ export function MapLoopPanel({ project }: { project: string }) {
     }
   };
   const loop = s.loops[0];
-  const numInput = (k: 'maxUnits' | 'unitBudgetUsd' | 'totalBudgetUsd', label: string, step: string) => (
+  const numInput = (k: 'maxUnits', label: string, step: string) => (
     <label className="inline-flex items-center gap-1 text-ink-3">
       {label}
       <input type="number" min="1" max={s.limits[k]} step={step} value={f[k]} onChange={(e) => set(k, e.target.value)} className="w-16 rounded border border-line bg-bg px-1 py-0.5 text-ink" />
@@ -109,9 +109,10 @@ export function MapLoopPanel({ project }: { project: string }) {
           “Changed”, so you review only those.
         </p>
         <p className="mt-1 text-ink-3">
-          It stops when no unit is left, at the unit limit, at the spend limit, when a unit fails two times, or at the plan usage limit. A unit that takes more than
-          60 minutes is stopped and counts as failed. The cost is a list-price estimate
-          of the plan use (claude.ai login), not a bill. A sync and an AI update wait while the loop runs.
+          It uses your Claude plan (claude.ai login), not an API key. It stops when no unit is left, at the unit limit, when a unit fails two times, or when you
+          click Stop. When the 5-hour or weekly limit of the plan is reached, or the run starts to use paid extra usage, it stops the unit at once and ends the
+          loop. That unit is not saved: it runs again at the next start. When a unit takes more than 60 minutes, the loop stops it, and the unit counts as failed.
+          The cost is a list-price estimate of the plan use, not a bill. A sync and an AI update wait while the loop runs.
         </p>
       </div>
 
@@ -135,8 +136,6 @@ export function MapLoopPanel({ project }: { project: string }) {
               </select>
             </label>
             {numInput('maxUnits', 'Units', '1')}
-            {numInput('unitBudgetUsd', '$ per unit', '0.5')}
-            {numInput('totalBudgetUsd', '$ in total', '1')}
             <button onClick={() => call('', f)} className="rounded-md bg-accent px-2.5 py-0.5 font-medium text-white hover:opacity-90">
               Start mapping
             </button>

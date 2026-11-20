@@ -154,7 +154,10 @@ Built on 20 Nov 2026. The user asked for: a loop that runs the map-features skil
    - The skill guide said `echowp down` to stop the site. `down` deletes the sites. The guide now says `stop site-1`.
 3. [x] Mapping loop (`server/map-loop.ts`, tables `map_loops` and `map_runs`, command `map-loop`, Features tab > "Map with AI").
    - The runner picks the unit with `map next`, and gives one unit to each `claude -p` run. After the run, it checks `processed_units`: a unit that was not saved or skipped is "failed". A unit that fails two times stops the loop.
-   - Limits: units, dollars for each unit (`--max-budget-usd`), dollars in total, 60 minutes for each unit, the plan usage limit.
+   - Limits: units, 60 minutes for each unit, and the plan limit. The run uses the claude.ai plan, so it has no dollar limit.
+   - The runner reads the plan limit events (`--output-format stream-json --verbose`, `rate_limit_event`).
+   - At the 5-hour or weekly limit, the runner stops the run. It does the same when the run starts to use paid extra usage.
+   - Then the runner marks the unit "stopped" (not saved), and the loop ends. A limit of one model stops only a run of that model.
    - Tools: `--permission-mode dontAsk` with an allow list (read tools, Skill, Write in the run's scratch folder, the `map` steps of the skill (not `reset` or `move-scope`), `run-spec`, the tracker's `echowp`, `playwright-cli`, `faillock`). setpriv and the no-sudo stubs, as in the sync. No MCP servers.
    - A sync and an AI update do not start while a loop runs, and the reverse.
    - The runner stops the test site and closes the browser after each unit, and makes a database backup at the start.

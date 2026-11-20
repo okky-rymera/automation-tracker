@@ -245,7 +245,7 @@ app.post('/api/projects/:id/map-loop', loopEdit((req) => {
   // No value: the default. A bad value or a value above the limit: startMapLoop refuses it with a message.
   const n = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
   const model = ['sonnet', 'opus'].includes(b.model) ? b.model : undefined;
-  return { loopId: startMapLoop(proj(req), { model, maxUnits: n(b.maxUnits), unitBudgetUsd: n(b.unitBudgetUsd), totalBudgetUsd: n(b.totalBudgetUsd), startedBy: 'app' }).loopId };
+  return { loopId: startMapLoop(proj(req), { model, maxUnits: n(b.maxUnits), startedBy: 'app' }).loopId };
 }));
 app.post('/api/projects/:id/map-loop/stop', loopEdit((req) => stopMapLoop(P(req))));
 app.post('/api/projects/:id/rescan', edit((req) => syncProject(proj(req), true)));

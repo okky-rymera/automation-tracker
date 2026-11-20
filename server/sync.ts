@@ -98,8 +98,8 @@ function appendLog(syncId: number, text: string) {
 export interface RunOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
-  /** Each output line. The sync log gets them too, unless quiet. */
-  onLine?: (line: string) => void;
+  /** Each full output line, and the stream it came from. The sync log gets them too, unless quiet. */
+  onLine?: (line: string, stream: 'stdout' | 'stderr') => void;
   quiet?: boolean;
   /** Text for the command's standard input. Without it, the input is empty. */
   input?: string;
@@ -123,26 +123,31 @@ export function run(job: Job, cmd: string, args: string[], o: RunOptions): Promi
       child.stdin!.end(o.input);
     }
     let out = '';
-    let partial = '';
-    const take = (buf: Buffer) => {
-      const text = partial + buf.toString();
+    // One unfinished-line buffer for each stream: a long stdout line (stream-json output can be some
+    // MB) that comes in many chunks must not get a stderr chunk in its middle. The text decoder of
+    // each stream keeps a UTF-8 character that a chunk splits.
+    const partial = { stdout: '', stderr: '' };
+    const take = (stream: 'stdout' | 'stderr') => (chunk: string) => {
+      const text = partial[stream] + chunk;
       const lines = text.split('\n');
-      partial = lines.pop() ?? '';
+      partial[stream] = lines.pop() ?? '';
       for (const l0 of lines) {
         const l = l0.replace(/\r$/, '');
         if (/^\|[■ ]*\|\s+\d+% of/.test(l)) continue; // download bars of "playwright install"
         out += l + '\n';
         if (out.length > 1_000_000) out = out.slice(-500_000);
-        o.onLine?.(l);
+        o.onLine?.(l, stream);
       }
       const keep = lines.filter((l) => !/^\|[■ ]*\|\s+\d+% of/.test(l));
       if (!o.quiet && keep.length) appendLog(job.syncId, keep.map((l) => l + '\n').join(''));
     };
-    child.stdout!.on('data', take);
-    child.stderr!.on('data', take);
+    child.stdout!.setEncoding('utf8');
+    child.stderr!.setEncoding('utf8');
+    child.stdout!.on('data', take('stdout'));
+    child.stderr!.on('data', take('stderr'));
     child.on('error', reject);
     child.on('close', (code, signal) => {
-      if (partial) take(Buffer.from('\n'));
+      for (const k of ['stdout', 'stderr'] as const) if (partial[k]) take(k)('\n');
       job.children?.delete(child);
       // Point to a command that still runs (the setup commands of a test run end in any order).
       if (job.child === child) job.child = [...(job.children ?? [])].pop() ?? null;
