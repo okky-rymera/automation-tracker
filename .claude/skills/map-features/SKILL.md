@@ -175,8 +175,15 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   box unchecked again. Then S-10 fails and S-3 passes.
   Link a test only to the scopes whose result it asserts. A test that checks
   the box and reloads the settings page links to S-10, not to S-3.
-  When no test checks the full path of a scope, say so in the scope
-  `description`.
+- A scope `description` holds only facts about the behavior that do not fit
+  in the title. Leave it empty when the title says all. Do not write how you
+  checked the scope ("tried by hand", "no test checks it"): put that in
+  `unit.note` and in the chat report. The app already shows which scopes
+  have no test.
+- Exception: when a linked test checks only part of a scope, say in the
+  scope `description` which part no test checks. Example: "The linked test
+  sets the value directly. No test checks the box on the settings page."
+  The app cannot show this gap in another way.
 - Use the role names that `features` lists in `labelsInUse`, so one
   role does not get two names ("Wholesale customer", not "Wholesale buyer").
 - Put a requirement that every scope shares in the feature `requirements`.
@@ -198,7 +205,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | Field | Content |
 |---|---|
 | title | The feature in a few plain words, as a store owner says it |
-| group | The product area, for example "Pricing", "Settings", "REST API" |
+| group | The product feature it belongs to, for example "Wholesale Price" (see Groups). Not a screen type like "Settings" |
 | description | 1–3 sentences: what it does and why a store owner uses it |
 | priority | high / medium / low: how bad a failure is for stores. Leave empty if unsure |
 | roles | Labels: who uses or sees it ("Admin", "Wholesale customer") |
@@ -315,10 +322,25 @@ Then stop. Say the command or phrase to do the next unit.
 
 ## Groups
 
-Use the groups that exist (`features` lists them). If there are none yet, use
-names from this list, so that later runs use the same names: Pricing,
-Products, Cart and checkout, Orders, Customers and roles, Settings, Admin
-screens, REST API, Import and export, Onboarding, Integrations.
+A group is the product feature that a store owner knows, for example
+"Wholesale Price", "Wholesale Roles", "Order Form". Choose it by what the
+feature does, not by where it is set or tested:
+
+- Do not use the screen type as a group ("Settings", "Admin screens"). A
+  setting goes in the group of the behavior that it changes. Example: the
+  "Wholesale Price Text" setting changes the wholesale price, so its group is
+  "Wholesale Price", not "Settings".
+- Do not use the test folder (`backend/settings/…`) or the `@area:` tag as
+  the group.
+- Use the names that the plugin uses in its menus and docs.
+- Use the groups that exist (`features` lists them) when one fits. Make a new
+  group only when none fits. A screen-type group ("Settings", "Admin
+  screens", "Pricing") never fits, also when it exists.
+- For an existing feature that has a group, send `group` only when its group
+  is an AI draft. The tool keeps a group that a person set.
+- If an existing feature is in a screen-type group or another wrong group,
+  do not move it. In the report, name the feature, its group and the group
+  you suggest. A person moves it in the app, or tells you to move it.
 
 ## Writing style
 

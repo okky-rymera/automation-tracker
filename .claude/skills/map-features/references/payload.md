@@ -14,7 +14,7 @@
     {
       "id": 39,
       "title": "Wholesale prices on the shop page",
-      "group": "Pricing",
+      "group": "Wholesale Price",
       "description": "…",
       "priority": "high",
       "roles": ["Admin", "Wholesale customer"],
@@ -75,6 +75,8 @@
 - Scope: matched by `id` (`S-14` or `14`), or else by the same title in that
   feature. A new title makes a new scope. The title of an AI draft scope can be
   changed: give its `id` and the new title. The ID, links and screenshot tags stay.
+- Scope `description`: a text replaces an AI draft description. `null`
+  deletes an AI draft description. A person's description stays.
 - Scope `requirements`: a list like the feature lists, for this scope only.
   `{ "id", "text" }` corrects an item of that scope. `removeItems` on the
   feature deletes scope items too.
@@ -151,6 +153,10 @@ that has them:
 - Move each note that a test can check: add it as a scope, and put the note's
   ID in `removeItems`.
 - Correct each short requirement to a full sentence with `{ "id", "text" }`.
+- Clean each AI draft scope description that tells how it was checked
+  ("tried by hand", "no test checks it"). Send the scope `id` with a
+  description of facts only, or with `"description": null`. Keep a sentence
+  that says a linked test checks only part of the scope.
 
 **outOfScope**: one item for each thing it does not do, and which feature does it if one does.
 > "Minimum order quantities (see F-22)."
@@ -179,6 +185,19 @@ test. Each has a result a tester can see. One scope = one thing to check.
   Write the actor only when it is not the actor of the feature requirements.
 - The **requirements** of the scope give the exact setting, data or user for
   this scope only. Do not repeat the feature requirements.
+- The **description** is optional. It holds facts about the behavior that do
+  not fit in the title. Do not write how you checked it ("tried by hand",
+  "no test checks it"): that goes in `unit.note` and the chat report.
+  One exception: when a linked test checks only part of the scope, say which
+  part no test checks. The app shows a scope with no test, but it cannot
+  show a scope that a test checks only in part.
+
+> Title: "An empty text shows the wholesale price with no label"
+> Description: "The plugin does not put back the default \"Wholesale Price:\" text."
+> Not a description: "Tried by hand: the price shows with no label. No test checks it."
+>
+> Title: "Checking the hide checkbox and saving removes the column"
+> Description: "The linked test sets the value directly. No test checks the box on the settings page."
 
 > Title: "Shows the role name and wholesale price of a variable product"
 > Requirements: "A variable product has a wholesale price for one wholesale role."
@@ -220,7 +239,7 @@ This feature is made up. It shows the form only: do not copy its facts.
   "features": [
     {
       "title": "Wholesale order note",
-      "group": "Orders",
+      "group": "Wholesale Orders",
       "description": "Adds a note to each order that a wholesale customer places, so staff can find wholesale orders fast.",
       "priority": "low",
       "roles": ["Admin", "Shop manager"],

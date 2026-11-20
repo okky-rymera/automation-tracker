@@ -450,7 +450,8 @@ interface FeatureIn {
 interface ScopeIn {
   id?: number | string;
   title: string;
-  description?: string;
+  /** null deletes an AI draft description. */
+  description?: string | null;
   /** What must be true for this scope only, on top of the feature's requirements. */
   requirements?: ItemIn[];
 }
@@ -555,11 +556,11 @@ function apply(p: ProjectConfig, file: string | undefined) {
   out({ saved: true, unit: { kind, ref }, features: [...new Set(touched)].map((id) => `F-${id}`), report });
 }
 
-function groupId(p: ProjectConfig, title: string | undefined): number | null | undefined {
-  const t = str(title, 200);
-  if (!t) return undefined;
-  const g = db.prepare('SELECT id FROM feature_groups WHERE project_id = ? AND lower(title) = lower(?)').get(p.id, t) as any;
-  if (g) return g.id;
+/** The ID of the group with this title, or undefined. */
+function findGroup(p: ProjectConfig, title: string): number | undefined {
+  return (db.prepare('SELECT id FROM feature_groups WHERE project_id = ? AND lower(title) = lower(?)').get(p.id, title) as any)?.id;
+}
+function createGroup(p: ProjectConfig, t: string): number {
   const n = (db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM feature_groups WHERE project_id = ?').get(p.id) as any).n;
   return Number(db.prepare('INSERT INTO feature_groups (project_id, title, sort) VALUES (?, ?, ?)').run(p.id, t, n).lastInsertRowid);
 }
@@ -588,7 +589,7 @@ const saveAi = (table: 'features' | 'scopes', id: number, ai: Set<string>) =>
 function writeFeature(p: ProjectConfig, f: FeatureIn, report: string[]): number {
   const priority = str(f.priority).toLowerCase();
   if (!PRIORITIES.includes(priority)) throw new EditError(`Priority "${f.priority}" must be high, medium, low or empty`);
-  const g = groupId(p, f.group);
+  const groupTitle = str(f.group, 200);
   let row: any;
   if (f.id) {
     row = db.prepare('SELECT * FROM features WHERE id = ? AND project_id = ?').get(Number(f.id), p.id);
@@ -608,7 +609,14 @@ function writeFeature(p: ProjectConfig, f: FeatureIn, report: string[]): number 
   if (f.id && f.title) setText('features', row, ai, 'title', 'title', str(f.title, 2000), label, report);
   setText('features', row, ai, 'description', 'description', str(f.description), label, report);
   setText('features', row, ai, 'priority', 'priority', priority, label, report);
-  if (g !== undefined) setText('features', row, ai, 'group', 'group_id', g, label, report);
+  if (groupTitle) {
+    // Make a new group only when the feature can take it: else a refused change leaves an empty group.
+    let g = findGroup(p, groupTitle);
+    const canSet = row.group_id === null || ai.has('group');
+    if (g === undefined && canSet) g = createGroup(p, groupTitle);
+    if (g !== undefined) setText('features', row, ai, 'group', 'group_id', g, label, report);
+    else report.push(`${label}: kept the group that a person wrote or checked. Suggested group "${groupTitle}" was not saved.`);
+  }
   saveAi('features', row.id, ai);
   return row.id;
 }
@@ -730,7 +738,7 @@ function goneScope(fid: number, key: { id?: number | null; title?: string }): { 
  * Adds or fills one scope. Returns its ID, or null when a person deleted the scope or moved it to
  * another feature: the skill does not make it again here (goneScope).
  */
-function writeScope(fid: number, s: { id?: number | string; title: string; description?: string }, report: string[]): number | null {
+function writeScope(fid: number, s: { id?: number | string; title: string; description?: string | null }, report: string[]): number | null {
   const title = str(s.title, 2000);
   if (!title) throw new EditError(`A scope of F-${fid} has no title`);
   const sid = s.id !== undefined ? Number(SCOPE_RE.exec(String(s.id))?.[1] ?? s.id) : null;
@@ -763,9 +771,22 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
   const label = `S-${row.id}`;
   const ai = new Set<string>(json(row.ai_fields));
   setText('scopes', row, ai, 'title', 'title', title, label, report);
-  setText('scopes', row, ai, 'description', 'description', str(s.description), label, report);
+  if (s.description === null) clearScopeDescription(row, ai, label, report);
+  else setText('scopes', row, ai, 'description', 'description', str(s.description), label, report);
   saveAi('scopes', row.id, ai);
   return row.id;
+}
+
+/** "description": null in the payload deletes an AI draft description. A person's description stays. */
+function clearScopeDescription(row: any, ai: Set<string>, label: string, report: string[]) {
+  if (!row.description) return;
+  if (!ai.has('description')) {
+    report.push(`${label}: kept the description that a person wrote or checked. It was not deleted.`);
+    return;
+  }
+  db.prepare("UPDATE scopes SET description = '' WHERE id = ?").run(row.id);
+  ai.delete('description');
+  report.push(`${label}: deleted the AI draft description.`);
 }
 
 const names = (ids: number[]) => ids.map((s) => `S-${s}`).join(', ');
