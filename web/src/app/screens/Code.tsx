@@ -4,6 +4,7 @@ import { link, setQuery, useSticky, type Route } from '../route';
 import { Bar, Card, IFile, IFolder, INext, Loading, Seg, SortTh } from '../ui';
 import { codeNums, type LC } from './Overview';
 import { Warnings } from './Warnings';
+import { LibraryReview } from './LibraryReview';
 
 type Sort = 'path' | 'unc' | 'pct' | 'lib' | 'marked';
 const NAT: Record<Sort, 'ascending' | 'descending'> = { path: 'ascending', unc: 'descending', pct: 'ascending', lib: 'descending', marked: 'descending' };
@@ -190,6 +191,7 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
           <div className="q-sub">{fmt(tot.mlib)} as library, {fmt(tot.mcov)} as covered. Marks count in these totals. Open a file to add or remove them.</div>
         </Card>
       </div>
+      <LibraryReview t={t} />
       <div className="toolbar" style={{ gap: 10 }}>
         <label className="sr" htmlFor="cq">Search files</label>
         <input id="cq" className="input" style={{ flex: '1 1 240px', maxWidth: 360 }} placeholder="Search file paths" value={cq} onChange={(e) => setCq(e.target.value)} />

@@ -11,8 +11,9 @@
  *  - there is no selected run, or it has no raw requests, windows or plugin commit
  *  - the last full run is older than FULL_RUN_DAYS (7; TRACKER_FULL_RUN_DAYS changes it). This is the
  *    safety net: it tests the skipped library changes again, and makes a new full map.
- *  - a test support file changed (page objects, fixtures, step definitions, config): the script
- *    cannot see which specs use it
+ *  - a test support file changed that the script cannot map to tests (page objects, config, Cypress
+ *    support/, a hook or shared code in a step file). A Cypress step file or fixture selects only
+ *    the tests that use it (coverage/select-tests.py)
  *  - select-tests.py fails, or every spec file is selected
  */
 import fs from 'node:fs';
@@ -23,7 +24,7 @@ import type { Ctx, RunPlan } from './test-run.ts';
 
 export type Framework = 'playwright' | 'cypress';
 
-const FULL_RUN_DAYS = (() => {
+export const FULL_RUN_DAYS = (() => {
   const v = Number.parseFloat(process.env.TRACKER_FULL_RUN_DAYS ?? '');
   return v > 0 ? v : 7;
 })();
@@ -134,4 +135,15 @@ export async function selectRun(p: ProjectConfig, fw: Framework, to: string, mod
   };
   const why = `partial run: ${plan.files.length} of ${allFiles.size} spec files (${sel.selected} tests touch the changed code); ${added.length} new library change${added.length === 1 ? '' : 's'} not tested again (${untested.length} since the last full run)`;
   return { plan, why };
+}
+
+/** The library changes not tested again in the selected run of each tool, and the date of its last full run. */
+export function untestedChanges(p: ProjectConfig): Record<Framework, { untested: Untested[]; fullRunAt: string | null; run: string } | null> & { fullRunDays: number } {
+  const one = (fw: Framework) => {
+    const run = p.runs[fw];
+    if (!run) return null;
+    const info = readJson(path.join(ROOT, run.dir, 'run-info.json'));
+    return { untested: Array.isArray(info?.untested) ? info.untested : [], fullRunAt: fullRunDate(info)?.toISOString() ?? null, run: run.dir };
+  };
+  return { playwright: one('playwright'), cypress: one('cypress'), fullRunDays: FULL_RUN_DAYS };
 }

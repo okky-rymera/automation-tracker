@@ -22,17 +22,24 @@ the script finds each function at the run commit by name and takes the tests tha
 Startup code changes select every test that ran that code, which is often all tests. With
 --startup-shortcut, startup code that only got new simple lines (one more add_action()) and
 new statements outside functions (a new constant or require) select no test. That shortcut misses real effects, so use it only to compare.
-When a Playwright file outside the specs folder changed (page objects, fixtures, config), all
-tests are selected, because the script cannot see which specs use it.
+When a test file outside the spec files changed (page objects, config, helpers), all tests are
+selected, because the script cannot see which specs use it. Two exceptions, when the run saved the
+step patterns of each test (Cypress, coverage/cypress-windows.py): a step file selects the tests that
+used a step whose call changed, and a fixture selects the tests whose spec or step call names it.
+When the script is not sure (a hook, a changed helper, a fixture named in a support file), it still
+selects all tests.
 
 Other changes (JS, CSS, built files, composer and package files) are listed as "not mapped":
 no coverage data covers them, so only a full run checks them.
 New functions and changed functions that no test ran select no test. They are listed, because
 they show code that needs a test.
 """
+import bisect
+import difflib
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -88,13 +95,21 @@ def is_doc(path):
     return base.endswith(('.md', '.txt', '.example')) or base in ('license', '.gitignore', '.prettierrc', '.eslintrc', '.editorconfig')
 
 
+SPEC_NAME = re.compile(r'(\.feature|\.(spec|test)\.[cm]?[jt]sx?)$')
+
+
+def is_spec_file(path):
+    """A test file in the specs folder. Other files there (Cypress step files next to the
+    .feature files, Playwright helpers) are support files."""
+    return in_dir(path, pw_dir) and bool(SPEC_NAME.search(path))
+
+
 def is_support(path):
-    """A Playwright file outside the specs folder: page objects, fixtures, helpers, config."""
+    """A test file outside the spec files: page objects, fixtures, step files, helpers, config."""
     if is_doc(path):
         return False
     if pw_root:
-        # The specs folder is inside the test folder: a spec file is not a support file.
-        return path.startswith(pw_root + '/') and not in_dir(path, pw_dir)
+        return path.startswith(pw_root + '/') and not is_spec_file(path)
     # The Playwright folder is the repo itself: only the Playwright config and package files count.
     return os.path.basename(path).startswith('playwright.config.') or path in ('package.json', 'package-lock.json')
 
@@ -150,7 +165,7 @@ selected = defaultdict(set)  # run test ID -> reasons
 spec_changes, support_changes, php_files, not_mapped = [], [], [], []
 for status, old_path, new_path in changes:
     path = new_path if status != 'D' else old_path
-    if (in_dir(path, pw_dir) or in_dir(old_path, pw_dir)) and not is_support(path) and pw_dir:
+    if (is_spec_file(path) or is_spec_file(old_path)) and pw_dir:
         spec_changes.append((status, old_path, new_path))
     elif is_support(path):
         support_changes.append(path)
@@ -167,9 +182,296 @@ for status, old_path, new_path in spec_changes:
         for t in tests_of_spec.get(rel, ()):
             selected[t].add(f'spec file changed: {rel}')
 
+# Cypress step files and fixtures: select only the tests that use them (when the run saved the step
+# patterns of each test, coverage/cypress-windows.py). Other support files select all tests.
+STEP_CALL = re.compile(r'\b(Given|When|Then|Step|defineStep|Before|After|BeforeAll|AfterAll|BeforeStep|AfterStep)\s*\(')
+HOOKS = {'Before', 'After', 'BeforeAll', 'AfterAll', 'BeforeStep', 'AfterStep'}
+# New top-level code that cannot change an old step: a new declaration. Anything else (a call such
+# as a mocha beforeEach, or code that runs when the file loads) can change every test.
+DECLARATION = re.compile(r'^(export\s+)?(async\s+)?(function\b|const\b|let\b|var\b|class\b|import\b)')
+REGEX_BEFORE = set('(,=:[!&|?{};+-*%<>~^')
+
+
+def skip_token(text, i):
+    """When text[i] starts a string, template literal, regex literal or comment: the index after it.
+    Else None. Returns len(text) + 1 for a token that does not end (the file cannot be read safely)."""
+    n, c = len(text), text[i]
+    if c in '\'"':
+        j = i + 1
+        while j < n and text[j] != c:
+            if text[j] == '\n':
+                return n + 1
+            j += 2 if text[j] == '\\' else 1
+        return j + 1 if j < n else n + 1
+    if c == '`':
+        j, inner = i + 1, 0
+        while j < n:
+            if text[j] == '\\':
+                j += 2
+                continue
+            if text.startswith('${', j):
+                inner += 1
+                j += 2
+                continue
+            if text[j] == '}' and inner:
+                inner -= 1
+            elif text[j] == '`' and not inner:
+                return j + 1
+            j += 1
+        return n + 1
+    if text.startswith('//', i):
+        j = text.find('\n', i)
+        return n if j < 0 else j
+    if text.startswith('/*', i):
+        j = text.find('*/', i + 2)
+        return n + 1 if j < 0 else j + 2
+    if c == '/':
+        k = i - 1
+        while k >= 0 and text[k] in ' \t\r\n':
+            k -= 1
+        if k < 0 or text[k] in REGEX_BEFORE:
+            j, in_class = i + 1, False
+            while j < n and text[j] != '\n':
+                if text[j] == '\\':
+                    j += 2
+                    continue
+                if text[j] == '[':
+                    in_class = True
+                elif text[j] == ']':
+                    in_class = False
+                elif text[j] == '/' and not in_class:
+                    return j + 1
+                j += 1
+            return n + 1
+    return None
+
+
+def call_end(text, i):
+    """Index after the ")" that closes the "(" at text[i], or None when it does not close."""
+    depth, n = 0, len(text)
+    while i < n:
+        k = skip_token(text, i)
+        if k is not None:
+            if k > n:
+                return None
+            i = k
+            continue
+        c = text[i]
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def first_arg(text, i):
+    """The first argument of a step call when it is a string or regex literal, as its source text
+    (a regex keeps its backslashes, as RegExp.source does). Else None."""
+    j = i
+    while j < len(text) and text[j].isspace():
+        j += 1
+    if j >= len(text) or text[j] not in '\'"`/':
+        return None
+    end = skip_token(text, j)
+    if end is None or end > len(text):
+        return None
+    body = text[j + 1:end - 1]
+    if text[j] == '/':
+        return body
+    if text[j] == '`' and '${' in body:
+        return None
+    return re.sub(r'\\(.)', r'\1', body)
+
+
+def top_level(text):
+    """The code at depth 0, without comments, split into statements: one per line at depth 0, with
+    a block ({…}, (…)) that spans lines kept in its statement. White space becomes one space. None when the
+    file cannot be read safely."""
+    out, cur, depth, i, n = [], [], 0, 0, len(text)
+    while i < n:
+        k = skip_token(text, i)
+        if k is not None:
+            if k > n:
+                return None
+            tok = text[i:k]
+            if not tok.startswith(('//', '/*')):
+                cur.append(tok)
+            i = k
+            continue
+        c = text[i]
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth -= 1
+        if c == '\n' and depth <= 0:
+            line = ' '.join(''.join(cur).split())
+            if line:
+                out.append(line)
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    line = ' '.join(''.join(cur).split())
+    if line:
+        out.append(line)
+    return out
+
+
+def token_starts(text):
+    """Start and end of each string, template, regex literal and comment. None when one does not end."""
+    spans, i, n = [], 0, len(text)
+    while i < n:
+        k = skip_token(text, i)
+        if k is None:
+            i += 1
+            continue
+        if k > n:
+            return None
+        spans.append((i, k))
+        i = k
+    return spans
+
+
+def step_blocks(text):
+    """(blocks, outside, hooks) of a step file: {pattern: call text}, the statements outside the
+    calls (top_level), and the hook calls. None when the file cannot be read safely."""
+    spans = token_starts(text)
+    if spans is None:
+        return None
+    starts = [a for a, _ in spans]
+
+    def in_token(i):
+        k = bisect.bisect_right(starts, i) - 1
+        return k >= 0 and spans[k][0] <= i < spans[k][1]
+
+    blocks, hooks, outside, pos = {}, [], [], 0
+    for m in STEP_CALL.finditer(text):
+        if m.start() < pos or in_token(m.start()):
+            continue  # inside an earlier call, a string or a comment
+        end = call_end(text, m.end() - 1)
+        if end is None:
+            return None
+        outside.append(text[pos:m.start()])
+        body = text[m.start():end]
+        if m.group(1) in HOOKS:
+            hooks.append(body)
+        else:
+            pat = first_arg(text, m.end())
+            if pat is None:
+                return None  # a step with a pattern that is not a literal
+            blocks[pat] = body
+        pos = end
+    outside.append(text[pos:])
+    rest = top_level('\n'.join(outside))
+    if rest is None:
+        return None
+    # The ";" after a step call is an empty statement, not code.
+    return blocks, [x for x in rest if x.strip(' ;')], hooks
+
+
+def changed_patterns(path):
+    """Step patterns whose definition changed in a step file, or None when the change can touch any test."""
+    a, b = show(old, path), show(new, path)
+    if a is None and b is None:
+        return None
+    pa = step_blocks(a) if a is not None else ({}, [], [])
+    pb = step_blocks(b) if b is not None else ({}, [], [])
+    if pa is None or pb is None:
+        return None
+    (ba, oa, ha), (bb, ob, hb) = pa, pb
+    if ha != hb:
+        return None  # a hook changed: it can run for any test
+    if not ba and not bb:
+        return None  # not a step file
+    if a is None or b is None:
+        # A new or deleted step file reaches other tests only through its own steps, unless it
+        # defines parameter types, which change how other steps read.
+        if 'defineParameterType' in (a or b):
+            return None
+    elif oa != ob:
+        # Only whole new declarations (a new helper or constant) are safe: an old step that uses
+        # them changed too, and it selects its tests. A changed or removed statement, or new code
+        # that runs (a call, a mocha beforeEach), can change any step.
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, oa, ob, autojunk=False).get_opcodes():
+            if op == 'equal':
+                continue
+            if op != 'insert' or not all(DECLARATION.match(x) for x in ob[j1:j2]):
+                return None
+    return {k for k in set(ba) | set(bb) if ba.get(k) != bb.get(k)}
+
+
+def show(commit, path):
+    r = subprocess.run(['git', '-C', repo, 'show', f'{commit}:{path}'], capture_output=True)
+    return r.stdout.decode('utf8', 'replace') if r.returncode == 0 else None
+
+
+def tests_with_steps(patterns):
+    return {t for t, w in all_tests.items() if set(w.get('steps') or ()) & patterns}
+
+
+JS_FILE = ('.js', '.ts', '.mjs', '.cjs', '.jsx', '.tsx')
+
+
+def fixture_tests(path):
+    """Tests that use a fixture file: spec files or step calls that name it. None when nothing names
+    it, or when another file names it (a support file, a config, another fixture): then the script
+    cannot see which tests load it."""
+    tail = path.split('/fixtures/', 1)[1]
+    base = os.path.basename(tail)
+    names = {tail, base, os.path.splitext(tail)[0], os.path.splitext(base)[0]}
+    names = {n for n in names if len(n) >= 4}  # a very short name would match too much
+    found, named = set(), False
+    for spec, ids in tests_of_spec.items():
+        text = show(new, os.path.join(pw_root, spec) if pw_root else spec) or ''
+        if any(n in text for n in names):
+            found |= ids
+            named = True
+    for f in git('ls-tree', '-r', '--name-only', new, '--', pw_root or '.').split('\n'):
+        if not f or f == path or is_spec_file(f) or is_doc(f):
+            continue
+        text = show(new, f)
+        if text is None or not any(n in text for n in names):
+            continue
+        if not f.endswith(JS_FILE):
+            return None
+        parsed = step_blocks(text)
+        if parsed is None:
+            return None
+        blocks, outside, hooks = parsed
+        if not blocks or any(n in x for x in outside for n in names) or any(n in h for h in hooks):
+            return None  # a helper or support file uses it
+        found |= tests_with_steps({k for k, v in blocks.items() if any(n in v for n in names)})
+        named = True
+    return found if named else None
+
+
+has_steps = bool(all_tests) and all('steps' in w for w in all_tests.values())
+mapped_support = []
+for path in list(support_changes):
+    if not has_steps:
+        break
+    if '/fixtures/' in path:
+        ids = fixture_tests(path)
+        why = f'fixture changed: {path}'
+    elif path.endswith(JS_FILE):
+        pats = changed_patterns(path)
+        ids = None if pats is None else tests_with_steps(pats)
+        why = f'step definitions changed: {path}'
+    else:
+        ids = None
+    if ids is None:
+        continue
+    support_changes.remove(path)
+    mapped_support.append(path)
+    for t in ids:
+        selected[t].add(why)
+
 if support_changes:
     for t in all_tests:
-        selected[t].add('Playwright support file changed')
+        selected[t].add('test support file changed')
 
 
 # 2. PHP files: compare the fingerprint of each function.
@@ -263,6 +565,7 @@ result = {
     'tests': {t: {'title': all_tests[t]['title'], 'reasons': sorted(r)} for t, r in selected.items() if t in all_tests},
     'specChanges': [{'status': s, 'old': o, 'new': n} for s, o, n in spec_changes],
     'supportChanges': support_changes,
+    'mappedSupportChanges': mapped_support,
     'phpFiles': len(php_files),
     'changedFunctions': changed_functions,
     'changedWithoutTests': [c for c in changed_functions if c['change'] != 'removed' and c['tests'] == 0],

@@ -32,6 +32,8 @@ started = {}     # (block, test case started id) -> testCaseStarted
 statuses = {}    # (block, test case started id) -> step statuses
 finished = {}    # (block, test case started id) -> testCaseFinished
 last_step = {}   # (block, test case started id) -> time of the last finished step
+step_defs = {}   # (block, step definition id) -> its pattern (the messages give no source file)
+case_steps = {}  # (block, test case id) -> step definition ids it used
 
 
 def walk(children, rule):
@@ -66,8 +68,11 @@ with open(src) as fh:
                 walk(m['gherkinDocument']['feature'].get('children', []), None)
         elif 'pickle' in m:
             pickles[m['pickle']['id']] = m['pickle']
+        elif 'stepDefinition' in m:
+            step_defs[(block, m['stepDefinition']['id'])] = m['stepDefinition'].get('pattern', {}).get('source', '')
         elif 'testCase' in m:
             cases[m['testCase']['id']] = m['testCase']['pickleId']
+            case_steps[(block, m['testCase']['id'])] = [i for s in m['testCase'].get('testSteps', []) for i in s.get('stepDefinitionIds', [])]
         elif 'testCaseStarted' in m:
             started[(block, m['testCaseStarted']['id'])] = m['testCaseStarted']
         elif 'testStepFinished' in m:
@@ -116,6 +121,9 @@ for sid, st in started.items():
         'start': seconds(st['timestamp']),
         # The run stopped during this attempt: it ends at its last finished step.
         'end': seconds(end['timestamp']) if end else last_step.get(sid, seconds(st['timestamp'])),
+        # The patterns of the step definitions the test used. coverage/select-tests.py selects the
+        # test when the definition of one of them changed.
+        'steps': sorted({step_defs[(sid[0], i)] for i in case_steps.get((sid[0], st['testCaseId']), []) if step_defs.get((sid[0], i))}),
     })
 
 windows.sort(key=lambda w: w['start'])

@@ -213,12 +213,17 @@ When the code changed, the sync runs only the spec files that the change touches
 4. `coverage/merge-run.py` adds the other tests from the selected run: their windows, and their requests with the line numbers moved to the new commit. Lines in changed code are left out. Each old site gets its own slot and a made-up port (900000 + slot), so old requests match only old tests.
 5. `analyze.py` makes the report of all tests, as for a full run.
 
+The Code screen shows the library changes that are not tested again, and the functions that the AI mapping called library code (with a Remove button).
+
 The sync makes a full run in these cases:
 
 - the sync asks for "always"
 - there is no selected run, or it has no requests, windows or plugin commit
 - the last full run is 7 days old or older (`TRACKER_FULL_RUN_DAYS` changes it). This tests the library changes again, and clears the `untested` list.
-- a test support file changed (page objects, fixtures, step definitions, config): the script cannot see which specs use it
+- a test support file changed (page objects, config, Cypress `support/`): the script cannot see which specs use it. Two Cypress exceptions:
+  - A changed step file selects only the tests that used its changed steps. The run saves the step patterns of each test.
+  - A changed fixture selects the tests whose spec or step names it.
+  - A changed hook, a changed helper, or a fixture named in a support file still makes a full run.
 - the change touches every spec file, or `select-tests.py` fails
 
 ## Make coverage data

@@ -6,6 +6,7 @@ import { syncProject } from './scan.ts';
 import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBefore, sweepReviewed } from './features.ts';
 import { listMarks, markEdits } from './line-marks.ts';
 import { listDecisions, removeDecision } from './code-decisions.ts';
+import { untestedChanges } from './selection.ts';
 import { testSource } from './test-source.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
@@ -294,6 +295,8 @@ app.post('/api/projects/:id/line-marks', edit((req) => markEdits.mark(proj(req),
 app.delete('/api/projects/:id/line-marks', edit((req) => markEdits.unmark(proj(req), req.body)));
 // Library decisions on functions that no test runs (server/code-decisions.ts). The AI skill adds them; a person can remove one.
 app.get('/api/projects/:id/code-decisions', (req, res) => res.json(listDecisions(proj(req).id)));
+// Library changes that partial runs did not test again, until the next full run (server/selection.ts).
+app.get('/api/projects/:id/untested', (req, res) => res.json(untestedChanges(proj(req))));
 app.delete('/api/projects/:id/code-decisions', edit((req) => {
   const { file, function: fn } = req.body ?? {};
   if (typeof file !== 'string' || typeof fn !== 'string') throw new EditError('Give "file" and "function"');
