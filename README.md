@@ -153,9 +153,12 @@ What a sync does:
    - likely renamed tests: a new title or file gives a new test ID, and the links stay on the old ID. Click "Move links to the new test" to move them.
    - feature code that is not in the code now (file or function gone)
    - features to review: their linked tests or their code changed
-6. It runs the tests, by the "Tests" choice:
+6. It runs the Playwright tests, by the "Tests" choice:
    - "when code changed" (auto): when PHP code or Playwright files changed since the commit of the selected Playwright run.
    - "always" or "never".
+7. It runs the Cypress tests, by the same "Tests" choice. "When code changed" means: PHP code or files in the Cypress project folder (specs, step definitions, support files, packages) changed since the commit of the selected Cypress run. A full Cypress run takes about 100 minutes. See "Cypress in the sync".
+
+The sync ends as "failed" when a test run ran but was not selected. The other run is still saved.
 
 The test run starts the tracker's echowp test site, and uses 1 worker and `ECHOWP=false`, also when the copy's `.env` says `ECHOWP=true`. It empties `coverage-data/raw/`, runs the baseline page loads, runs the tests, and writes a new run folder in `data/projects/<id>/runs/`. The app selects the new run only when the report has tests and some tests passed. Else the old run stays selected. Only one test run can run at a time.
 
@@ -164,6 +167,59 @@ The tests are skipped (the sync still ends as done) when echowp is not installed
 Each command of a sync runs without a terminal, with `coverage/no-sudo/` first in `PATH`. That folder holds stubs for `sudo`, `su`, `doas`, `pkexec` and `echowp` that only fail. So new trunk code cannot ask for a password.
 
 To see the change report between any two commits: `npm run -s project -- changes <id> <old commit> <new commit> [--json]`.
+
+### Cypress in the sync
+
+The Cypress run (`server/cypress-run.ts`) uses its own echowp sites, `cy-1` … `cy-4` in the profile `cypress`. The Playwright sites do not change.
+
+Cypress runs one test at a time. So the job starts one Cypress process for each site, at the same time. The number of sites is the same as for Playwright: half the CPUs, at most 4. `TRACKER_CYPRESS_WORKERS` changes it (for trials). The job splits the spec files over the sites by their time in the last selected Cypress run. The port of each request names its site (`sites.json` in the run folder), so each request goes to a test of its own site.
+
+Each Cypress process runs in its own hidden screen, through `xvfb-run -d` (package `xvfb`). Without it, all processes use Xvfb display 99: the process that ends first closes the screen, and the others stop in the middle of a spec. When `xvfb-run` is missing, the job uses 1 site.
+
+WARNING: Some Cypress tests delete the plugin through WordPress. On a site where the plugin is a link to the tracker's copy, the delete removes the copy. On 21 Nov 2026 this deleted the copy of wwp. So the Cypress site never uses a link.
+
+Before each Cypress run, the job does these steps:
+
+1. It installs the Cypress packages when `package.json` or the lock file changed.
+2. It starts the sites with a clean database.
+3. On each site, it deletes the site's plugin folder and copies the plugin from the tracker's copy, without `.git`, `tests` and `node_modules`. It puts the marker file `.tracker-site-copy` in the site's copy.
+4. It gets the Cypress Helper Plugin from GitHub trunk (`gh api`, so `gh` must be logged in). It turns the Test Helper Plugin off, because both plugins declare the same PHP function.
+5. It sets the store and debug settings from the literal `wp option update` and `wp config set` lines of `cypress/support/wpCliSetup.sh`. It skips lines with `$` and logs them.
+
+The run leaves out these tests:
+
+- scenarios with a tag that starts with `@integration`, or the tag `@zip-test` (they need other paid plugins or a GitHub token)
+- spec files in a top-level `Integration/` folder
+- spec files with a step that deletes or installs a plugin (for wwp: "Show activation status")
+
+The run is not selected in these cases:
+
+- a site's plugin folder is a link, or the marker is gone after the run (a test deleted or replaced the plugin)
+- the tracker's copy lost files
+- Cypress could not build a spec file
+- no scenario passed
+
+For a short trial, set `TRACKER_CYPRESS_SPECS` to a comma-separated list of spec files, relative to the Cypress project folder.
+
+Each site has its own log (`full-run-cy-1.log` …) and Cucumber messages file (`cucumber-messages-cy-1.ndjson` …) in the run folder. After the baseline page loads, each site must have recorded lines of the plugin. Else the job stops with the reason.
+
+### Partial runs (test selection)
+
+When the code changed, the sync runs only the spec files that the change touches (`server/selection.ts`). The other tests keep their data from the selected run. This is the same for Playwright and Cypress.
+
+1. `coverage/select-tests.py` compares the selected run's commit with the new commit. A changed function selects the tests that ran it in that run.
+2. A changed function that 90% or more of the tests ran is library code (startup, hooks, glue). It selects no test. The run saves it in `run-info.json` (`untested`, with the commit) until the next full run. The sync result shows the count. `TRACKER_LIBRARY_SHARE` changes the limit.
+3. The job runs the selected spec files. With no selected spec file, it makes only the baseline page loads.
+4. `coverage/merge-run.py` adds the other tests from the selected run: their windows, and their requests with the line numbers moved to the new commit. Lines in changed code are left out. Each old site gets its own slot and a made-up port (900000 + slot), so old requests match only old tests.
+5. `analyze.py` makes the report of all tests, as for a full run.
+
+The sync makes a full run in these cases:
+
+- the sync asks for "always"
+- there is no selected run, or it has no requests, windows or plugin commit
+- the last full run is 7 days old or older (`TRACKER_FULL_RUN_DAYS` changes it). This tests the library changes again, and clears the `untested` list.
+- a test support file changed (page objects, fixtures, step definitions, config): the script cannot see which specs use it
+- the change touches every spec file, or `select-tests.py` fails
 
 ## Make coverage data
 
@@ -185,9 +241,9 @@ Setup requests do not count as tested code. These are setup requests: the Test H
 
 NOTE: Some Cypress tests make their test data through the WooCommerce or plugin REST API (`/wp-json/wc/`, `/wp-json/wholesale/`). These requests count as tested code, because API tests use the same routes. So the Cypress run can show more tested code than the Cypress tests really check.
 
-PHP files that no request loaded still count. `analyze.py` counts their runnable lines without running the code (`coverage/runnable-lines.php`, through `coverage/php-xdebug.sh`), and all of those lines count as never run.
+The coverage script records only the lines that ran. `analyze.py` counts the runnable lines of each plugin file without running the code (`coverage/runnable-lines.php`, through `coverage/php-xdebug.sh`). The helper uses the tracker's coverage PHP (the same PHP version as the test sites) when it exists, else Local WP's PHP. Lines that ran always count as runnable. PHP files that no request loaded still count: all of their lines count as never run.
 
-The coverage script turns off OPcache for each request. With OPcache on, Xdebug does not report the skipped lines inside functions that ran.
+OPcache (the PHP code cache) stays on while the script records. Before 21 Nov 2026 the script turned it off for each request, and each request was about 2.2 times slower. The coverage ini turns off the OPcache optimizer (`opcache.optimization_level=0`), checks the file times on each request, and resolves links again (`opcache.revalidate_path=1`). Without the last setting, a new Cypress site kept running the plugin code from the tracker's copy (through echowp's link) after the job put a real copy in its place. With OPcache on, some argument lines of a call over more lines do not show as run, although the call ran (about 0.2% of the lines in the wwp Playwright run). The functions that each test ran do not change.
 
 Test IDs (`PW-…`, `CY-…`) come from the file path and the title. A rename gives a new ID.
 

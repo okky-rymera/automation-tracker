@@ -5,6 +5,7 @@ import { ROOT, type Framework, type ProjectConfig, type RunRef } from './project
 import { db, json, now, tx } from './db.ts';
 import { SCAN_TTL_MS } from './cache.ts';
 import { isStale, marksByFile, marksVersion, repoLines } from './line-marks.ts';
+import { decisionsVersion, libraryFunctions } from './code-decisions.ts';
 
 /** One function from the analysis (coverage/analyze.py → report.json). */
 interface ReportFunction {
@@ -408,6 +409,23 @@ const markedCache = new Map<string, { key: string; base: CoverageData['lines']; 
  */
 function withMarks(project: ProjectConfig, view: View, base: CoverageData): CoverageData {
   const marks = marksByFile(project.id);
+  // Library decisions on whole functions (code-decisions.ts) count as library marks on each runnable
+  // line of the function. A person's mark on the same line wins.
+  for (const [file, names] of libraryFunctions(project.id)) {
+    const fl = base.lines[file];
+    const fns = base.functionsByFile.get(file);
+    if (!fl || !fns) continue;
+    const texts = repoLines(project, file);
+    if (!texts) continue;
+    const runnable = [...stateMap(fl).keys()];
+    const list = marks.get(file) ?? [];
+    const have = new Set(list.map((m) => m.line));
+    for (const f of fns) {
+      if (!names.has(f.function)) continue;
+      for (const n of runnable) if (n >= f.start && n <= f.end && !have.has(n) && texts[n - 1] !== undefined) list.push({ file, line: n, kind: 'library', text: texts[n - 1] });
+    }
+    if (list.length) marks.set(file, list);
+  }
   if (!marks.size) return base;
   const mtime = (f: string) => {
     try {
@@ -416,7 +434,7 @@ function withMarks(project: ProjectConfig, view: View, base: CoverageData): Cove
       return 0;
     }
   };
-  const key = `${marksVersion()}|${[...marks.keys()].map((f) => `${f}:${mtime(f)}`).join('|')}`;
+  const key = `${marksVersion()}|${decisionsVersion()}|${[...marks.keys()].map((f) => `${f}:${mtime(f)}`).join('|')}`;
   const cacheKey = `${project.id}:${view}`;
   const hit = markedCache.get(cacheKey);
   // base.lines is the same object while the run is not imported again (a new label copies only the top object).

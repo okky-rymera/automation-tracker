@@ -5,6 +5,7 @@ import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRep
 import { syncProject } from './scan.ts';
 import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBefore, sweepReviewed } from './features.ts';
 import { listMarks, markEdits } from './line-marks.ts';
+import { listDecisions, removeDecision } from './code-decisions.ts';
 import { testSource } from './test-source.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
@@ -291,6 +292,14 @@ app.post('/api/projects/:id/revert', edit((req) => edits.revert(P(req), req.body
 app.get('/api/projects/:id/line-marks', (req, res) => res.json(listMarks(proj(req))));
 app.post('/api/projects/:id/line-marks', edit((req) => markEdits.mark(proj(req), req.body)));
 app.delete('/api/projects/:id/line-marks', edit((req) => markEdits.unmark(proj(req), req.body)));
+// Library decisions on functions that no test runs (server/code-decisions.ts). The AI skill adds them; a person can remove one.
+app.get('/api/projects/:id/code-decisions', (req, res) => res.json(listDecisions(proj(req).id)));
+app.delete('/api/projects/:id/code-decisions', edit((req) => {
+  const { file, function: fn } = req.body ?? {};
+  if (typeof file !== 'string' || typeof fn !== 'string') throw new EditError('Give "file" and "function"');
+  if (!removeDecision(proj(req), file, fn)) throw new EditError(`No decision for ${file} ${fn}`);
+  return { ok: true };
+}));
 app.post(SCREENSHOT_UPLOAD, edit((req) => edits.addScreenshot(P(req), req.params.fid, req.body)));
 app.patch('/api/projects/:id/screenshots/:sid', edit((req) => edits.updateScreenshot(P(req), req.params.sid, req.body)));
 app.delete('/api/projects/:id/screenshots/:sid', edit((req) => edits.deleteScreenshot(P(req), req.params.sid)));

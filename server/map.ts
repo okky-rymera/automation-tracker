@@ -42,6 +42,17 @@ import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOP
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
+import { addLibrary } from './code-decisions.ts';
+import { execFileSync } from 'node:child_process';
+
+/** The commit of the plugin copy now, or null. */
+function headCommit(p: ProjectConfig): string | null {
+  try {
+    return execFileSync('git', ['-C', p.path, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 type Kind = 'playwright' | 'cypress' | 'code';
 const KINDS: Kind[] = ['playwright', 'cypress', 'code'];
@@ -177,20 +188,37 @@ function next(p: ProjectConfig, kind: Kind) {
   });
 }
 
-/** PHP files that no code area holds yet, most untested functions first. */
+/**
+ * PHP files with code that no test runs and that is not sorted yet, most such functions first.
+ * A file is a candidate when no code area holds it, or when it changed since its code area was
+ * processed (a sync brought new code). "open" functions: no test runs them, no feature holds them,
+ * and they are not library code (a library decision, server/code-decisions.ts, or a library mark).
+ */
 function nextCode(p: ProjectConfig) {
-  const inAreas = new Set(units(p.id, 'code').flatMap((u) => u.files));
+  const areas = units(p.id, 'code');
+  const changedAreas = new Set(areas.filter((u) => u.status === 'done' && u.hash && hashFiles(p, u.files) !== u.hash).flatMap((u) => u.files));
+  const inAreas = new Set(areas.flatMap((u) => u.files));
   const php = (db.prepare("SELECT path FROM source_files WHERE project_id = ? AND lang = 'php' ORDER BY path").all(p.id) as any[]).map((r) => r.path as string);
   const view = resolveView(p, 'both');
   const cov = view && loadCoverage(p, view);
+  // Code that a feature holds: whole files, and functions by file.
+  const held = new Map<string, Set<string>>();
+  for (const r of db.prepare('SELECT file, function FROM feature_code WHERE project_id = ? AND removed = 0').all(p.id) as any[]) {
+    const s = held.get(r.file) ?? new Set<string>();
+    s.add(r.function ?? '');
+    held.set(r.file, s);
+  }
   const list = php
-    .filter((f) => !inAreas.has(f))
+    .filter((f) => !inAreas.has(f) || changedAreas.has(f))
     .map((f) => {
       const fns = cov?.functionsByFile.get(f) ?? [];
       const by = (s: string) => fns.filter((x) => x.state === s).length;
-      return { file: f, functions: fns.length, tested: by('tested'), notTested: fns.length - by('tested') - by('library'), never: by('never') };
+      const h = held.get(f);
+      const open = fns.filter((x) => x.state !== 'tested' && x.state !== 'library' && !(h && (h.has('') || h.has(x.function)))).length;
+      return { file: f, functions: fns.length, tested: by('tested'), notTested: fns.length - by('tested') - by('library'), never: by('never'), open, ...(changedAreas.has(f) ? { changedSinceArea: true } : {}) };
     })
-    .sort((a, b) => b.notTested - a.notTested || a.file.localeCompare(b.file));
+    .filter((x) => !x.changedSinceArea || x.open > 0)
+    .sort((a, b) => b.open - a.open || b.notTested - a.notTested || a.file.localeCompare(b.file));
   out({
     kind: 'code',
     coverage: cov?.label ?? null,
@@ -448,6 +476,12 @@ interface Payload {
    */
   unit: { kind: Kind | 'update' | 'answer'; ref: string; files?: string[]; note?: string };
   features: FeatureIn[];
+  /**
+   * Functions that no test runs and that are library code (startup, helpers, glue), not feature code
+   * (server/code-decisions.ts). The coverage data then counts their lines as library, and "next code"
+   * does not offer them again. Each needs a reason.
+   */
+  library?: { file: string; function: string; reason: string }[];
 }
 
 const str = (v: unknown, max = 20000) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -472,7 +506,14 @@ function apply(p: ProjectConfig, file: string | undefined) {
   const kind = update ? unit.kind : kindOf(unit.kind);
   const ref = str(unit.ref, 500);
   if (!ref) fail('unit.ref is empty');
-  if (!Array.isArray(body.features) || !body.features.length) fail('features is empty. Use the skip command for a unit with no feature.');
+  const library = Array.isArray(body.library) ? body.library : [];
+  if (body.library !== undefined && !Array.isArray(body.library)) fail('library must be a list');
+  if (!Array.isArray(body.features)) body.features = [];
+  if (!body.features.length && !(kind === 'code' && library.length)) fail('features is empty. Use the skip command for a unit with no feature (a code unit can send only "library").');
+  for (const it of library) {
+    const known = it && typeof it.file === 'string' ? functionNames(p, it.file) : null;
+    if (known && !known.has(String(it.function))) fail(`library: ${it.file} has no function "${it.function}" in the coverage run. Use the names that "code" lists. Nothing was saved.`);
+  }
 
   // Files the unit read: the test file, or the code files of the area.
   let files = (unit.files ?? []).map((f) => str(f, 500)).filter(Boolean);
@@ -530,6 +571,10 @@ function apply(p: ProjectConfig, file: string | undefined) {
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
         for (const x of list<ShotIn>(inF.screenshots, 'screenshots')) writeScreenshot(p, fid, x, scopeIds, report);
         if (totalChanges() > before) changed.add(fid);
+      }
+      if (library.length) {
+        const n = addLibrary(p, library, 'ai', headCommit(p));
+        report.push(`Library code: ${n} function${n === 1 ? '' : 's'} (${library.map((l) => `${l.file} ${l.function}`).join(', ')}).`);
       }
       // The review state in the app: the AI changed these features after their last review.
       const stamp = now();

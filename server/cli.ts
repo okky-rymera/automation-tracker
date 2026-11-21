@@ -118,6 +118,9 @@ if (cmd === 'add') {
   console.log(`Sync ${syncId} of ${id} started.`);
   const r = await done;
   if (r.report) console.log(reportText(r.report));
+  for (const [name, t] of [['Playwright', r.tests], ['Cypress', r.cypressTests]] as const) {
+    if (t) console.log(`${name}: ${t.ran ? `${t.passed ?? 0} passed, ${t.failed ?? 0} failed, ${t.skipped ?? 0} skipped${t.selected ? ' (run selected)' : ` (run not used: ${t.reason})`}` : `not run (${t.reason})`}`);
+  }
   console.log(`Sync ${syncId}: ${r.status}${r.error ? ' - ' + r.error : ''}`);
   if (r.status !== 'done') process.exitCode = 1;
 } else if (cmd === 'ai-update') {

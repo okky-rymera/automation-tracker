@@ -2,7 +2,14 @@
 """Lists the tests to run again after the plugin code changed (test impact analysis).
 
 Usage: python3 select-tests.py <plugin repo> <run dir> <old commit> <new commit>
-           [--playwright-dir tests/Playwright/specs] [--exclude a,b,c] [--startup-shortcut] [--json]
+           [--playwright-dir tests/Playwright/specs] [--tests-root <folder>] [--library-share 0.9]
+           [--exclude a,b,c] [--startup-shortcut] [--json]
+
+--playwright-dir is the folder of the spec files (for Cypress: the .feature folder). --tests-root
+is the folder that the test file paths in report.json are relative to (default: the parent of
+--playwright-dir; for Cypress: the folder of cypress.config.*).
+--library-share 0.9: a changed function (or code outside functions) that 90% or more of the
+tests ran is library code. It selects no test. It is listed in "libraryChanges".
 
 The run dir holds report.json from analyze.py. Its "functions" list says which tests ran each function.
 
@@ -50,6 +57,16 @@ if '--playwright-dir' in args:
     i = args.index('--playwright-dir')
     pw_dir = args[i + 1].strip('/')
     del args[i:i + 2]
+tests_root = None
+if '--tests-root' in args:
+    i = args.index('--tests-root')
+    tests_root = args[i + 1].strip('/')
+    del args[i:i + 2]
+library_share = None
+if '--library-share' in args:
+    i = args.index('--library-share')
+    library_share = float(args[i + 1])
+    del args[i:i + 2]
 # The project's own list of folders to leave out (as analyze.py --exclude), else exclude-dirs.json.
 if '--exclude' in args:
     i = args.index('--exclude')
@@ -58,17 +75,26 @@ if '--exclude' in args:
 repo, run_dir, old, new = args
 # report.json test files are relative to the Playwright folder: the parent of the specs folder.
 # When the specs folder is at the top of the repo, that is the repo itself.
-pw_root = os.path.dirname(pw_dir)
+pw_root = tests_root if tests_root is not None else os.path.dirname(pw_dir)
 
 
 def in_dir(path, folder):
     return folder == '' or path.startswith(folder + '/')
 
 
+def is_doc(path):
+    """Documentation and example files in the test folder: they do not change what a test does."""
+    base = os.path.basename(path).lower()
+    return base.endswith(('.md', '.txt', '.example')) or base in ('license', '.gitignore', '.prettierrc', '.eslintrc', '.editorconfig')
+
+
 def is_support(path):
     """A Playwright file outside the specs folder: page objects, fixtures, helpers, config."""
+    if is_doc(path):
+        return False
     if pw_root:
-        return path.startswith(pw_root + '/')
+        # The specs folder is inside the test folder: a spec file is not a support file.
+        return path.startswith(pw_root + '/') and not in_dir(path, pw_dir)
     # The Playwright folder is the repo itself: only the Playwright config and package files count.
     return os.path.basename(path).startswith('playwright.config.') or path in ('package.json', 'package-lock.json')
 
@@ -128,7 +154,7 @@ for status, old_path, new_path in changes:
         spec_changes.append((status, old_path, new_path))
     elif is_support(path):
         support_changes.append(path)
-    elif path.startswith('tests/'):
+    elif path.startswith('tests/') or (is_doc(path) and in_dir(path, pw_root)):
         continue  # other test tools (Cypress, PHP unit tests): not part of the Playwright run
     elif plugin_code(old_path) or plugin_code(new_path):
         php_files.append((status, old_path, new_path))
@@ -168,6 +194,11 @@ def only_new_lines(b, a):
     return not (old_st - new_st) and all(k.endswith(';') for k in added)
 
 
+def is_library(ran):
+    """True when the library limit is on and the share of tests that ran the code reaches it."""
+    return library_share is not None and bool(all_tests) and len(ran) >= library_share * len(all_tests)
+
+
 def tests_in_lines(path, start, end):
     return {t for t, files in hits.items() if any(start <= n <= end for n in files.get(path, ()))}
 
@@ -203,7 +234,10 @@ with tempfile.TemporaryDirectory() as t_old, tempfile.TemporaryDirectory() as t_
                 # Startup code (runs on every request) that only got new simple lines, for example
                 # one more add_action(). The new hook's own function shows as added, without tests.
                 change, ran = 'startup lines added', set()
-            changed_functions.append({'file': new_path, 'function': key, 'change': change, 'tests': len(ran)})
+            library = is_library(ran)
+            changed_functions.append({'file': new_path, 'function': key, 'name': name, 'change': change, 'tests': len(ran), 'library': library})
+            if library:
+                continue
             for t in ran:
                 selected[t].add(f'function {change}: {old_path} {name}')
         if (before or {}).get('top') != (after or {}).get('top'):
@@ -215,7 +249,10 @@ with tempfile.TemporaryDirectory() as t_old, tempfile.TemporaryDirectory() as t_
             only_added = startup_shortcut and bool(before) and not (old_st - new_st)
             ran = tests_in_file(old_path) if before and not only_added else set()
             change = 'added' if not before or only_added else 'removed' if not after else 'changed'
-            changed_functions.append({'file': new_path, 'function': '(code outside functions)', 'change': change, 'tests': len(ran)})
+            library = is_library(ran)
+            changed_functions.append({'file': new_path, 'function': '(code outside functions)', 'name': '(code outside functions)', 'change': change, 'tests': len(ran), 'library': library})
+            if library:
+                continue
             for t in ran:
                 selected[t].add(f'code outside functions changed: {old_path}')
 
@@ -229,6 +266,9 @@ result = {
     'phpFiles': len(php_files),
     'changedFunctions': changed_functions,
     'changedWithoutTests': [c for c in changed_functions if c['change'] != 'removed' and c['tests'] == 0],
+    'libraryChanges': [c for c in changed_functions if c.get('library') and c['change'] != 'removed'],
+    'librarySharePercent': None if library_share is None else round(library_share * 100),
+    'selectedFiles': sorted({all_tests[t]['file'] for t in selected if t in all_tests}),
     'startupLinesAdded': [c for c in changed_functions if c['change'] == 'startup lines added'],
     'notMapped': not_mapped,
 }

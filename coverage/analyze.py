@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from raw_records import plugin_lines, plugin_name, site_slots, window_of
 
@@ -89,6 +90,7 @@ features_of = {t: sorted(x[len('@feature:'):] for x in w['tags'] if x.startswith
 test_hits = defaultdict(lambda: defaultdict(set))           # test id -> file -> lines
 hits = {k: defaultdict(set) for k in ('baseline', 'setup', 'background')}
 runnable = defaultdict(set)                                 # file -> lines that can run
+has_not_run = set()  # files with "not_run" lines in a request (runs before 21 Nov 2026)
 kinds = Counter()
 with_plugin = 0  # requests that hold lines of this plugin
 for path in glob.glob(os.path.join(DATA, 'raw', '*.json')):
@@ -112,28 +114,51 @@ for path in glob.glob(os.path.join(DATA, 'raw', '*.json')):
     for f, lines in not_run.items():
         if not excluded(f):
             runnable[f].update(lines)
+            has_not_run.add(f)
 
 if kinds and not with_plugin:
     print(f'WARNING: no request holds lines of the plugin "{PLUGIN}". Check that coverage/plugins.json names it, '
           f'and that the site has it in wp-content/plugins/{PLUGIN} (run "npm run project -- coverage-config").',
           file=sys.stderr)
 
-# Files that no request loaded: count their runnable lines without running them
-# (coverage/runnable-lines.php). All those lines count as "never run".
+# The lines that can run, for every plugin file, counted without running the code
+# (coverage/runnable-lines.php). The recorder writes only the lines that ran: with
+# OPcache on, Xdebug does not report all lines that did not run. Older request files
+# also have "not_run"; those lines stay too. A line that ran always counts.
+# Files that no request loaded: all their lines count as "never run".
 never_loaded = sorted(f for f in funcs if f not in runnable)
-estimated, unknown_files = [], []
-for f in never_loaded:
+
+
+def count_runnable(f):
     out = subprocess.run([os.path.join(HERE, 'php-xdebug.sh'), os.path.join(HERE, 'runnable-lines.php'), os.path.join(plugin, f)],
                          capture_output=True, text=True).stdout
     try:
-        found = json.loads(out)
+        return json.loads(out)
     except ValueError:
-        found = {'error': out[:200]}
-    if isinstance(found, list):
-        runnable[f].update(found)
-        estimated.append(f)
-    else:
-        unknown_files.append(f)
+        return {'error': out[:200]}
+
+
+estimated, unknown_files, uncounted = [], [], []
+with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+    for f, found in zip(sorted(funcs), pool.map(count_runnable, sorted(funcs))):
+        if isinstance(found, list):
+            runnable[f].update(found)
+            if f in never_loaded:
+                estimated.append(f)
+        elif f in never_loaded:
+            unknown_files.append(f)
+        elif has_not_run:
+            # A run from before 21 Nov 2026: Xdebug listed the lines that did not run for each loaded
+            # file (a file with no such list ran all its lines), so the recorded count is complete.
+            pass
+        else:
+            uncounted.append((f, found.get('error', '') if isinstance(found, dict) else ''))
+# The recorder writes only the lines that ran. Without the runnable lines, every line of a loaded
+# file would count as run (a false 100%). Stop: a wrong number is worse than no number.
+if uncounted:
+    sys.exit('Could not count the runnable lines of loaded files, so their coverage would be wrong. '
+             'Check coverage/php-xdebug.sh (it needs the coverage PHP or Local WP\'s PHP with Xdebug):\n'
+             + '\n'.join(f'  {f}: {e[:120]}' for f, e in uncounted))
 
 tested_any = defaultdict(set)
 for t in test_hits:

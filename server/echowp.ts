@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { COVERAGE_PHP_DIR, prepareCoveragePhp, type CoveragePhpInfo } from './coverage-php.ts';
+import { COVERAGE_PHP_DIR, prepareCoveragePhp, syncCoverageIni, type CoveragePhpInfo } from './coverage-php.ts';
 import { ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, NO_SUDO, SETPRIV } from './sync.ts';
 
@@ -78,7 +78,10 @@ function currentCoveragePhp(): CoveragePhpInfo | null {
 /** The coverage PHP, made when it is missing. signal: a cancel stops the download and the Docker build. */
 async function coveragePhp(log: (l: string) => void, signal?: AbortSignal): Promise<CoveragePhpInfo> {
   const cur = currentCoveragePhp();
-  if (cur) return cur;
+  if (cur) {
+    syncCoverageIni(cur);
+    return cur;
+  }
   log('No coverage PHP yet. Make it first (a download and a Docker build, about 1 minute)…');
   return prepareCoveragePhp({ onLine: log, signal });
 }
@@ -328,6 +331,9 @@ export function serversWithoutCoverage(cov: CoveragePhpInfo): string[] {
 
 /** The test site of a sync test run: profile "test", like the plugin's own echowp runs (site-1 … site-N). */
 export const TEST_PROFILE = 'test';
+/** The site of the Cypress run of a sync (server/cypress-run.ts): cy-1 in its own profile, so the Playwright sites do not change. */
+export const CYPRESS_PROFILE = 'cypress';
+export const CYPRESS_SITE_NAME = 'cy';
 
 export interface TestSite {
   name: string;
@@ -350,6 +356,7 @@ export interface TestSites {
  * higher number from an earlier run stay stopped. The first start of a project downloads
  * WordPress and plugins, and each new site is a clone of the first.
  * admin: the login that the tests use. echowp puts it into the template when it makes the site.
+ * where: another profile and site name (the Cypress run uses cy-1 in profile "cypress").
  */
 export async function startTestSites(
   p: ProjectConfig,
@@ -358,12 +365,16 @@ export async function startTestSites(
   log: (l: string) => void,
   run?: EchowpRunner,
   signal?: AbortSignal,
+  where: { profile?: string; name?: string } = {},
 ): Promise<TestSites> {
   const o: EchowpOptions = { env: { ECHOWP_ADMIN_USER: admin.user, ECHOWP_ADMIN_PASSWORD: admin.password }, run, signal };
-  const prof = ['--profile', TEST_PROFILE];
+  const profile = where.profile ?? TEST_PROFILE;
+  const base = where.name ?? 'site';
+  const prof = ['--profile', profile];
+  const upArgs = ['up', '--count', String(n), ...(where.name ? ['--name', where.name] : []), ...prof];
   const cov = await coveragePhp(log, signal);
   const env = trackerEchowpEnv(cov);
-  // Stops every running site of the test profile. Not with the sync's runner: after a cancel,
+  // Stops every running site of the profile. Not with the sync's runner: after a cancel,
   // that runner starts nothing, but the sites must stop.
   const stopAll = async () => {
     for (const s of await trackerSites(p, env, prof)) {
@@ -375,7 +386,7 @@ export async function startTestSites(
   try {
     let up: number;
     try {
-      up = await trackerEchowp(p, ['up', '--count', String(n), ...prof], log, o);
+      up = await trackerEchowp(p, upArgs, log, o);
     } catch (e) {
       // New sites must get the ports right after the ports of the existing sites (portBaseForMore).
       // Another project's site can have one of those ports, for example after one-site runs.
@@ -388,16 +399,16 @@ export async function startTestSites(
         const rm = await trackerEchowp(p, ['rm', s.name, ...prof], log, o);
         if (rm !== 0) throw new Error(`echowp rm ${s.name} failed (exit ${rm}).`);
       }
-      up = await trackerEchowp(p, ['up', '--count', String(n), ...prof], log, o);
+      up = await trackerEchowp(p, upArgs, log, o);
     }
     if (up !== 0) throw new Error(`echowp up failed (exit ${up}).`);
-    const want = Array.from({ length: n }, (_, i) => `site-${i + 1}`);
+    const want = Array.from({ length: n }, (_, i) => `${base}-${i + 1}`);
     const running = (await trackerSites(p, env, prof)).filter((s) => s.status === 'running' && s.url);
     const sites: TestSite[] = [];
     for (const [i, name] of want.entries()) {
       const s = running.find((x) => x.name === name);
       const port = s && sitePort(s);
-      if (!s || !port) throw new Error(`echowp up ended, but echowp ls shows no running site ${name} with a port in profile "${TEST_PROFILE}".`);
+      if (!s || !port) throw new Error(`echowp up ended, but echowp ls shows no running site ${name} with a port in profile "${profile}".`);
       sites.push({ name, url: String(s.url).replace(/\/+$/, ''), index: i + 1, port });
     }
     // A clean database for each run, so that the data of the last run does not change the result.
@@ -430,11 +441,11 @@ function parseSites(ls: EchowpCall): any[] | string {
   }
 }
 
-function stopSitesSetup(p: ProjectConfig) {
+function stopSitesSetup(p: ProjectConfig, profile: string) {
   const cov = currentCoveragePhp();
   const bin = findEchowp();
   if (!cov || !bin || !SETPRIV) return null;
-  return { env: trackerEchowpEnv(cov), argv: (args: string[]) => ['--no-new-privs', '--', bin, ...args, '--profile', TEST_PROFILE, '--dir', p.path] };
+  return { env: trackerEchowpEnv(cov), argv: (args: string[]) => ['--no-new-privs', '--', bin, ...args, '--profile', profile, '--dir', p.path] };
 }
 
 /**
@@ -442,8 +453,8 @@ function stopSitesSetup(p: ProjectConfig) {
  * where async code does not run. It blocks the process: in a running server, use stopTestSites.
  * It does not make the coverage PHP. Gives the errors.
  */
-export function stopTestSitesSync(p: ProjectConfig): string[] {
-  const setup = stopSitesSetup(p);
+export function stopTestSitesSync(p: ProjectConfig, profile: string = TEST_PROFILE): string[] {
+  const setup = stopSitesSetup(p, profile);
   if (!setup) return [];
   const go = (args: string[]): EchowpCall => {
     const r = spawnSync(SETPRIV!, setup.argv(args), { env: setup.env, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -460,8 +471,8 @@ export function stopTestSitesSync(p: ProjectConfig): string[] {
 }
 
 /** Stops the running test sites of a project, like stopTestSitesSync, but does not block the server. */
-export async function stopTestSites(p: ProjectConfig): Promise<string[]> {
-  const setup = stopSitesSetup(p);
+export async function stopTestSites(p: ProjectConfig, profile: string = TEST_PROFILE): Promise<string[]> {
+  const setup = stopSitesSetup(p, profile);
   if (!setup) return [];
   const go = (args: string[]) =>
     new Promise<EchowpCall>((resolve) => {

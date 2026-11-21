@@ -9,7 +9,9 @@
  *  3. packages npm ci in the Playwright folder when its package files changed
  *  4. scan    reads the files and tests again
  *  5. report  the change report from the old to the new commit (server/changes.ts)
- *  6. tests   the test run job (server/test-run.ts), when the code changed since the selected run
+ *  6. tests   the Playwright test run job (server/test-run.ts), when the code changed since the selected run
+ *  7. cypress the Cypress test run job (server/cypress-run.ts), when PHP or Cypress files changed since
+ *             the selected Cypress run. The sync fails when either run is not selected.
  *
  * Safety: each command runs without a terminal (own session, no input), with
  * coverage/no-sudo first in PATH (stubs for sudo, su, doas, pkexec and echowp).
@@ -23,8 +25,10 @@ import { changedFiles, changeReport, playwrightRoot, type ChangeReport } from '.
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { runTests, type TestResult } from './test-run.ts';
+import { cypressRoot, runCypress } from './cypress-run.ts';
 import { findEchowp } from './echowp.ts';
 import { runFreshness } from './coverage.ts';
+import { selectRun } from './selection.ts';
 
 export type TestMode = 'auto' | 'always' | 'never';
 
@@ -210,6 +214,8 @@ export interface SyncRow {
   toCommit: string | null;
   report: ChangeReport | null;
   tests: TestResult | null;
+  /** The result of the Cypress run (step 7). */
+  cypressTests: TestResult | null;
   runDir: string | null;
   error: string | null;
   log: string;
@@ -225,6 +231,7 @@ const toRow = (r: any): SyncRow => ({
   toCommit: r.to_commit,
   report: r.report ? JSON.parse(r.report) : null,
   tests: r.tests ? JSON.parse(r.tests) : null,
+  cypressTests: r.cypress_tests ? JSON.parse(r.cypress_tests) : null,
   runDir: r.run_dir,
   error: r.error,
   log: r.log,
@@ -255,7 +262,7 @@ export function syncState(projectId: string) {
   const r = db.prepare('SELECT * FROM syncs WHERE project_id = ? ORDER BY id DESC LIMIT 1').get(projectId) as any;
   const last = r ? toRow(r) : null;
   let progress = null;
-  if (last?.status === 'running' && last.step === 'tests') {
+  if (last?.status === 'running' && (last.step === 'tests' || last.step === 'cypress')) {
     try {
       progress = JSON.parse(fs.readFileSync(path.join(ROOT, 'coverage-data', 'progress.json'), 'utf8'));
     } catch {
@@ -432,25 +439,49 @@ async function doSync(p: ProjectConfig, job: Job, mode: TestMode, onLog?: (line:
   say(`${report.commits} commits, ${report.files.length} files, ${report.functions.length} functions, ` +
     `tests +${report.tests.added.length} ~${report.tests.changed.length} -${report.tests.removed.length}, ${report.review.length} features to review`);
 
-  // 6. Tests.
-  const why = testDecision(p, to, mode);
-  if (why.skip) {
-    say(`Tests: not run (${why.reason})`);
-    db.prepare('UPDATE syncs SET tests = ? WHERE id = ?').run(JSON.stringify({ ran: false, reason: why.reason }), job.syncId);
-    return;
-  }
-  needSafe();
-  say(`Tests: run (${why.reason})`);
-  setStep(job, 'tests');
-  const result = await runTests(getProject(p.id)!, to, {
-    run: (cmd, args, ro) => run(job, cmd, args, ro),
+  const ctx = {
+    run: (cmd: string, args: string[], ro: RunOptions) => run(job, cmd, args, ro),
     env: childEnv,
     log: say,
     cancelled: () => job.cancelled,
     signal: job.abort.signal,
-  });
-  db.prepare('UPDATE syncs SET tests = ?, run_dir = ? WHERE id = ?').run(JSON.stringify(result), result.runDir ?? null, job.syncId);
-  if (!result.selected) throw new SyncError(`The test run was not selected: ${result.reason}`);
+  };
+  const notSelected: string[] = [];
+
+  // 6. Playwright tests.
+  const why = testDecision(p, to, mode);
+  if (why.skip) {
+    say(`Playwright tests: not run (${why.reason})`);
+    db.prepare('UPDATE syncs SET tests = ? WHERE id = ?').run(JSON.stringify({ ran: false, reason: why.reason }), job.syncId);
+  } else {
+    needSafe();
+    say(`Playwright tests: run (${why.reason})`);
+    setStep(job, 'tests');
+    const sel = await selectRun(getProject(p.id)!, 'playwright', to, mode, ctx);
+    say(`Playwright tests: ${sel.why}`);
+    const result = await runTests(getProject(p.id)!, to, ctx, sel.plan);
+    db.prepare('UPDATE syncs SET tests = ?, run_dir = ? WHERE id = ?').run(JSON.stringify(result), result.runDir ?? null, job.syncId);
+    if (!result.selected) notSelected.push(`The Playwright run was not selected: ${result.reason}`);
+  }
+
+  // 7. Cypress tests. They run also when the Playwright run was not selected: the two runs are apart.
+  if (job.cancelled) throw new SyncError('Cancelled');
+  const cyWhy = cypressDecision(p, to, mode);
+  if (cyWhy.skip) {
+    say(`Cypress tests: not run (${cyWhy.reason})`);
+    db.prepare('UPDATE syncs SET cypress_tests = ? WHERE id = ?').run(JSON.stringify({ ran: false, reason: cyWhy.reason }), job.syncId);
+  } else {
+    needSafe();
+    say(`Cypress tests: run (${cyWhy.reason})`);
+    setStep(job, 'cypress');
+    const sel = await selectRun(getProject(p.id)!, 'cypress', to, mode, ctx);
+    say(`Cypress tests: ${sel.why}`);
+    const result = await runCypress(getProject(p.id)!, to, ctx, sel.plan);
+    db.prepare('UPDATE syncs SET cypress_tests = ? WHERE id = ?').run(JSON.stringify(result), job.syncId);
+    if (result.nothingToRun) say(`Cypress tests: not run (${result.reason})`);
+    else if (!result.selected) notSelected.push(`The Cypress run was not selected: ${result.reason}`);
+  }
+  if (notSelected.length) throw new SyncError(notSelected.join('\n'));
 }
 
 function playwrightVersion(pwRoot: string): string | null {
@@ -486,4 +517,32 @@ export function testDecision(p: ProjectConfig, to: string, mode: TestMode): { sk
   const code = files.filter((f) => f.kind === 'php' || f.kind === 'playwright' || f.kind === 'playwright-support');
   if (!code.length) return { skip: true, reason: `no PHP or Playwright change since the run at ${commit.slice(0, 8)}` };
   return { skip: false, reason: `${code.length} PHP or Playwright files changed since the run at ${commit.slice(0, 8)}` };
+}
+
+/**
+ * auto: run when the selected Cypress run is not at the new commit, and PHP files or files of the
+ * Cypress project folder (specs, step definitions, support files, packages) changed since the run's commit.
+ */
+export function cypressDecision(p: ProjectConfig, to: string, mode: TestMode): { skip: boolean; reason: string } {
+  if (mode === 'never') return { skip: true, reason: 'tests are off for this sync' };
+  if (!p.cypressDir) return { skip: true, reason: 'the project has no Cypress folder' };
+  const root = cypressRoot(p);
+  if (!root) return { skip: true, reason: `no cypress.config.* at or above ${p.cypressDir}` };
+  if (!findEchowp()) return { skip: true, reason: 'echowp is not installed (the tests run on an echowp site)' };
+  if (!fs.existsSync(path.join(p.path, 'echowp.yml'))) return { skip: true, reason: 'the copy has no echowp.yml (the tests run on an echowp site)' };
+  if (mode === 'always') return { skip: false, reason: 'asked' };
+  const run = p.runs.cypress;
+  const commit = run ? (runFreshness(p, 'cypress')?.runCommit ?? null) : null;
+  if (!commit) return { skip: false, reason: run ? 'the selected Cypress run has no plugin commit' : 'no Cypress run yet' };
+  if (commit === to) return { skip: true, reason: 'the selected Cypress run is at this commit' };
+  let files;
+  try {
+    files = changedFiles(p, commit, to);
+  } catch {
+    return { skip: false, reason: `the Cypress run commit ${commit.slice(0, 8)} is not in the copy` };
+  }
+  const rel = path.relative(p.path, root).split(path.sep).join('/');
+  const code = files.filter((f) => f.kind === 'php' || f.kind === 'cypress' || (rel && (f.path === rel || f.path.startsWith(rel + '/'))));
+  if (!code.length) return { skip: true, reason: `no PHP or Cypress change since the Cypress run at ${commit.slice(0, 8)}` };
+  return { skip: false, reason: `${code.length} PHP or Cypress files changed since the Cypress run at ${commit.slice(0, 8)}` };
 }

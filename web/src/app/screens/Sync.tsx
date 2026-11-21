@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { mutate, reloadAll, useApi } from '../../api';
-import { short, when, type TestRef, type TestResult, type Tracker } from '../data';
+import { partialText, short, when, type TestRef, type TestResult, type Tracker } from '../data';
 import { link } from '../route';
 import { useAct } from '../ui';
 import { syncLine } from '../Shell';
@@ -23,7 +23,8 @@ const FILE_KIND: Record<string, string> = {
 export function testText(r: TestResult): string {
   if (!r.ran) return `The tests did not run: ${r.reason}.`;
   const counts = r.total !== undefined ? `${r.passed} passed, ${r.failed} failed, ${r.skipped} skipped in ${r.minutes} min` : '';
-  return r.selected ? `New coverage run: ${counts}.` : `The test run is not used: ${r.reason}${counts ? ` (${counts})` : ''}.`;
+  const extra = partialText(r);
+  return (r.selected ? `New coverage run: ${counts}.` : `The test run is not used: ${r.reason}${counts ? ` (${counts})` : ''}.`) + (extra ? ` ${extra}` : '');
 }
 
 function Sec({ title, count, children, sub }: { title: string; count: number; children: ReactNode; sub?: ReactNode }) {
@@ -79,7 +80,7 @@ export function SyncPage({ t }: { t: Tracker }) {
             {running && last && (
               <>
                 <div style={{ fontSize: 13 }}>{syncLine(s).text}</div>
-                {last.step === 'tests' && s.progress?.total ? (
+                {(last.step === 'tests' || last.step === 'cypress') && s.progress?.total ? (
                   <>
                     <div className="bar" role="progressbar" aria-valuenow={s.progress.done} aria-valuemax={s.progress.total}>
                       <div className="fill" style={{ width: `${(s.progress.done / s.progress.total) * 100}%`, background: 'var(--accent)' }} />
@@ -97,7 +98,8 @@ export function SyncPage({ t }: { t: Tracker }) {
             <span>Started {when(last.startedAt)}</span>
             {last.fromCommit && last.toCommit && <span className="mono">{short(last.fromCommit)} → {short(last.toCommit)}</span>}
             {r && <span>{r.commits} new commits · {r.files.length} files changed{r.files.length > 0 && ` (${Object.entries(kinds).map(([k, n]) => `${n} ${FILE_KIND[k] ?? k}`).join(', ')})`}</span>}
-            {last.tests && <span>{testText(last.tests)}</span>}
+            {last.tests && <span>Playwright: {testText(last.tests)}</span>}
+            {last.cypressTests && <span>Cypress: {testText(last.cypressTests)}</span>}
           </div>
         )}
         {last?.error && <pre className="log" style={{ color: 'var(--bad)' }}>{last.error}</pre>}

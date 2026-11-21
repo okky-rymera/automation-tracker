@@ -31,10 +31,48 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 import { startTestSites, stopTestSitesSync, type TestSites } from './echowp.ts';
 
+/**
+ * A partial run (phase 6, step 3 of docs/sync-plan.md): only the spec files that the changed code
+ * touches run. The other tests keep their data from the selected run (coverage/merge-run.py).
+ */
+export interface RunPlan {
+  /** Spec files to run, relative to the test folder, as in the "file" field of the test windows. Can be empty. */
+  files: string[];
+  /** The selected run to keep the other tests from, relative to this tool. */
+  baseDir: string;
+  /** Extra fields for run-info.json (the partial-run facts, the untested library changes, the date of the last full run). */
+  info: Record<string, unknown>;
+}
+
+/** run-info.json fields of a full run: it tests every library change again. */
+export const fullRunInfo = () => ({ fullRunAt: new Date().toISOString(), untested: [] as unknown[] });
+
+/** Escapes a file path for a Playwright file filter (a regular expression). */
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Runs coverage/merge-run.py: adds the kept tests of plan.baseDir to the new run folder. Returns null or an error. */
+export async function mergePlan(p: ProjectConfig, plan: RunPlan, runDir: string, commit: string, ctx: Ctx): Promise<{ error: string | null; summary: any }> {
+  const rerun = path.join(runDir, 'rerun-files.json');
+  fs.writeFileSync(rerun, JSON.stringify(plan.files, null, 1) + '\n');
+  ctx.log(`Keep the other tests from ${plan.baseDir} (merge-run.py)`);
+  const m = await ctx.run('python3', [path.join(ROOT, 'coverage', 'merge-run.py'), p.path, path.join(ROOT, plan.baseDir), runDir, commit, rerun], { cwd: ROOT, env: ctx.env(), quiet: true });
+  if (m.code !== 0) return { error: `merge-run.py failed: ${m.out.trim().split('\n').slice(-2).join(' | ')}`, summary: null };
+  let summary: any = null;
+  try {
+    summary = JSON.parse(m.out.trim().split('\n').pop() ?? '');
+  } catch {
+    /* no summary */
+  }
+  ctx.log(`Kept ${summary?.keptTests ?? '?'} tests (${summary?.keptRequests ?? '?'} requests) from ${plan.baseDir}`);
+  return { error: null, summary };
+}
+
 export interface TestResult {
   ran: boolean;
   /** Why the tests did not run, or why the run was not selected. */
   reason?: string;
+  /** The project has no test to run (all are left out). Not a failure of the sync. */
+  nothingToRun?: boolean;
   /** True: the new run is the selected Playwright run now. */
   selected?: boolean;
   /** Run folder, relative to this tool. */
@@ -43,12 +81,16 @@ export interface TestResult {
   passed?: number;
   failed?: number;
   skipped?: number;
+  /** A partial run: the spec files that ran, and the tests kept from the last run. */
+  partial?: { files: number; keptTests: number };
+  /** Library changes (code that 90% or more of the tests run) since the last full run, not tested again. */
+  untested?: number;
   /** Exit code of the Playwright command (1 = some tests failed). */
   exit?: number | string;
   minutes?: number;
 }
 
-interface Ctx {
+export interface Ctx {
   run: (cmd: string, args: string[], o: { cwd: string; env?: NodeJS.ProcessEnv; onLine?: (l: string) => void; quiet?: boolean }) => Promise<{ code: number | null; signal: string | null; out: string }>;
   env: (extra?: Record<string, string>) => NodeJS.ProcessEnv;
   log: (line: string) => void;
@@ -57,10 +99,10 @@ interface Ctx {
   signal?: AbortSignal;
 }
 
-const DATA = path.join(ROOT, 'coverage-data');
-const LOCK = path.join(ROOT, 'data', 'test-run.lock');
+export const DATA = path.join(ROOT, 'coverage-data');
+export const LOCK = path.join(ROOT, 'data', 'test-run.lock');
 /** The test site of the run that runs now: coverage/prepend.php reads it. */
-const SITE_MARK = path.join(DATA, 'test-site.json');
+export const SITE_MARK = path.join(DATA, 'test-site.json');
 
 /**
  * Copied next to the plugin's Playwright config during a run: coverage/playwright-wrapper.cjs for
@@ -141,7 +183,7 @@ process.on('exit', () => {
   fs.rmSync(LOCK, { force: true });
 });
 
-function takeLock(projectId: string) {
+export function takeLock(projectId: string) {
   try {
     const held = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
     let alive = false;
@@ -162,7 +204,7 @@ function takeLock(projectId: string) {
 }
 
 /** Reads KEY=VALUE lines of a .env file. The values stay in this process: they are never logged. */
-function readEnv(file: string): Record<string, string> {
+export function readEnv(file: string): Record<string, string> {
   const out: Record<string, string> = {};
   let text = '';
   try {
@@ -181,13 +223,13 @@ function readEnv(file: string): Record<string, string> {
   return out;
 }
 
-const stamp = () => {
+export const stamp = () => {
   const d = new Date();
   const z = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}`;
 };
 
-export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Promise<TestResult> {
+export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx, plan?: RunPlan): Promise<TestResult> {
   const pwRoot = path.join(p.path, playwrightRoot(p));
   takeLock(p.id);
   active = p;
@@ -266,7 +308,7 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     // 1. A clean request folder.
     const raw = path.join(DATA, 'raw');
     fs.mkdirSync(raw, { recursive: true });
-    for (const f of fs.readdirSync(raw)) if (f.endsWith('.json')) fs.rmSync(path.join(raw, f));
+    for (const f of fs.readdirSync(raw)) if (f.endsWith('.json') || f.endsWith('.json.tmp')) fs.rmSync(path.join(raw, f));
     for (const f of ['test-windows.json', 'progress.json']) fs.rmSync(path.join(DATA, f), { force: true });
 
     // 2. Baseline page loads.
@@ -293,8 +335,14 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
         env: { ...env, TRACKER_PHASE: phase, BASE_URL: sites[slot].url, TRACKER_SITE_SLOT: String(slot) },
         quiet: true,
       });
-    let pw;
-    try {
+    // A partial run: only these spec files, as file filters (regular expressions) of the main phase.
+    const filters = plan ? plan.files.map((f) => reEscape(f)) : [];
+    let pw: { code: number | null; signal: string | null; out: string } = { code: 0, signal: null, out: '' };
+    if (plan) ctx.log(`Partial run: ${plan.files.length} spec file${plan.files.length === 1 ? '' : 's'}${plan.files.length ? `: ${plan.files.join(', ')}` : ' (only the baseline: no test touches the changed code)'}`);
+    if (plan && !plan.files.length) {
+      fs.writeFileSync(path.join(DATA, 'test-windows.json'), '[]\n');
+      fs.closeSync(logFile);
+    } else try {
       // 3a. The setup projects and globalSetup once for each site. Their requests are in no test
       // window, so the analysis counts them as setup. Without saved login files, all sites at the
       // same time. With them, one site after the other: the setup writes one file, and the tracker
@@ -329,7 +377,7 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
       // 3b. The other projects, one worker for each site.
       ctx.log(`Playwright run, ${workers} worker${workers === 1 ? '' : 's'}.`);
       fs.writeSync(logFile, `=== tests, ${workers} workers\n`);
-      pw = await ctx.run('npx', [...pwArgs, `--reporter=list,${reporter}`, `--workers=${workers}`], {
+      pw = await ctx.run('npx', [...pwArgs, `--reporter=list,${reporter}`, `--workers=${workers}`, ...filters], {
         cwd: pwRoot,
         env: { ...env, TRACKER_PHASE: 'main' },
         quiet: true,
@@ -370,14 +418,23 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
       failed: all.filter((w) => w.status !== 'passed' && w.status !== 'skipped').length,
     };
 
-    // 4. Copy and analyze.
+    // 4. Copy, keep the other tests (partial run), and analyze.
     fs.cpSync(raw, path.join(runDir, 'raw'), { recursive: true });
     fs.copyFileSync(windowsFile, path.join(runDir, 'test-windows.json'));
+    let partial: TestResult['partial'];
+    if (plan) {
+      const mg = await mergePlan(p, plan, runDir, commit, ctx);
+      if (ctx.cancelled()) throw new Error('Cancelled');
+      if (mg.error) return { ran: true, selected: false, runDir: runRel, exit: pw.code ?? '', minutes, ...counts, reason: mg.error };
+      partial = { files: plan.files.length, keptTests: mg.summary?.keptTests ?? 0 };
+    }
     const exclude = p.excludeDirs ? ['--exclude', p.excludeDirs.join(',')] : [];
     ctx.log('Coverage analysis (analyze.py)');
     const an = await ctx.run('python3', [path.join(ROOT, 'coverage', 'analyze.py'), p.path, runDir, ...exclude], { cwd: ROOT, env: ctx.env() });
     if (ctx.cancelled()) throw new Error('Cancelled');
-    const result: TestResult = { ran: true, runDir: runRel, exit: pw.code ?? '', minutes, ...counts };
+    const extra: Record<string, unknown> = plan ? plan.info : fullRunInfo();
+    const untested = Array.isArray(extra.untested) ? extra.untested.length : 0;
+    const result: TestResult = { ran: true, runDir: runRel, exit: pw.code ?? '', minutes, ...counts, ...(partial ? { partial } : {}), untested };
     if (an.code !== 0) return { ...result, selected: false, reason: `analyze.py failed: ${an.out.trim().split('\n').slice(-2).join(' | ')}` };
 
     // 5. Select the run only when the report has the tests.
@@ -387,13 +444,13 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx): Prom
     } catch {
       /* no report */
     }
-    if (!reportTests || counts.passed === 0) {
+    if (!reportTests || (counts.passed === 0 && !plan)) {
       return { ...result, selected: false, reason: `the report has ${reportTests} tests and ${counts.passed} passed: not a good run` };
     }
     const dirty = execFileSync('git', ['-C', p.path, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim() !== '';
     fs.writeFileSync(
       path.join(runDir, 'run-info.json'),
-      JSON.stringify({ pluginCommit: commit, pluginDirty: dirty, recordedAt: new Date().toISOString().slice(0, 10), note: `Sync of ${p.syncBranch}`, ...counts }, null, 2) + '\n',
+      JSON.stringify({ pluginCommit: commit, pluginDirty: dirty, recordedAt: new Date().toISOString().slice(0, 10), note: `Sync of ${p.syncBranch}${plan ? ' (partial)' : ''}`, ...counts, ...extra, ...(partial ? { partial: { ...(extra.partial as object), ...partial } } : {}) }, null, 2) + '\n',
     );
     const label = `Playwright, ${p.syncBranch ?? 'sync'} ${commit.slice(0, 7)}, ${new Date().toISOString().slice(0, 10)}`;
     const runId = addCoverageRun(p.id, runRel, 'playwright', label);

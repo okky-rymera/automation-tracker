@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { mutate } from '../api';
 import './design.css';
-import { useTracker, when, short, type Tracker, type SyncState } from './data';
+import { useTracker, when, short, partialText, type Tracker, type SyncState } from './data';
 import { go, link, useRoute, type Route } from './route';
 import { Banner, IPrev, ISearch, Loading, ToastHost, useAct } from './ui';
 import { Projects } from './screens/Projects';
@@ -109,7 +109,7 @@ function Header({ route, project, t, openPal }: { route: Route; project: string;
 
 const STEP_TEXT: Record<string, string> = {
   check: 'Checking the copy', fetch: 'Getting new commits', packages: 'Installing test packages', scan: 'Reading files and tests',
-  report: 'Writing the change report', tests: 'Running the Playwright tests',
+  report: 'Writing the change report', tests: 'Running the Playwright tests', cypress: 'Running the Cypress tests',
 };
 const STATUS_TEXT: Record<string, string> = { done: 'done', failed: 'failed', interrupted: 'stopped before the end', cancelled: 'cancelled', running: 'running' };
 
@@ -118,7 +118,8 @@ export function syncLine(s: SyncState): { dot: string; text: string } {
   if (!s.enabled) return { dot: 'dot-off', text: 'Sync is off' };
   if (last?.status === 'running') {
     const p = s.progress;
-    return { dot: 'dot-run', text: `${STEP_TEXT[last.step] ?? last.step}${last.step === 'tests' && p?.total ? ` · ${p.done} of ${p.total}` : ''}…` };
+    const counted = last.step === 'tests' || last.step === 'cypress';
+    return { dot: 'dot-run', text: `${STEP_TEXT[last.step] ?? last.step}${counted && p?.total ? ` · ${p.done} of ${p.total}` : ''}…` };
   }
   if (last && last.status !== 'done') return { dot: 'dot-bad', text: `Last sync ${STATUS_TEXT[last.status] ?? last.status}` };
   if (!s.syncedAt) return { dot: 'dot-warn', text: `Not synced with ${s.branch}` };
@@ -149,6 +150,13 @@ function SyncPop({ t, s, onClose }: { t: Tracker; s: SyncState; onClose: () => v
   const chg = t.info.reduce((n, i) => n + i.nChanges, 0);
   const chgF = t.info.filter((i) => i.nChanges).length;
   const tests = last?.tests;
+  const cyTests = last?.cypressTests;
+  const result = (name: string, r: NonNullable<typeof tests>) => {
+    if (!r.ran) return ` ${name}: not run (${r.reason}).`;
+    const counts = r.total !== undefined ? `${r.passed} passed, ${r.failed} failed, ${r.skipped} skipped` : '';
+    const extra = partialText(r);
+    return (r.selected ? ` ${name}: ${counts}.` : ` ${name}: run not used (${r.reason})${counts ? `, ${counts}` : ''}.`) + (extra ? ` ${extra}` : '');
+  };
   const p = `/api/projects/${t.project}`;
   return (
     <div className="card pop" role="dialog" aria-label="Sync details">
@@ -165,12 +173,13 @@ function SyncPop({ t, s, onClose }: { t: Tracker; s: SyncState; onClose: () => v
           <div className="muted" style={{ fontSize: 13 }}>
             The tracker copy follows the {s.branch} branch{s.syncedCommit && <> at commit <span className="mono">{short(s.syncedCommit)}</span></>}.
             {last && !running && last.report && ` The last sync found ${last.report.commits} new commits.`}
-            {tests && !running && (tests.ran ? ` The tests ran: ${tests.passed} passed, ${tests.failed} failed, ${tests.skipped} skipped.` : ` The tests did not run: ${tests.reason}.`)}
+            {tests && !running && result('Playwright', tests)}
+            {cyTests && !running && result('Cypress', cyTests)}
           </div>
           {running && last && (
             <>
               <div style={{ fontSize: 13 }}>{syncLine(s).text}</div>
-              {last.step === 'tests' && s.progress?.total ? (
+              {(last.step === 'tests' || last.step === 'cypress') && s.progress?.total ? (
                 <div className="bar"><div className="fill c-good" style={{ width: `${(s.progress.done / s.progress.total) * 100}%`, background: 'var(--accent)' }} /></div>
               ) : null}
             </>
@@ -186,7 +195,7 @@ function SyncPop({ t, s, onClose }: { t: Tracker; s: SyncState; onClose: () => v
             ) : (
               <>
                 <label className="sr" htmlFor="syncmode">Tests</label>
-                <select id="syncmode" className="input sel-sm" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} title="When to run the Playwright tests">
+                <select id="syncmode" className="input sel-sm" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} title="When to run the Playwright and Cypress tests">
                   <option value="auto">Tests: when code changed</option>
                   <option value="always">Tests: always</option>
                   <option value="never">Tests: never</option>

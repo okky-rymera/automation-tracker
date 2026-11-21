@@ -203,8 +203,28 @@ function iniText(xdebugSo: string): string {
     `zend_extension=${xdebugSo}`,
     'xdebug.mode=coverage',
     `auto_prepend_file=${path.join(ROOT, 'coverage', 'prepend.php')}`,
+    // coverage/prepend.php records with OPcache on (2.2 times faster than off). The optimizer
+    // can merge or remove lines (constant arrays, call arguments), so turn it off. OPcache still
+    // keeps the compiled files. Check the file times on each request: a sync changes the plugin files.
+    'opcache.optimization_level=0',
+    'opcache.validate_timestamps=1',
+    'opcache.revalidate_freq=0',
+    // A new echowp site has the plugin as a link to the tracker's copy. The Cypress job then puts a
+    // real copy at the same path. Without this, OPcache kept the code it found through the link
+    // (in the tracker's copy) until the server restarted, and the site recorded no plugin lines.
+    'opcache.revalidate_path=1',
     '',
   ].join('\n');
+}
+
+/**
+ * Writes the ini of an existing coverage PHP again when this version of the tracker writes other
+ * settings. A PHP server that runs now keeps the old settings until all tracker sites stop.
+ */
+export function syncCoverageIni(info: CoveragePhpInfo): void {
+  const file = path.join(info.dir, 'ini', 'coverage.ini');
+  const want = iniText(path.join(info.dir, 'xdebug.so'));
+  if (fs.existsSync(path.join(info.dir, 'xdebug.so')) && (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== want)) fs.writeFileSync(file, want);
 }
 
 /** Records the coverage of a small script with the binary and the ini folder. Throws when it is wrong. */
@@ -258,6 +278,7 @@ export async function prepareCoveragePhp(o: Options = {}): Promise<CoveragePhpIn
     const info = JSON.parse(fs.readFileSync(infoFile, 'utf8')) as CoveragePhpInfo;
     if (info.frankenphp === frankenphp && info.xdebug === xdebug && !o.force) {
       log(`Coverage PHP exists: ${info.dir} (FrankenPHP ${frankenphp}, PHP ${info.php}, Xdebug ${xdebug}).`);
+      syncCoverageIni(info);
       setCurrent(current, name);
       return info;
     }

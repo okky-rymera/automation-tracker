@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { mutate } from '../../api';
+import { mutate, pct } from '../../api';
 import type { TestInfo, Tracker } from '../data';
 import { link, setQuery, useSticky, withBack, type Route } from '../route';
 import { ILock, Picker, Seg, useAct, type PickRow } from '../ui';
@@ -11,6 +11,19 @@ export function testTag(x: TestInfo | undefined): [string, string] {
   if (x.skipped) return ['Skipped', 'tag-skip'];
   if (x.result === 'failed') return ['Failing', 'tag-fail'];
   return ['Active', 'tag-ok'];
+}
+
+/**
+ * How many tests ran plugin code in the last coverage run.
+ * ran: tests with at least one run entry that ran a plugin function. inRun: tests that were in the run.
+ */
+function codeShare(tests: TestInfo[]) {
+  const runs = (x: TestInfo) => x.pw?.run ?? x.cy?.run ?? [];
+  return {
+    total: tests.length,
+    inRun: tests.filter((x) => runs(x).length).length,
+    ran: tests.filter((x) => runs(x).some((r) => r.functions > 0)).length,
+  };
 }
 
 /** Test order of the list as it shows now: the test page uses it for "Previous" and "Next". */
@@ -84,6 +97,7 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
     ...(t.newTests.size ? [{ key: 'new' as Show, label: 'New in last sync', n: n('new') }] : []),
   ];
   const pw = t.tests.filter((x) => x.fw === 'playwright').length;
+  const cards = (['playwright', 'cypress'] as const).map((fw) => ({ fw, ...codeShare(t.tests.filter((x) => x.fw === fw)) }));
   return (
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -92,6 +106,17 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
           <ILock s={16} />
           The tests come from the plugin repo, so you can't edit them here. Linking a test to a scope changes only the feature.
         </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+        {cards.map(({ fw, total, ran, inRun }) => (
+          <div className="stat" key={fw}>
+            <span className="stat-l">{fw === 'playwright' ? 'Playwright tests that ran plugin code' : 'Cypress scenarios that ran plugin code'}</span>
+            <span className="stat-v">{inRun ? `${pct(ran, total)}%` : '–'}</span>
+            <span className="faint" style={{ fontSize: 12 }}>
+              {!total ? 'No tests.' : inRun ? `${ran} of ${total}. ${total - inRun ? `${total - inRun} were not in the last coverage run.` : ''}` : 'No coverage run yet.'}
+            </span>
+          </div>
+        ))}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
         <Seg label="Show tests" value={show} onChange={(k) => setQuery({ show: k === 'none' ? null : k })} items={items} />

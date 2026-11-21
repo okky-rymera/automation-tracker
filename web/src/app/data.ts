@@ -27,7 +27,21 @@ export interface ChangeReport {
   review: { featureId: number; title: string; reasons: string[] }[];
   parseErrors: string[];
 }
-export interface TestResult { ran: boolean; reason?: string; selected?: boolean; runDir?: string; total?: number; passed?: number; failed?: number; skipped?: number; minutes?: number }
+export interface TestResult {
+  ran: boolean; reason?: string; selected?: boolean; runDir?: string; total?: number; passed?: number; failed?: number; skipped?: number; minutes?: number;
+  /** A partial run: the spec files that ran, and the tests kept from the last run. */
+  partial?: { files: number; keptTests: number };
+  /** Library changes since the last full run that no test ran again. */
+  untested?: number;
+}
+
+/** "Partial run: 3 spec files, 46 tests kept from the last run. 2 library changes not tested again." Empty for a full run. */
+export function partialText(r: TestResult): string {
+  const parts: string[] = [];
+  if (r.partial) parts.push(`Partial run: ${r.partial.files} spec file${r.partial.files === 1 ? '' : 's'}, ${r.partial.keptTests} tests kept from the last run.`);
+  if (r.untested) parts.push(`${r.untested} library change${r.untested === 1 ? '' : 's'} not tested again until the next full run.`);
+  return parts.join(' ');
+}
 export interface SyncState {
   enabled: boolean;
   branch: string | null;
@@ -43,6 +57,8 @@ export interface SyncState {
     toCommit: string | null;
     report: ChangeReport | null;
     tests: TestResult | null;
+    /** The Cypress run of the sync. Older syncs have no value. */
+    cypressTests?: TestResult | null;
     error: string | null;
     log: string;
   };

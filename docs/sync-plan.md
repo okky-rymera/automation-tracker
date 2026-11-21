@@ -176,18 +176,124 @@ Built on 20 Nov 2026. The user asked for: a loop that runs the map-features skil
    - Not changed: the review said that run-spec does not clean up on SIGTERM. It does: `server/sync.ts` catches SIGINT, SIGTERM and SIGHUP and calls process.exit, so the exit handlers run. Only a SIGKILL leaves the lock, and the loop removes a dead lock after each unit.
 5. [x] Decided on 20 Nov 2026: button only (and the `map-loop` command). The loop does not start after a sync. Default limits stay: Opus, 10 units, $5 for each unit, $25 in total.
 
+## Phase 6: Faster test runs for 40+ plugins
+
+Goal: a sync must not run all tests for 95 minutes. One wwp sync on 21 Nov 2026 ran Cypress for 95 minutes (489 tests). 40 plugins at that speed need about 63 hours.
+
+### What the research found (21 Nov 2026)
+
+- **The site is the slow part.** The site was busy for 80 of the 95 minutes, 0.7 s for each request on average. 34 of the 80 minutes were Cypress Helper Plugin setup calls (`/wp-json/chp/...`).
+- **The recorder makes each page 2.2 times slower.** `coverage/prepend.php` turns off opcache, the PHP code cache, for each recorded request. 4 pages on `cy-1`, median of 8 loads:
+
+  | Mode | Time for 4 pages |
+  |---|---|
+  | No recording | 1.06 s |
+  | Now: opcache off, `XDEBUG_CC_UNUSED \| XDEBUG_CC_DEAD_CODE` | 2.37 s |
+  | Opcache on, lines only (flags 0) | 1.09 s |
+  | Opcache on, `UNUSED \| DEAD_CODE` | 1.21 s |
+
+  With opcache on, the recorded lines were almost the same: at most 5 different lines of about 1,440 for each page.
+- **Cypress runs one test at a time on one site.** The computer has 8 CPUs. Playwright already uses 4 sites (7.1 → 2.7 minutes).
+- **Most functions run in few tests or in almost all tests.** Share of tests that ran each function:
+
+  | Share of tests | Playwright functions | Cypress functions |
+  |---|---|---|
+  | Less than 25% | 160 | 393 |
+  | 25–90% | 29 | 82 |
+  | 90% or more | 184 | 199 |
+
+- **Test selection with a library limit.** Simulation over the last 60 trunk commits (27 Aug to 20 Nov 2026), with the runs `2026-11-21-0953-sync-3293b92d` and `2026-11-21-1022-sync-cypress-3293b92d`. A changed function that ran in the limit share of tests or more selects no test. Share of all test runs:
+
+  | Rule | Playwright | Cypress |
+  |---|---|---|
+  | Selection with no library limit | 75% | 74% |
+  | Library limit 90% | 18% | 42% |
+  | Library limit 90%, Cypress helper files select only their own tests | 18% | 21% |
+  | Library limit 50% | 10% | 40% |
+  | Library limit 90%, one sync each week (16 weeks) | 42% | 74% |
+
+  - Cypress is higher because a changed Cypress helper file selects all tests now. This occurs in 19 of 51 commits. Most are test data files (`cypress/fixtures/customer-import`, 25 changes) and step code (`cypress/step_definitions`, 12 changes).
+  - The 21% row is a best case: the helper files selected no test in the simulation.
+  - The numbers count tests, not minutes. Playwright has only 49 tests, so its numbers are rough.
+  - The skipped library changes are about 2 functions for each commit. Almost all are startup code: the code outside functions of the main plugin file, `WooCommerceWholeSalePrices::__construct` and `::run`, the import/export and onboarding `run()` functions, and `WWP_Onboarding_State::get_state`.
+  - The simulation scripts were in the session scratchpad. They were not kept. To do it again, add a library limit to `coverage/select-tests.py`.
+
+### Steps
+
+1. [x] **Keep opcache on while recording.** Built on 21 Nov 2026.
+   - `coverage/prepend.php` keeps OPcache on and records only the lines that ran (no `XDEBUG_CC_UNUSED`, no `not_run`).
+   - `coverage/analyze.py` counts the runnable lines of every plugin file with `coverage/runnable-lines.php` (8 at the same time, about 10 s for wwp). Lines that ran and old `not_run` lines also count.
+   - `coverage/php-xdebug.sh` uses the tracker's coverage PHP 8.5 when it exists (before: Local WP's PHP 8.2).
+   - The coverage ini (`server/coverage-php.ts`) has `opcache.optimization_level=0`, `opcache.validate_timestamps=1` and `opcache.revalidate_freq=0`. `syncCoverageIni` writes the ini again for an existing coverage PHP.
+   - Static count against the recorded count (Cypress run at `3293b92d`): 12,010 against 12,026 lines in 89 loaded files. The differences are argument lines of calls over more lines.
+   - Old Cypress run analyzed again: 12,714 runnable lines (was 12,690), feature coverage 43.9% (was 44.0%). 3 functions moved from library to never, because of one array line each. A run with OPcache on records those lines as run.
+   - Playwright trial on a DB copy, 4 workers, at `3293b92d`: **1.6 minutes (was 2.7)**, 47 passed, 2 skipped (the same). Run `2026-11-21-1744-sync-3293b92d` (not selected).
+     - No function has another category. 42 of 47 tests ran the same functions. The 5 others differ in one-time code of a new site (`maybe_dispatch_admin`, `should_register_wholesale_price_html_filter`): test order, as in step 2 of phase 4.
+     - Tested lines 1,438 (was 1,459). The 31 lines that ran only in the old run are argument lines of calls over more lines (`__(`, `$post,`). The calls ran.
+   - Cypress: see step 2 (with 4 sites).
+2. [x] **Run Cypress on 4 sites at the same time** (`cy-1` … `cy-4`). Built on 21 Nov 2026.
+   - `server/cypress-run.ts`: sites as for Playwright (half the CPUs, at most 4, `TRACKER_CYPRESS_WORKERS` for trials). `splitSpecs` splits the spec files by their time in the last selected Cypress run (longest first, into the group with the least time, plus 10 s for each file).
+   - Each site gets its own plugin copy with the marker, the Cypress Helper Plugin and the options, at the same time. Baseline page loads on each site. `sites.json` in the run folder, `slot` in each test window, one log and one messages file for each site.
+   - Each Cypress process runs in `xvfb-run -d`. Found: without it, all processes start Xvfb on display 99, and the process that ends first closes it. The others stopped in the middle of a spec (exit 1, no messages file). Without `xvfb-run`, the job uses 1 site.
+   - Found: 2 requests can start in the same microsecond, and all FrankenPHP threads have one process ID. Two requests wrote into one file, and `analyze.py` failed. `coverage/prepend.php` now adds a random part to the file name and writes to a temp name first.
+   - Found: on new sites (echowp puts the plugin in as a link to the tracker's copy), OPcache kept the code that it found through the link after the job put the real copy in. 3 of 4 sites recorded no plugin lines, and 53 admin tests failed (the plugin built its script URLs from the tracker's path). Fix: `opcache.revalidate_path=1` in the coverage ini. Check: after the baseline, each site must have recorded plugin lines, else the run is not made.
+   - Full run on a DB copy at `3293b92d`, run `2026-11-21-2102-sync-cypress-3293b92d` (not selected in the real database):
+
+     | | 1 site, OPcache off (`2026-11-21-1022-…`) | 4 sites, OPcache on |
+     |---|---|---|
+     | Time of the job | 95 min | **16.9 min** |
+     | Passed / failed | 469 / 20 | 471 / 18 |
+     | Feature line coverage | 44.0% | 43.6% |
+     | Functions tested / never / library | 427 / 381 / 247 | 428 / 379 / 247 |
+
+     - No test that passed before failed. 2 tests that failed before passed.
+     - 293 of 469 tests ran the same functions. Median difference 0, 90th percentile 11 functions. The differences are mostly onboarding code and code that depends on what earlier tests on the same site left (other test order on each site).
+3. [x] **Select tests by change, with a library limit of 90%.** Built on 21 Nov 2026.
+   - `server/selection.ts` decides full or partial for each tool. `coverage/select-tests.py` has `--library-share` and `--tests-root` (the folder that the test paths are relative to; Cypress: the folder of `cypress.config.*`).
+   - Found: the simulation in "What the research found" gave Cypress `--playwright-dir tests/Cypress/cypress/tests` only, so the test paths did not match, and changed Cypress spec files selected no test. `--tests-root` fixes this.
+   - A changed function that 90% or more of the tests ran selects no test. It goes into `untested` in `run-info.json` (file, function, commit). Each partial run keeps the old list and adds to it. A full run clears it. The sync result shows the count ("2 library changes not tested again until the next full run").
+   - Partial run: the jobs run only the selected spec files (Playwright: file filters of the main phase; Cypress: `--spec`). With no selected spec file, the job makes only the baseline.
+   - `coverage/merge-run.py` adds the other tests from the selected run, with line numbers moved to the new commit (difflib over `git show` of both commits; renames from `git diff -M`). Lines in changed blocks are left out. Old sites get new slots and made-up ports (900000 + slot). Old baseline requests are not kept. Old tests of spec files that ran again, that are gone, or that the job leaves out are not kept.
+   - Full run when: "always", no usable selected run, a support file changed (also Cypress step definitions and fixtures, for now), every spec file is selected, select-tests.py fails, or the last full run is 7 days old (step 4).
+   - Test 1 (offline, Playwright): a made-up partial run of 3 spec files at `3293b92d`, with 41 tests kept from `2026-11-19-2052-sync-b73e8a97` (2 days older). Tested lines 1,439 against 1,438 in the full run. All 49 tests present. Each test at most 5 functions different (the code changed between the commits).
+   - Test 2 (real partial Cypress run on a DB copy, base `2026-11-21-cypress-full-2` at `b73e8a97`, new commit `3293b92d`):
+     - Selection: 45 of 64 spec files (348 of 501 tests). 2 library changes not tested again: `WWP_Wholesale_Prices::apply_product_wholesale_price_to_cart` (ran in 489 of 489 tests) and the code outside functions of `class-wwp-wholesale-roles.php`.
+     - 14.4 minutes (a full run: 16.9). This change touched the long specs, so it saved little.
+     - Feature line coverage 43.8% (full run at the same commit: 43.6%). No test missing. Median difference 0 functions for each test, 90th percentile 10.
+     - Found: the merge kept 12 old tests of "Show activation status", which the job now leaves out. Fixed: old tests of left-out spec files are not kept. Then 489 tests in 63 spec files, as in the full run.
+   - Fixes after the code review on 22 Nov 2026:
+     - A spec file inside the test folder counted as a support file, so each spec change made a full run. `is_support` now leaves out the specs folder. Checked with `b73e8a97`: 2 spec changes, 5 real support files.
+     - Documentation and example files (`*.md`, `*.txt`, `*.example`) in the test folder select no test and do not make a full run.
+     - A partial run where every re-run test failed was "not a good run", and the sync failed. A partial run is now selected also with 0 passed (the kept tests are in the report).
+     - `analyze.py` failed for an older run (with `not_run` lines) when no PHP with Xdebug was there. For such a run the recorded lines are complete, so it now goes on. Checked with `COVERAGE_PHP_DIR=/nonexistent`.
+     - Cypress with `cypress.config.*` at the top of the repo: support file changes cannot be found, so the selection makes a full run.
+   - Not done yet: Cypress step definitions and fixtures select only their own tests (now they make a full run). The feature pages do not show the `untested` list yet (only the sync result shows the count).
+4. [x] **A full run as a safety net, each week.** Built into `server/selection.ts`: a full run when the last full run (`fullRunAt` in `run-info.json`, or `recordedAt` of an older full run) is 7 days old or older. `TRACKER_FULL_RUN_DAYS` changes it. A full run clears `untested`.
+5. [x] **AI step for code that no test runs.** Built on 22 Nov 2026, in the map-features skill (its code units run after the Playwright and Cypress units).
+   - New table `code_decisions` (migration 29, `server/code-decisions.ts`): a function that no test runs and that is library code, with a reason, `ai` or `person`, and the commit. The function is kept by name, so the decision stays when it moves.
+   - `coverage.ts withMarks` counts each runnable line of such a function as a library mark. So the totals and the function state count it as library, as a person's line mark does.
+   - `map apply` takes a top-level `library` list (`file`, `function`, `reason`). A code unit can send only `library`. The tool refuses a function name that the coverage run does not know.
+   - `map next <project> code`: "open" functions (no test runs them, no feature holds them, not library). A file is a candidate when no code area holds it, or when it changed since its code area was done (`changedSinceArea`, from the area's file hash): this brings new code of a sync back.
+   - API: `GET /api/projects/:id/code-decisions`, `DELETE` with `{ file, function }`.
+   - Skill: for each open function of a code area, feature code goes into a feature (a new feature or scope with no test when none fits), library code into `library` with a reason.
+   - Test on a DB copy: one function of `class-wwp-helper-functions.php` sent as library: its state is `library`, the file left the candidate list (112 files, was 113). With a changed area hash, the file came back with 34 open functions (was 35).
+   - Not done yet: no screen in the app lists the decisions (only the API). The feature pages do not show the `untested` library changes of partial runs.
+
+Estimate with all steps: Cypress about 3 to 6 minutes for each sync plus 2 to 3 minutes of site setup, and about 15 minutes for each full run. For 40 plugins: about 1 to 2 hours of computer time each day.
+
 ## Later
 
 - [ ] JS coverage from the browser (Playwright can record V8 coverage in Chromium). Then JS changes can select tests too.
-- [ ] Cypress runs in the sync.
-- [ ] Test selection, only if the numbers improve when the tests grow. Run `coverage/select-tests.py` over the history again to check.
+- [x] Cypress runs in the sync (21 Nov 2026, server/cypress-run.ts). It uses its own site `cy-1` with a real copy of the plugin, not a link.
+- [x] Test selection: research done on 21 Nov 2026. See phase 6, step 3.
 
 ## Open decisions
 
 - How often to sync: each night or each week.
 - Where the tests run (phase 4).
 - (Decided: Opus, $1 for each feature, with the claude.ai login. See phase 3.)
-- Whether to keep the test selection script, or to keep only the change report.
+- (Decided on 21 Nov 2026: keep test selection, with a library limit. See phase 6.)
+- The library limit: 90% is the suggestion. The full run: each week or each night.
 - Whether the mapping loop also runs after each sync (decided for now: button only).
 
 ## Safety

@@ -599,6 +599,27 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (kind, row_id, field)
   );
   `,
+  // 28: the result of the Cypress test run of a sync (server/cypress-run.ts), as JSON. tests holds the Playwright result.
+  `
+  ALTER TABLE syncs ADD COLUMN cypress_tests TEXT;
+  `,
+  // 29: decisions on whole functions that no test runs (server/code-decisions.ts). kind library: the
+  //     function is library code (startup, helpers, glue), not feature code. The coverage data counts
+  //     its lines as library, as a library line mark does. by: ai (the map-features skill) or person.
+  //     The function is kept by name, so a decision stays when the function moves.
+  `
+  CREATE TABLE code_decisions (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    file TEXT NOT NULL,
+    function TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('library')),
+    reason TEXT NOT NULL,
+    by TEXT NOT NULL CHECK (by IN ('ai', 'person')),
+    commit_sha TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, file, function)
+  );
+  `,
 ];
 
 function open(): DatabaseSync {

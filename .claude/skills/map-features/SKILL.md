@@ -77,12 +77,14 @@ about these items: the person may want your suggestion.
   since it was processed (`state: "changed"`), then a new file. For a changed
   file, look at `previous.features` and at tests with `newSinceLastTime: true`:
   often you only add the new tests to the features that exist.
-- For `code`, `next` gives candidate PHP files with the most code that no
-  test ran. Choose **one plugin feature or settings area** (for
+- For `code`, `next` gives candidate PHP files with the most **open**
+  functions: no test runs them, no feature holds them, and they are not
+  library code. A file with `changedSinceArea: true` is in a code area that is
+  done, but a sync changed it: look only at its open functions. Choose **one plugin feature or settings area** (for
   example "Settings > Prices > Hide wholesale price column"), not one file. The
   area name is the `ref`. To choose well:
-  - Skip big helper files (many small functions for many features). Their code
-    gets mapped through the areas that use it.
+  - Big helper files (many small functions for many features): put their
+    shared helpers in `library` (see "Sort the code that no test runs").
   - The coverage data comes from the Playwright run and the Cypress run, when
     the project has both. With only a Playwright run, an area with no coverage
     can still have many Cypress tests. Run `features` first: a feature with many
@@ -266,6 +268,29 @@ coverage by feature (Features tab > "Code by feature"). Give:
   For a code area, use the files of the area.
 - The tool only adds code. If code you added before is wrong, say so in the
   report: a person removes it in the app.
+
+**Sort the code that no test runs (code units).** For each open function of the
+area (state `never`, `setup` or `background` in the `code` output), decide:
+
+- **Feature code**: it does something a user or admin can see or use (a
+  setting, a screen, a REST route, a price rule, an email). Put it in the
+  `code` of a feature. If no feature fits, make a feature or a scope for it,
+  with no test link. Write its scopes from the code, as for any feature.
+- **Library code**: start-up, hook registration, small helpers that many
+  features call, glue, or code that nothing calls. Put it in the top-level
+  `library` list of the payload, one entry for each function, with a reason:
+
+  ```json
+  "library": [
+    { "file": "includes/class-x.php", "function": "Class_X::helper", "reason": "A small helper that the price and cart features call." }
+  ]
+  ```
+
+  The app then counts its lines as library code, not as code that no test
+  runs, and `next` does not offer it again. A person can remove a decision.
+  A code unit can send only `library`, with an empty `features` list.
+- Do not leave an open function out. A function you leave out comes back
+  only when a sync changes its file.
 
 **Add screenshots, so a person sees how the feature looks.** People open the
 feature page to learn the feature. A picture of the settings and of the result

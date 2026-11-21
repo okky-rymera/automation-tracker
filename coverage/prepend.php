@@ -6,7 +6,10 @@
  * auto_prepend_file setting. It records which lines of the tracked plugins
  * (coverage/plugins.json) ran and writes one JSON file per request to
  * coverage-data/raw/ in this tool. The lines are kept by plugin name.
- * Older request files have one plugin, in "files" and "not_run" at the top.
+ * It records only the lines that ran. coverage/analyze.py counts the lines that
+ * can run with coverage/runnable-lines.php.
+ * Older request files also have "not_run" (lines that can run but did not), and
+ * the oldest have one plugin, in "files" and "not_run" at the top.
  *
  * Requests are matched to tests later by time (start/end below). In a run with
  * more workers, each worker has its own site, so the port also names the worker.
@@ -119,15 +122,18 @@ $GLOBALS['__atcov'] = array(
 	'roots'   => $__atcov_roots,
 );
 
-// OPcache serves already-compiled files, and then Xdebug does not report the
-// lines that did not run inside functions that ran. Turn it off for this request.
-// (opcache.enable can be turned off at runtime, but not on.)
-ini_set( 'opcache.enable', '0' );
-
+// Record only the lines that ran, with OPcache on. Do not ask for the lines that
+// did not run (XDEBUG_CC_UNUSED): with OPcache on, Xdebug does not report all of them,
+// and OPcache off made each request about 2.2 times slower (measured 21 Nov 2026).
+// coverage/analyze.py counts the lines that can run without the site.
+// The tracker's coverage ini turns off the OPcache optimizer, which can merge or remove lines.
+// Other sites (for example a Local WP site) can have the optimizer on: there, turn OPcache off for
+// this request, as before. (The value can be hex, such as 0x7FFEBFFF: intval with base 0 reads it.)
+if ( 0 !== intval( (string) ini_get( 'opcache.optimization_level' ), 0 ) ) {
+	ini_set( 'opcache.enable', '0' );
+}
 xdebug_set_filter( XDEBUG_FILTER_CODE_COVERAGE, XDEBUG_PATH_INCLUDE, array_keys( $GLOBALS['__atcov']['roots'] ) );
-// XDEBUG_CC_UNUSED also reports lines that can run but did not (value -1).
-// That gives the total of runnable lines, so coverage can be counted per line.
-xdebug_start_code_coverage( XDEBUG_CC_UNUSED | XDEBUG_CC_DEAD_CODE );
+xdebug_start_code_coverage();
 
 // WordPress registers its own shutdown work after this file runs. Shutdown
 // functions run in order, so register the writer from inside a shutdown
@@ -143,7 +149,7 @@ function __atcov_write() {
 	$data = xdebug_get_code_coverage();
 	xdebug_stop_code_coverage();
 
-	// Lines by plugin: name => { files: { path => lines that ran }, not_run: { path => runnable lines that did not run } }.
+	// Lines by plugin: name => { files: { path => lines that ran } }.
 	$plugins = array();
 	foreach ( $data as $file => $lines ) {
 		$rel  = null;
@@ -158,20 +164,14 @@ function __atcov_write() {
 		if ( null === $rel || strpos( $rel, 'vendor/' ) === 0 || strpos( $rel, 'node_modules/' ) === 0 ) {
 			continue;
 		}
-		$hit    = array();
-		$unused = array();
+		$hit = array();
 		foreach ( $lines as $line => $count ) {
 			if ( $count > 0 ) {
 				$hit[] = $line;
-			} elseif ( -1 === $count ) {
-				$unused[] = $line;
 			}
 		}
 		if ( $hit ) {
 			$plugins[ $name ]['files'][ $rel ] = $hit;
-		}
-		if ( $unused ) {
-			$plugins[ $name ]['not_run'][ $rel ] = $unused;
 		}
 	}
 
@@ -194,6 +194,12 @@ function __atcov_write() {
 		'plugins' => $plugins,
 	);
 
-	$name = sprintf( '%.6f-%d.json', $cfg['start'], getmypid() );
-	@file_put_contents( $cfg['out_dir'] . '/' . $name, json_encode( $record ) );
+	// All PHP threads of the FrankenPHP server share one process ID, and with more test sites two
+	// requests can start in the same microsecond. A random part keeps the names apart. Write to a
+	// temp name first, so that a reader never sees half a file.
+	$name = sprintf( '%.6f-%d-%s.json', $cfg['start'], getmypid(), bin2hex( random_bytes( 4 ) ) );
+	$path = $cfg['out_dir'] . '/' . $name;
+	if ( false !== @file_put_contents( $path . '.tmp', json_encode( $record ) ) ) {
+		@rename( $path . '.tmp', $path );
+	}
 }
