@@ -26,16 +26,14 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { db } from './db.ts';
 import { addCoverageRun, ROOT, type ProjectConfig } from './projects.ts';
-import { CYPRESS_PROFILE, CYPRESS_SITE_NAME, startTestSites, stopTestSitesSync, trackerEchowp, type TestSites } from './echowp.ts';
+import { CYPRESS_PROFILE, CYPRESS_SITE_NAME, removeSitePlugin, SITE_COPY_MARKER, startTestSites, stopTestSitesSync, trackerEchowp, type TestSites } from './echowp.ts';
 import { DATA, fullRunInfo, LOCK, mergePlan, pluginAdminLogin, SITE_MARK, stamp, takeLock, testWorkers, type Ctx, type RunPlan, type TestResult } from './test-run.ts';
 
 const CHP_REPO = 'Rymera-Web-Co/cypress-helper-plugin';
 const CHP_SLUG = 'cypress-helper-plugin';
 const THP_SLUG = 'test-helper-plugin';
-/** In the site's plugin copy. When it is gone after the run, a test deleted or reinstalled the plugin. */
-const MARKER = '.tracker-site-copy';
-/** Not copied to the site: the plugin does not need them, and tests/ holds the test packages. */
-const NOT_COPIED = new Set(['.git', 'tests', 'node_modules']);
+/** In the site's plugin copy (server/echowp.ts useRealPluginCopy). When it is gone after the run, a test deleted or reinstalled the plugin. */
+const MARKER = SITE_COPY_MARKER;
 const CONFIGS = ['cypress.config.js', 'cypress.config.ts', 'cypress.config.mjs', 'cypress.config.cjs', 'cypress.config.mts', 'cypress.config.cts'];
 /** A spec file with one of these steps deletes or installs a plugin. */
 const PLUGIN_STEP = /plugins? (is|are) (deleted|not installed)|is downloaded, installed/i;
@@ -69,18 +67,6 @@ function mainFile(dir: string): string | null {
     }
   }
   return null;
-}
-
-/** Removes a plugin folder of the site. A link is unlinked: a recursive delete must never follow it. */
-function removeSitePlugin(target: string) {
-  let st: fs.Stats;
-  try {
-    st = fs.lstatSync(target);
-  } catch {
-    return;
-  }
-  if (st.isSymbolicLink()) fs.unlinkSync(target);
-  else fs.rmSync(target, { recursive: true, force: true }); // rmSync does not follow links inside
 }
 
 /** Splits a shell line into words. Handles '…' and "…" quotes. Null for anything else ($, `, \). */
@@ -369,23 +355,10 @@ export async function runCypress(p: ProjectConfig, commit: string, ctx: Ctx, pla
       const say = (l: string) => ctx.log(`[${s.name}] ${l}`);
       const wp = async (args: string[], onLine: (l: string) => void = say) =>
         trackerEchowp(p, ['wp', s.name, '--profile', CYPRESS_PROFILE, '--', ...args], onLine, { run: runner, signal: ctx.signal });
-      let pluginDir = '';
-      await wp(['eval', 'echo "TRACKER_PLUGIN_DIR=" . WP_PLUGIN_DIR . "\\n";'], (l) => {
-        const m = l.match(/TRACKER_PLUGIN_DIR=(\/.+)$/);
-        if (m) pluginDir = m[1].trim();
-      });
-      cancelled();
-      if (!pluginDir || !fs.existsSync(pluginDir)) throw new SetupError(`could not find the plugin folder of the Cypress site ${s.name}`);
-      const sitePlugin = path.join(pluginDir, slug);
-      if (path.dirname(sitePlugin) !== pluginDir) throw new Error(`Bad plugin path ${sitePlugin}`);
-      removeSitePlugin(sitePlugin);
-      fs.cpSync(p.path, sitePlugin, {
-        recursive: true,
-        verbatimSymlinks: true,
-        filter: (src) => !NOT_COPIED.has(path.relative(p.path, src).split(path.sep)[0]),
-      });
-      fs.writeFileSync(path.join(sitePlugin, MARKER), `Copy of ${p.path} at ${commit}. The tracker deletes this folder before each Cypress run.\n`);
-      say(`Plugin: a real copy of ${slug} in the site (not a link)`);
+      // startTestSites put a real copy of the plugin in the site, with the marker.
+      const sitePlugin = s.plugin;
+      const pluginDir = path.dirname(sitePlugin);
+      if (!sitePlugin || fs.lstatSync(sitePlugin).isSymbolicLink() || !fs.existsSync(path.join(sitePlugin, MARKER))) throw new SetupError(`the plugin of ${s.name} is not a real copy with the marker`);
       const chpDir = path.join(pluginDir, CHP_SLUG);
       if (chpSource) {
         removeSitePlugin(chpDir);

@@ -29,7 +29,7 @@ import { playwrightRoot } from './changes.ts';
 import { addCoverageRun, ROOT, type ProjectConfig } from './projects.ts';
 import os from 'node:os';
 import { createRequire } from 'node:module';
-import { startTestSites, stopTestSitesSync, type TestSites } from './echowp.ts';
+import { SITE_COPY_MARKER, startTestSites, stopTestSitesSync, type TestSites } from './echowp.ts';
 
 /**
  * A partial run (phase 6, step 3 of docs/sync-plan.md): only the spec files that the changed code
@@ -182,6 +182,26 @@ process.on('exit', () => {
   fs.rmSync(SITE_MARK, { force: true });
   fs.rmSync(LOCK, { force: true });
 });
+
+/** True when a site's plugin folder is a real folder with the tracker's marker (echowp.ts useRealPluginCopy). */
+export function hasSiteCopy(plugin: string): boolean {
+  try {
+    return !!plugin && !fs.lstatSync(plugin).isSymbolicLink() && fs.existsSync(path.join(plugin, SITE_COPY_MARKER));
+  } catch {
+    return false;
+  }
+}
+
+/** The process ID of the test run that holds the lock now, or null. */
+export function testRunLockHolder(): number | null {
+  try {
+    const held = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
+    process.kill(held.pid, 0);
+    return held.pid;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM' ? -1 : null;
+  }
+}
 
 export function takeLock(projectId: string) {
   try {
@@ -400,6 +420,11 @@ export async function runTests(p: ProjectConfig, commit: string, ctx: Ctx, plan?
     const minutes = Math.round((Date.now() - started) / 6000) / 10;
     const tail = pw.out.trim().split('\n').slice(-4).join(' | ');
     ctx.log(`Playwright ended (exit ${pw.code ?? pw.signal}) after ${minutes} minutes: ${tail}`);
+    // A test must not have deleted or replaced a site's plugin copy: then the later tests ran without
+    // the plugin, and the run does not show this commit. The tracker's copy must still be whole.
+    const gone = sites.filter((s) => !hasSiteCopy(s.plugin));
+    if (gone.length) return { ran: true, selected: false, runDir: runRel, exit: pw.code ?? '', minutes, reason: `a test deleted or replaced the plugin copy of ${gone.map((s) => s.name).join(', ')}, so the later tests did not test this commit` };
+    if (!fs.existsSync(path.join(p.path, '.git'))) return { ran: true, selected: false, runDir: runRel, exit: pw.code ?? '', minutes, reason: `STOP: the tracker's copy ${p.path} lost files during the run. Restore it before the next sync.` };
     const windowsFile = path.join(DATA, 'test-windows.json');
     // Exit 1 = some tests failed: the run is still good coverage data. Other exits: the run did not finish.
     if ((pw.code !== 0 && pw.code !== 1) || !fs.existsSync(windowsFile)) {
@@ -484,6 +509,8 @@ export interface SpecResult {
   siteUrl: string;
   /** The last lines of the Playwright output. */
   tail: string;
+  /** True when the site has no real plugin copy after the run (a test deleted or replaced the plugin). */
+  copyGone?: boolean;
 }
 
 /**
@@ -542,7 +569,9 @@ export async function runSpec(p: ProjectConfig, ref: string, ctx: Ctx): Promise<
       onLine: (l) => ctx.log(l),
       quiet: true,
     });
-    return { exit: r.code ?? r.signal ?? 'unknown', siteUrl: site, tail: r.out.trim().split('\n').slice(-15).join('\n') };
+    // The spec, or a person or the AI on the site, can delete the plugin in WordPress: say so.
+    const copyGone = !hasSiteCopy(sites[0].plugin);
+    return { exit: r.code ?? r.signal ?? 'unknown', siteUrl: site, tail: r.out.trim().split('\n').slice(-15).join('\n'), copyGone };
   } finally {
     process.off('exit', dropLock);
     dropLock();

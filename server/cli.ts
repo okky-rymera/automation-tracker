@@ -21,11 +21,11 @@ import path from 'node:path';
 import { db } from './db.ts';
 import { changeReport, reportText } from './changes.ts';
 import { childEnv, run, startSync, type Job, type TestMode } from './sync.ts';
-import { pluginAdminLogin, runSpec } from './test-run.ts';
+import { pluginAdminLogin, runSpec, testRunLockHolder } from './test-run.ts';
 import { MapLoopError, startMapLoop } from './map-loop.ts';
 import { aiUpdate, DEFAULTS } from './ai-update.ts';
 import { checkCoveragePhp, prepareCoveragePhp } from './coverage-php.ts';
-import { trackerEchowp } from './echowp.ts';
+import { realCopiesForProfile, trackerEchowp } from './echowp.ts';
 import { addCoverageRun, FRAMEWORKS, importProjectsJson, loadProjects, ROOT, RUN_COLUMN, writeCoverageConfig, type Framework } from './projects.ts';
 
 importProjectsJson();
@@ -172,6 +172,34 @@ if (cmd === 'add') {
     env.ECHOWP_ADMIN_PASSWORD = login.password;
   }
   process.exitCode = await trackerEchowp(p, rest, console.log, { env });
+  // A site that a person or the AI starts by hand gets a real plugin copy too, never echowp's link:
+  // a delete in WordPress follows the link and deletes the tracker's copy (server/echowp.ts).
+  // Also after a failed "up": it can start some sites. Not while a test run holds the lock: the copy
+  // deletes the site's plugin folder for a moment, under the running tests.
+  if (rest[0] === 'up' || rest[0] === 'reset' || rest[0] === 'start') {
+    const opts = rest.slice(0, rest.includes('--') ? rest.indexOf('--') : rest.length);
+    const opt = (k: string) => {
+      const i = opts.indexOf(`--${k}`);
+      const eq = opts.find((x) => x.startsWith(`--${k}=`));
+      return i >= 0 ? opts[i + 1] : eq ? eq.slice(k.length + 3) : undefined;
+    };
+    // Words of the command that can be site names: "reset site-1", or "up --name x --count 2" (x-1,
+    // x-2). realCopiesForProfile keeps only the words that are real site names, so an option value
+    // (for example "--wp 6.5") does no harm.
+    const prefix = opt('name');
+    const count = Number(opt('count'));
+    const words = opts.slice(1).filter((x) => !x.startsWith('-'));
+    const names = [...words, ...(prefix || count ? Array.from({ length: count || 1 }, (_, i) => `${prefix ?? 'site'}-${i + 1}`) : [])];
+    const lock = testRunLockHolder();
+    if (lock) console.log(`WARNING: a test run (process ${lock}) uses the tracker sites now, so the plugin copy step did not run. A site that "${rest[0]}" made new can still have echowp's link to the tracker's copy: do not delete the plugin in WordPress there. The next test run puts a real copy in.`);
+    else await realCopiesForProfile(p, { profile: opt('profile'), config: opt('config'), names }, console.log);
+  }
+} else if (cmd === 'daily-sync') {
+  // The daily sync now, of each project that is due (server/daily-sync.ts). The server does this by
+  // itself; this command shows the due state, and syncs the due projects.
+  const { dailySyncState, runDue } = await import('./daily-sync.ts');
+  for (const d of dailySyncState().projects) console.log(`${d.project}: ${d.due ? 'due now' : `due at ${d.dueAt}`} (last sync ${d.lastSyncAt ?? 'never'})`);
+  await runDue(console.log);
 } else if (cmd === 'map-loop') {
   // Headless Claude maps one unit after the other with the map-features skill (server/map-loop.ts).
   const [id] = args;
@@ -240,7 +268,8 @@ if (cmd === 'add') {
     signal: job.abort.signal,
   });
   console.log(`\nPlaywright exit code: ${r.exit} (0 = all passed). The test site ${r.siteUrl} is still on.`);
+  if (r.copyGone) console.log('WARNING: the site has no real plugin copy now (a test deleted or replaced the plugin). The tracker\'s copy was not touched. Run run-spec again to get a new copy.');
   process.exitCode = r.exit === 0 ? 0 : 1;
 } else {
-  console.log('Commands: add, set-run, set-path, coverage-config, coverage-php, echowp, list, changes, set-sync, sync, ai-update, map-loop, run-spec. See server/cli.ts.');
+  console.log('Commands: add, set-run, set-path, coverage-config, coverage-php, echowp, list, changes, set-sync, sync, daily-sync, ai-update, map-loop, run-spec. See server/cli.ts.');
 }

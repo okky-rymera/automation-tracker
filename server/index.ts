@@ -7,6 +7,7 @@ import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBef
 import { listMarks, markEdits } from './line-marks.ts';
 import { listDecisions, removeDecision } from './code-decisions.ts';
 import { untestedChanges } from './selection.ts';
+import { dailySyncState, startDailySync } from './daily-sync.ts';
 import { testSource } from './test-source.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
@@ -295,6 +296,8 @@ app.post('/api/projects/:id/line-marks', edit((req) => markEdits.mark(proj(req),
 app.delete('/api/projects/:id/line-marks', edit((req) => markEdits.unmark(proj(req), req.body)));
 // Library decisions on functions that no test runs (server/code-decisions.ts). The AI skill adds them; a person can remove one.
 app.get('/api/projects/:id/code-decisions', (req, res) => res.json(listDecisions(proj(req).id)));
+// The daily sync (server/daily-sync.ts): on or off, and when each project is due.
+app.get('/api/daily-sync', (_req, res) => res.json(dailySyncState()));
 // Library changes that partial runs did not test again, until the next full run (server/selection.ts).
 app.get('/api/projects/:id/untested', (req, res) => res.json(untestedChanges(proj(req))));
 app.delete('/api/projects/:id/code-decisions', edit((req) => {
@@ -335,4 +338,9 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Local only: the app can read the plugin repo and change the database.
-app.listen(PORT, '127.0.0.1', () => console.log(`API on http://127.0.0.1:${PORT}`));
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`API on http://127.0.0.1:${PORT}`);
+  // The daily sync of each project with sync on, when it is due (server/daily-sync.ts). Not in a
+  // second server that runs on a copy of the database (TRACKER_DB), so a trial never starts real syncs.
+  if (!process.env.TRACKER_DB) startDailySync();
+});

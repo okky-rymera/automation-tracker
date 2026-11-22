@@ -190,6 +190,30 @@ async function trackerSites(p: ProjectConfig, env: NodeJS.ProcessEnv, extra: str
   }
 }
 
+/**
+ * A real plugin copy (useRealPluginCopy) on each running site of a profile. For "echowp up" and
+ * "echowp reset" from the command line, where a person or the AI starts a site by hand.
+ */
+export async function realCopiesForProfile(p: ProjectConfig, o: { profile?: string; config?: string; names?: string[] }, log: (l: string) => void): Promise<void> {
+  const warn = (why: string) => log(`WARNING: ${why}. A started site can still have echowp's link to the tracker's copy: do not delete the plugin in WordPress there. The next test run puts a real copy in.`);
+  const cov = await coveragePhp(log);
+  const extra = [...(o.profile ? ['--profile', o.profile] : []), ...(o.config ? ['--config', o.config] : [])];
+  const sites = await trackerSites(p, trackerEchowpEnv(cov), extra);
+  // The words of the command that are site names, in any state (a reset can name a stopped site).
+  // When no word is a site name (an "up" with options only), every running site.
+  const named = sites.filter((s) => o.names?.includes(s.name));
+  const running = named.length ? named : sites.filter((s) => s.status === 'running');
+  if (!running.length) return warn(sites.length ? 'no running site matches' : 'echowp ls gave no sites');
+  for (const s of running) {
+    const profile = o.profile;
+    try {
+      await useRealPluginCopy(p, s.name, profile, log, undefined, undefined, o.config);
+    } catch (e) {
+      warn(`${s.name}: ${(e as Error).message}`);
+    }
+  }
+}
+
 /** Runs one command and returns its exit code. The default adds setpriv and its own process group. */
 export type EchowpRunner = (cmd: string, args: string[], env: NodeJS.ProcessEnv, onLine: (l: string) => void) => Promise<number>;
 
@@ -341,6 +365,70 @@ export interface TestSite {
   /** echowp clone number: site-1 is 1. Playwright worker slot k uses the site with index k+1. */
   index: number;
   port: number;
+  /** The site's folder of the plugin: a real copy of the tracker's copy, with SITE_COPY_MARKER (useRealPluginCopy). */
+  plugin: string;
+}
+
+/** In each site's plugin copy. When it is gone after a test run, a test deleted or reinstalled the plugin. */
+export const SITE_COPY_MARKER = '.tracker-site-copy';
+/** Not copied to a site: the plugin does not need them, and tests/ holds the test packages. */
+const NOT_COPIED = new Set(['.git', 'tests', 'node_modules']);
+
+/** Removes a plugin folder of a site. A link is unlinked: a recursive delete must never follow it. */
+export function removeSitePlugin(target: string) {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(target);
+  } catch {
+    return;
+  }
+  if (st.isSymbolicLink()) fs.unlinkSync(target);
+  else fs.rmSync(target, { recursive: true, force: true }); // rmSync does not follow links inside
+}
+
+/**
+ * Puts a real copy of the tracker's plugin copy in a site, in place of echowp's link.
+ *
+ * WARNING: echowp puts the plugin in a site as a link to the tracker's copy. A test, or a person or
+ * the AI on the site, can delete the plugin through WordPress, and that delete follows the link: on
+ * 21 Nov 2026 it deleted the tracker's copy. So every tracker site gets a real copy each time it starts.
+ * Returns the site's plugin folder. Throws when the plugin folder of the site is not found.
+ */
+export async function useRealPluginCopy(p: ProjectConfig, siteName: string, profile: string | undefined, log: (l: string) => void, run?: EchowpRunner, signal?: AbortSignal, config?: string): Promise<string> {
+  let pluginDir = '';
+  await trackerEchowp(p, ['wp', siteName, ...(profile ? ['--profile', profile] : []), ...(config ? ['--config', config] : []), '--', 'eval', 'echo "TRACKER_PLUGIN_DIR=" . WP_PLUGIN_DIR . "\\n";'], (l) => {
+    const m = l.match(/TRACKER_PLUGIN_DIR=(\/.+)$/);
+    if (m) pluginDir = m[1].trim();
+  }, { run, signal });
+  if (!pluginDir || !fs.existsSync(pluginDir)) throw new Error(`could not find the plugin folder of the echowp site ${siteName}`);
+  const slug = path.basename(p.path);
+  const sitePlugin = path.join(pluginDir, slug);
+  if (path.dirname(sitePlugin) !== pluginDir) throw new Error(`Bad plugin path ${sitePlugin}`);
+  // The delete below must never reach the tracker's copy. Compare real paths (links resolved): the
+  // plugins folder itself, or a folder above it, can be a link.
+  const real = (x: string) => {
+    try {
+      return fs.realpathSync(x);
+    } catch {
+      return null;
+    }
+  };
+  const inside = (a: string, b: string) => a === b || a.startsWith(b + path.sep);
+  const copy = real(p.path);
+  const target = fs.existsSync(sitePlugin) && !fs.lstatSync(sitePlugin).isSymbolicLink() ? real(sitePlugin) : null;
+  const dir = real(pluginDir);
+  if (!copy || (target && (inside(target, copy) || inside(copy, target))) || (dir && inside(copy, dir))) {
+    throw new Error(`STOP: the plugin folder of ${siteName} (${sitePlugin}) is or holds the tracker's copy ${p.path}. Nothing was deleted.`);
+  }
+  removeSitePlugin(sitePlugin);
+  await fs.promises.cp(p.path, sitePlugin, {
+    recursive: true,
+    verbatimSymlinks: true,
+    filter: (src) => !NOT_COPIED.has(path.relative(p.path, src).split(path.sep)[0]),
+  });
+  fs.writeFileSync(path.join(sitePlugin, SITE_COPY_MARKER), `Copy of ${p.path}. The tracker deletes this folder each time the site starts.\n`);
+  log(`${siteName}: a real copy of ${slug} (not a link)`);
+  return sitePlugin;
 }
 
 export interface TestSites {
@@ -409,13 +497,19 @@ export async function startTestSites(
       const s = running.find((x) => x.name === name);
       const port = s && sitePort(s);
       if (!s || !port) throw new Error(`echowp up ended, but echowp ls shows no running site ${name} with a port in profile "${profile}".`);
-      sites.push({ name, url: String(s.url).replace(/\/+$/, ''), index: i + 1, port });
+      sites.push({ name, url: String(s.url).replace(/\/+$/, ''), index: i + 1, port, plugin: '' });
     }
     // A clean database for each run, so that the data of the last run does not change the result.
     for (const s of sites) {
       const reset = await trackerEchowp(p, ['reset', s.name, ...prof], log, o);
       if (reset !== 0) throw new Error(`echowp reset ${s.name} failed (exit ${reset}).`);
     }
+    // A real plugin copy on each site, never echowp's link to the tracker's copy (useRealPluginCopy).
+    for (const s of sites) {
+      if (signal?.aborted) throw new Error('Cancelled');
+      s.plugin = await useRealPluginCopy(p, s.name, profile, log, run, signal);
+    }
+    if (signal?.aborted) throw new Error('Cancelled');
     return { sites, stop: stopAll };
   } catch (e) {
     // A failed or cancelled start must not leave a site on.

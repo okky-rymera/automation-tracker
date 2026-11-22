@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { mutate } from '../api';
+import { mutate, useApi } from '../api';
 import './design.css';
 import { useTracker, when, short, partialText, type Tracker, type SyncState } from './data';
 import { go, link, useRoute, type Route } from './route';
@@ -185,6 +185,7 @@ function SyncPop({ t, s, onClose }: { t: Tracker; s: SyncState; onClose: () => v
             </>
           )}
           {last && !running && last.status !== 'done' && last.error && <div className="err">{last.error.split('\n')[0]}</div>}
+          <DailySyncLine project={t.project} />
           <div className="muted" style={{ fontSize: 13 }}>
             {chg ? `${chg} changes in ${chgF} features wait for you.` : 'No change waits for a review.'}
           </div>
@@ -211,6 +212,24 @@ function SyncPop({ t, s, onClose }: { t: Tracker; s: SyncState; onClose: () => v
         <span style={{ flex: 1 }} />
         <button className="btn btn-sm" onClick={onClose}>Close</button>
       </div>
+    </div>
+  );
+}
+
+interface DailySync { on: boolean; hours: number; running: string | null; projects: { project: string; lastSyncAt: string | null; dueAt: string; due: boolean; waiting: string | null }[] }
+
+/** "Daily sync: once each 24 hours, when it is due. Next: Nov 23, 8:49 AM." (server/daily-sync.ts) */
+function DailySyncLine({ project }: { project: string }) {
+  const { data: d } = useApi<DailySync>('/api/daily-sync');
+  if (!d) return null;
+  if (!d.on) return <div className="muted" style={{ fontSize: 13 }}>Daily sync: off (TRACKER_DAILY_SYNC=off).</div>;
+  const mine = d.projects.find((x) => x.project === project);
+  if (!mine) return null; // sync is off for this project: the panel says so above
+  return (
+    <div className="muted" style={{ fontSize: 13 }}>
+      Daily sync: once each {d.hours} hours, when it is due, with the tests on "when code changed".
+      {mine.due ? ' This project is due now.' : ` Next: ${when(mine.dueAt)}, or the first time the tracker runs after that.`}
+      {mine.waiting && ` It waits: ${mine.waiting}`}
     </div>
   );
 }

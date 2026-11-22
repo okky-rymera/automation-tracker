@@ -132,7 +132,13 @@ Built on 19 Nov 2026 in `server/ai-update.ts`. Command: `npm run project -- ai-u
      - No failed logins. The copy has no changed files after the run.
    - Test after the code review fixes (DB copy, 4 workers): 2.8 minutes, 47 passed, 2 skipped. 47 of 49 tests ran the same functions as the 1-worker run.
    - Port clash test: port 8806 held by another program, 5 workers. The run removed the 4 old sites and made 5 new sites on ports 8801 to 8805 in about 2 minutes. 47 passed, 2 skipped.
-3. [ ] Run the sync on a schedule (each night or each week), not only by hand. Run tests only when PHP or test files changed.
+3. [x] Run the sync on a schedule. Decided on 22 Nov 2026: once a day, when it is due, not at a fixed time (the user's computer is not on at night). Built on 22 Nov 2026 (`server/daily-sync.ts`):
+   - A project with sync on is due when its last sync (any status, also one that a person started) started 24 hours ago or more, or never. The server checks each minute from 1 minute after it starts, and syncs the due projects one after the other with the tests on "auto". A busy project (sync, AI update, mapping loop) is tried again at the next check; the reason is logged once.
+   - `TRACKER_DAILY_SYNC=off`, `TRACKER_DAILY_SYNC_HOURS`. A second server on a DB copy (`TRACKER_DB`) does not start it. `GET /api/daily-sync`; the sync panel shows the next due time. `npm run project -- daily-sync` shows the due state and syncs the due projects.
+   - First version (a fixed night window, 02:00 to 07:00) was replaced the same day: the user's computer is off at night.
+   - Test: not due 6 minutes after the last sync (due at +24 h). With `TRACKER_DAILY_SYNC_HOURS=0.01`: due, sync 18 done; the next due time moved to 24 hours after sync 18.
+   - Fixes after the code review on 22 Nov 2026: no daily sync starts while any test run holds `data/test-run.lock` (it would fail at its test step and count as the day's sync); an interrupted sync (server restart) does not count; one wait note for each project, cleared when the project starts or is not due; no daily sync line for a project with sync off. Test: with a held lock, a due project waited and no sync started.
+   - Copy step of a start by hand: it passes `--config` to the `wp` call too. A word of the command counts as a site name only when `echowp ls` knows it; when no word is a site name, every running site gets the copy (so an option value such as `--wp 6.5` does no harm).
 4. [ ] Make adding a plugin easy: the copy, the `.env` file, the test packages, the site link, and the project in the app.
 5. [ ] Decide where the runs happen: this computer, a CI server (Buddy), or a cloud machine.
 
@@ -287,6 +293,19 @@ Goal: a sync must not run all tests for 95 minutes. One wwp sync on 21 Nov 2026 
    - Code screen (22 Nov 2026, `web/src/app/screens/LibraryReview.tsx`): a card "Library code decided by the AI" (function, file, reason, who, date, commit, and a Remove button), and a card "Library changes not tested again" (the `untested` list of the selected Playwright and Cypress runs, with the date of the next full run). API: `GET /api/projects/:id/untested`. Checked on a DB copy in a second app on port 5180: both lists show, Remove deletes the decision, and the cards fit a 390 px wide screen.
 
 Estimate with all steps: Cypress about 3 to 6 minutes for each sync plus 2 to 3 minutes of site setup, and about 15 minutes for each full run. For 40 plugins: about 1 to 2 hours of computer time each day.
+
+## Phase 7: Safety and checks
+
+1. [x] **A real plugin copy on every tracker site** (22 Nov 2026). The mapping loop's site (`site-1`, profile `test`) had the plugin as echowp's link to the tracker's copy. A delete of the plugin in WordPress (the Cypress step "Show activation status", or the AI on the site) would delete the tracker's copy, as on 21 Nov.
+   - `startTestSites` (`server/echowp.ts`) now puts a real copy with the marker on each site after the start: the Playwright and Cypress jobs and `run-spec` use it. `npm run project -- echowp <id> up|reset` does the same for the running sites of the profile.
+   - The Cypress job uses this copy (no own copy now) and still checks the marker after the run.
+   - Test: `run-spec` of `backend/settings/wholesale-price-text.spec.js` (3 passed), `site-1` had a real copy with the marker. `wp plugin delete woocommerce-wholesale-prices` on `site-1` deleted the site's copy; the tracker's copy kept its 722 files (without `.git` and `tests`), `.git` and the main file, and `git status` was clean. `echowp wwp reset site-1` put the real copy back.
+   - Fixes after the code review on 22 Nov 2026:
+     - The copy compares real paths (links resolved). It refuses when the site's plugin folder is or holds the tracker's copy, or when the plugins folder holds it.
+     - A start by hand copies only the sites that the command names (`reset site-1`, `up --name x --count 2`), in any state; with no names, every running site. It does not copy while a test run holds `data/test-run.lock`: the copy would delete a plugin folder under running tests. It warns when `echowp ls` gives no site, and it passes `--config`.
+     - The Playwright job checks each site's copy and marker after the run (as the Cypress job does), and the tracker's `.git`. Else the run is not selected. `run-spec` prints a warning when the copy is gone.
+     - A cancel stops between the copies of the sites.
+     - Tests: `reset site-1` on a stopped site put a real copy in; with a held lock it only warned.
 
 ## Later
 

@@ -176,13 +176,15 @@ Cypress runs one test at a time. So the job starts one Cypress process for each 
 
 Each Cypress process runs in its own hidden screen, through `xvfb-run -d` (package `xvfb`). Without it, all processes use Xvfb display 99: the process that ends first closes the screen, and the others stop in the middle of a spec. When `xvfb-run` is missing, the job uses 1 site.
 
-WARNING: Some Cypress tests delete the plugin through WordPress. On a site where the plugin is a link to the tracker's copy, the delete removes the copy. On 21 Nov 2026 this deleted the copy of wwp. So the Cypress site never uses a link.
+WARNING: Some Cypress tests delete the plugin through WordPress. On a site where the plugin is a link to the tracker's copy, the delete removes the copy. On 21 Nov 2026 this deleted the copy of wwp. So no tracker site uses a link.
+
+Each time a tracker site starts (the Playwright and Cypress jobs, `run-spec` of the mapping loop, and `npm run project -- echowp <id> up`, `reset` or `start`), the tracker removes echowp's link and puts a real copy of the plugin in its place, with the marker file `.tracker-site-copy` (`useRealPluginCopy` in `server/echowp.ts`). A start by hand copies only the sites that the command names, and not while a test run holds the lock. The copy refuses to start when the real path of the site's plugin folder is or holds the tracker's copy. After a Playwright or Cypress run, each site must still have its copy with the marker: else the run is not selected. Test on 22 Nov 2026: `wp plugin delete` on `site-1` deleted only the site's copy. The tracker's copy kept all its files.
 
 Before each Cypress run, the job does these steps:
 
 1. It installs the Cypress packages when `package.json` or the lock file changed.
 2. It starts the sites with a clean database.
-3. On each site, it deletes the site's plugin folder and copies the plugin from the tracker's copy, without `.git`, `tests` and `node_modules`. It puts the marker file `.tracker-site-copy` in the site's copy.
+3. Each site gets a real copy of the plugin when it starts (see the warning above), without `.git`, `tests` and `node_modules`, with the marker file `.tracker-site-copy`.
 4. It gets the Cypress Helper Plugin from GitHub trunk (`gh api`, so `gh` must be logged in). It turns the Test Helper Plugin off, because both plugins declare the same PHP function.
 5. It sets the store and debug settings from the literal `wp option update` and `wp config set` lines of `cypress/support/wpCliSetup.sh`. It skips lines with `$` and logs them.
 
@@ -202,6 +204,17 @@ The run is not selected in these cases:
 For a short trial, set `TRACKER_CYPRESS_SPECS` to a comma-separated list of spec files, relative to the Cypress project folder.
 
 Each site has its own log (`full-run-cy-1.log` …) and Cucumber messages file (`cucumber-messages-cy-1.ndjson` …) in the run folder. After the baseline page loads, each site must have recorded lines of the plugin. Else the job stops with the reason.
+
+### Daily sync
+
+The tracker server syncs each project with sync on once a day, when it is due (`server/daily-sync.ts`). There is no fixed time: the computer does not need to be on at night.
+
+- A project is due when its last sync started 24 hours ago or more. A sync that you start counts too. A failed sync counts too, so it runs again the next day, not each minute.
+- The server checks each minute, from 1 minute after it starts. It syncs the due projects one after the other, with the tests on "when code changed": a partial run, or a full run each 7 days.
+- A project that cannot sync now (a sync, an AI update or a mapping loop runs) is tried again at the next check.
+- The sync panel shows when the project is due next.
+- `TRACKER_DAILY_SYNC=off` turns it off. `TRACKER_DAILY_SYNC_HOURS=12` changes the 24 hours.
+- `npm run project -- daily-sync` shows when each project is due, and syncs the due projects now.
 
 ### Partial runs (test selection)
 
