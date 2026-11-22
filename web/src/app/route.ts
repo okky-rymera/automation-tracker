@@ -15,7 +15,7 @@ import { useEffect, useState } from 'react';
  *   #/p/<project>/map                map features with AI
  * Any route can carry ?back=<hash>&bl=<label>: the "Back to …" button.
  */
-export type Screen = 'projects' | 'overview' | 'flist' | 'feature' | 'changes' | 'tests' | 'test' | 'code' | 'codefile' | 'sync' | 'map';
+export type Screen = 'projects' | 'overview' | 'flist' | 'feature' | 'changes' | 'tests' | 'test' | 'code' | 'codefile' | 'sync' | 'map' | 'settings';
 
 export interface Route {
   project: string | null;
@@ -25,7 +25,7 @@ export interface Route {
   q: URLSearchParams;
 }
 
-const SCREENS: Record<string, Screen> = { features: 'flist', changes: 'changes', tests: 'tests', code: 'code', sync: 'sync', map: 'map' };
+const SCREENS: Record<string, Screen> = { features: 'flist', changes: 'changes', tests: 'tests', code: 'code', sync: 'sync', map: 'map', settings: 'settings' };
 
 export function readRoute(hash = location.hash): Route {
   const [pathPart, query = ''] = hash.replace(/^#/, '').split('?');
@@ -48,7 +48,7 @@ export function readRoute(hash = location.hash): Route {
 }
 
 const PATHS: Record<Screen, string> = {
-  projects: '', overview: '', flist: 'features', feature: 'features', changes: 'changes', tests: 'tests', test: 'tests', code: 'code', codefile: 'code/file', sync: 'sync', map: 'map',
+  projects: '', overview: '', flist: 'features', feature: 'features', changes: 'changes', tests: 'tests', test: 'tests', code: 'code', codefile: 'code/file', sync: 'sync', map: 'map', settings: 'settings',
 };
 
 /** Link to a screen. q: query values (empty values are left out). */

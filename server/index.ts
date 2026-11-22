@@ -9,6 +9,7 @@ import { listDecisions, removeDecision } from './code-decisions.ts';
 import { listLeftOut, removeLeftOut } from './left-out.ts';
 import { untestedChanges } from './selection.ts';
 import { dailySyncState, startDailySync } from './daily-sync.ts';
+import { listSettings, saveSettings, SettingError } from './settings.ts';
 import { testSource } from './test-source.ts';
 import { fileDetail, listFiles, type FileEntry } from './files.ts';
 import { listPlaywright, playwrightErrors } from './playwright.ts';
@@ -302,6 +303,16 @@ app.post('/api/projects/:id/line-marks', edit((req) => markEdits.mark(proj(req),
 app.delete('/api/projects/:id/line-marks', edit((req) => markEdits.unmark(proj(req), req.body)));
 // Library decisions on functions that no test runs (server/code-decisions.ts). The AI skill adds them; a person can remove one.
 app.get('/api/projects/:id/code-decisions', (req, res) => res.json(listDecisions(proj(req).id)));
+// Settings of the whole tracker (server/settings.ts). PATCH body: { key: value }; null puts a setting back to its default.
+app.get('/api/settings', (_req, res) => res.json(listSettings()));
+app.patch('/api/settings', (req, res) => {
+  try {
+    res.json(saveSettings(req.body ?? {}));
+  } catch (e) {
+    if (e instanceof SettingError) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+});
 // The daily sync (server/daily-sync.ts): on or off, and when each project is due.
 app.get('/api/daily-sync', (_req, res) => res.json(dailySyncState()));
 // Library changes that partial runs did not test again, until the next full run (server/selection.ts).

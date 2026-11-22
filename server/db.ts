@@ -664,6 +664,15 @@ const MIGRATIONS: string[] = [
   );
   ALTER TABLE projects ADD COLUMN ai_reviewed_commit TEXT;
   `,
+  // 31: settings of the whole tracker that a person changes on the Settings screen (server/settings.ts).
+  //     value is JSON. An environment variable wins over the row.
+  `
+  CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  `,
 ];
 
 function open(): DatabaseSync {

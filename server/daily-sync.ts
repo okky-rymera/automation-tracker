@@ -2,7 +2,7 @@
  * Daily sync (docs/sync-plan.md phase 4, step 3). Decided on 22 Nov 2026: once a day, when it is due,
  * not at a fixed time (the computer is not on at night).
  *
- * A project with sync on is due when its last sync started DUE_HOURS (24) ago or more, or when it
+ * A project with sync on is due when its last sync started dailySyncHours (24) ago or more, or when it
  * never synced. A sync that a person starts counts too. A failed or cancelled sync counts as well, so
  * a broken sync runs again the next day, not each minute. An interrupted sync (the server stopped, for
  * example a restart of "npm run dev") does not count: it runs again at the next check.
@@ -13,22 +13,22 @@
  * no test run when nothing changed. A project that cannot start now (a sync, an AI update or a mapping
  * loop runs) is tried again at the next check.
  *
- * TRACKER_DAILY_SYNC=off turns it off. TRACKER_DAILY_SYNC_HOURS=12 changes the 24 hours.
+ * The Settings screen turns it off, or changes the 24 hours (TRACKER_DAILY_SYNC, TRACKER_DAILY_SYNC_HOURS win).
  *
  * The AI step (docs/sync-plan.md phase 8). When no project is due for a sync, the runner gives one
  * project at a time to the AI:
  *  1. The AI update (server/ai-update.ts runReview): the features whose tests or code changed since
  *     the last AI check.
- *  2. The mapping loop (server/map-loop.ts), with at most AI_UNITS units: changed, new and unlinked
+ *  2. The mapping loop (server/map-loop.ts), with at most dailyAiUnits units: changed, new and unlinked
  *     test files, then the code that no test runs.
  * A project gets the AI step after each sync, until the loop finds no unit left. At the unit limit,
  * it waits until the next day, so each project gets some AI work each day.
  * The syncs go first: the AI step stops between 2 units (or 2 features) when a sync is due.
  * The AI step uses the same Claude plan as the user's own sessions. It does not start, and it stops
- * between units, when a run reported AI_MAX_USE % use or more of a limit window (default 80). It
+ * between units, when a run reported dailyAiMaxUse % use or more of a limit window (default 80). It
  * waits until that window resets. A loop or AI update that a person starts has no such stop.
- * TRACKER_DAILY_AI=off turns the AI step off. TRACKER_DAILY_AI_UNITS, TRACKER_DAILY_AI_MAX_USE and
- * TRACKER_DAILY_AI_MODEL (for example sonnet) change the numbers and the model.
+ * All the numbers, the model, and both on/off switches are on the Settings screen (server/settings.ts).
+ * An environment variable (TRACKER_DAILY_SYNC, TRACKER_DAILY_AI, TRACKER_DAILY_AI_UNITS …) wins.
  */
 import { db } from './db.ts';
 import { loadProjects } from './projects.ts';
@@ -38,21 +38,17 @@ import { aiRunning, runReview } from './ai-update.ts';
 import { markLoopStopped, startMapLoop } from './map-loop.ts';
 import { mapLoopRunning, syncRunning } from './sync.ts';
 import { planUse } from './plan-limit.ts';
+import { setting } from './settings.ts';
 
-const DUE_HOURS = (() => {
-  const v = Number.parseFloat(process.env.TRACKER_DAILY_SYNC_HOURS ?? '');
-  return v > 0 ? v : 24;
-})();
-const isOn = () => !/^(off|false|0)$/i.test((process.env.TRACKER_DAILY_SYNC ?? '').trim());
-const aiOn = () => !/^(off|false|0)$/i.test((process.env.TRACKER_DAILY_AI ?? '').trim());
-const numEnv = (k: string, d: number) => {
-  const v = Number.parseFloat(process.env[k] ?? '');
-  return v > 0 ? v : d;
-};
-const AI_UNITS = Math.round(numEnv('TRACKER_DAILY_AI_UNITS', 10));
-const AI_MAX_USE = numEnv('TRACKER_DAILY_AI_MAX_USE', 80);
+// The Settings screen (server/settings.ts) sets these; an environment variable wins. Each is read
+// when it is needed, so a change works at the next check, with no restart.
+const dueHours = () => setting<number>('dailySyncHours');
+const isOn = () => setting<boolean>('dailySync');
+const aiOn = () => setting<boolean>('dailyAi');
+const aiUnits = () => setting<number>('dailyAiUnits');
+const aiMaxUse = () => setting<number>('dailyAiMaxUse');
 /** The model of the daily AI step. Default: sonnet (decided on 22 Nov 2026: it uses less of the plan). */
-const AI_MODEL = (process.env.TRACKER_DAILY_AI_MODEL ?? '').trim() || 'sonnet';
+const aiModel = () => setting<string>('dailyAiModel');
 
 export interface DueInfo {
   project: string;
@@ -69,7 +65,7 @@ export function dueProjects(now = new Date()): DueInfo[] {
     .filter((p) => p.syncBranch)
     .map((p) => {
       const last = (db.prepare("SELECT MAX(started_at) AS t FROM syncs WHERE project_id = ? AND status != 'interrupted'").get(p.id) as any)?.t ?? null;
-      const dueAt = last ? new Date(new Date(last).getTime() + DUE_HOURS * 3_600_000) : now;
+      const dueAt = last ? new Date(new Date(last).getTime() + dueHours() * 3_600_000) : now;
       return { project: p.id, lastSyncAt: last, dueAt: dueAt.toISOString(), due: dueAt <= now };
     });
 }
@@ -79,7 +75,7 @@ let running: string | null = null;
 const notes = new Map<string, string>();
 
 /** Syncs the due projects, one after the other. */
-export async function runDue(log: (l: string) => void = console.log): Promise<void> {
+export async function runDue(log: (l: string) => void = console.log, o: { evenIfOff?: boolean } = {}): Promise<void> {
   if (running) return;
   const wait = (project: string, why: string) => {
     // Log a reason only once, not each minute.
@@ -88,6 +84,9 @@ export async function runDue(log: (l: string) => void = console.log): Promise<vo
   };
   try {
     for (const d of dueProjects()) {
+      // Switched off on the Settings screen while the syncs ran: start no more. The daily-sync command
+      // of a person syncs anyway.
+      if (!o.evenIfOff && !isOn()) return;
       if (!d.due) {
         notes.delete(d.project);
         continue;
@@ -120,7 +119,7 @@ export async function runDue(log: (l: string) => void = console.log): Promise<vo
 
 /** The project and step that the AI works on now. */
 let aiNow: { project: string; step: 'review' | 'map'; startedAt: string } | null = null;
-/** The AI step waits until this time (ms): the plan use is at AI_MAX_USE or more. */
+/** The AI step waits until this time (ms): the plan use is at aiMaxUse() or more. */
 let aiWaitUntil: number | null = null;
 /** The last AI note, for the app (a stop reason, an error). */
 let aiNote: string | null = null;
@@ -148,7 +147,7 @@ function aiFinished(projectId: string, syncStartedAt: string): string | null {
     )
     .get(projectId, day());
   if (ended) return 'stopped';
-  if (unitsToday(projectId) >= AI_UNITS) return 'capped';
+  if (unitsToday(projectId) >= aiUnits()) return 'capped';
   return null;
 }
 
@@ -172,9 +171,10 @@ function dueNow(): string[] {
 
 /** A reason to stop the AI step now, or null. */
 function aiStopReason(): string | null {
+  if (!isOn() || !aiOn()) return 'The daily sync or its AI step was switched off on the Settings screen.';
   if (dueNow().length) return 'A daily sync is due. The AI step goes on after the syncs.';
-  const use = planUse(AI_MODEL);
-  if (use && use.value * 100 >= AI_MAX_USE) return `The ${use.window} use of the Claude plan is ${Math.round(use.value * 100)}% (the AI step stops at ${AI_MAX_USE}%).`;
+  const use = planUse(aiModel());
+  if (use && use.value * 100 >= aiMaxUse()) return `The ${use.window} use of the Claude plan is ${Math.round(use.value * 100)}% (the AI step stops at ${aiMaxUse()}%).`;
   return null;
 }
 
@@ -182,8 +182,8 @@ function aiStopReason(): string | null {
 export async function runAiStep(log: (l: string) => void = console.log): Promise<void> {
   if (!aiOn() || aiNow) return;
   if (dueNow().length) return;
-  const use = planUse(AI_MODEL);
-  if (use && use.value * 100 >= AI_MAX_USE) {
+  const use = planUse(aiModel());
+  if (use && use.value * 100 >= aiMaxUse()) {
     // Wait for the reset of the window. Without a reset time, look again in one hour.
     if (aiWaitUntil === null) log(`Daily AI step waits: the ${use.window} use of the Claude plan is ${Math.round(use.value * 100)}%.`);
     aiWaitUntil = use.resetsAt ?? Date.now() + 3_600_000;
@@ -204,7 +204,7 @@ export async function runAiStep(log: (l: string) => void = console.log): Promise
     aiNote = null;
     try {
       aiNow = { project: p.id, step: 'review', startedAt: new Date().toISOString() };
-      const rv = await runReview(p, { model: AI_MODEL, onLine: say, shouldStop: aiStopReason });
+      const rv = await runReview(p, { model: aiModel(), onLine: say, shouldStop: aiStopReason });
       if (rv.stoppedBy) {
         aiNote = `${p.id}: the AI update stopped: ${rv.stoppedBy}`;
         say(`stopped: ${rv.stoppedBy}`);
@@ -212,9 +212,9 @@ export async function runAiStep(log: (l: string) => void = console.log): Promise
       }
       aiNow = { project: p.id, step: 'map', startedAt: new Date().toISOString() };
       // The units of today's earlier daily loops count: a loop that a due sync stopped does not get a new 10.
-      const left = AI_UNITS - unitsToday(p.id);
+      const left = aiUnits() - unitsToday(p.id);
       if (left <= 0) return;
-      const { loopId, done } = startMapLoop(p, { model: AI_MODEL, maxUnits: left, startedBy: 'sync', shouldStop: aiStopReason, onLine: say });
+      const { loopId, done } = startMapLoop(p, { model: aiModel(), maxUnits: left, startedBy: 'sync', shouldStop: aiStopReason, onLine: say });
       await done;
       // The loop row says if the project is done or capped (aiFinished). Other ends: note the reason.
       const row = db.prepare('SELECT status, stop_reason FROM map_loops WHERE id = ?').get(loopId) as any;
@@ -236,30 +236,27 @@ export async function runAiStep(log: (l: string) => void = console.log): Promise
 export function dailySyncState() {
   return {
     on: isOn(),
-    hours: DUE_HOURS,
+    hours: dueHours(),
     running,
     projects: dueProjects().map((d) => ({ ...d, waiting: notes.get(d.project) ?? null })),
     ai: {
       on: isOn() && aiOn(),
-      units: AI_UNITS,
-      maxUse: AI_MAX_USE,
+      units: aiUnits(),
+      maxUse: aiMaxUse(),
       now: aiNow,
       waitingUntil: aiWaitUntil !== null && aiWaitUntil > Date.now() ? new Date(aiWaitUntil).toISOString() : null,
       note: aiNote,
-      planUse: planUse(AI_MODEL),
+      planUse: planUse(aiModel()),
     },
   };
 }
 
 /** Checks each minute for due projects, from 1 minute after the server starts. */
 export function startDailySync(log: (l: string) => void = console.log) {
-  if (!isOn()) {
-    log('Daily sync: off (TRACKER_DAILY_SYNC=off)');
-    return;
-  }
+  // The timer always runs: the Settings screen can turn the daily sync on or off at any time.
   let busy = false;
   const tick = () => {
-    if (running || busy) return;
+    if (running || busy || !isOn()) return;
     busy = true;
     runDue(log)
       .catch((e) => log(`Daily sync failed: ${(e as Error).message}`))
@@ -270,6 +267,7 @@ export function startDailySync(log: (l: string) => void = console.log) {
   const timer = setInterval(tick, 60_000);
   timer.unref();
   const due = dueProjects().filter((d) => d.due).map((d) => d.project);
-  log(`Daily sync: each project once each ${DUE_HOURS} hours, when it is due. Due now: ${due.join(', ') || 'none'}.`);
-  log(aiOn() ? `Daily AI step (${AI_MODEL}): after the syncs, at most ${AI_UNITS} units for each project each day; it stops at ${AI_MAX_USE}% plan use.` : 'Daily AI step: off (TRACKER_DAILY_AI=off)');
+  if (!isOn()) return log('Daily sync: off (Settings screen). It starts when you turn it on there.');
+  log(`Daily sync: each project once each ${dueHours()} hours, when it is due. Due now: ${due.join(', ') || 'none'}.`);
+  log(aiOn() ? `Daily AI step (${aiModel()}): after the syncs, at most ${aiUnits()} units for each project each day; it stops at ${aiMaxUse()}% plan use.` : 'Daily AI step: off (Settings screen)');
 }

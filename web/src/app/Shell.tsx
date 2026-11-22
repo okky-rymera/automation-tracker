@@ -15,6 +15,7 @@ import { CodeList } from './screens/Code';
 import { CodeFile } from './screens/CodeFile';
 import { SyncPage } from './screens/Sync';
 import { MapPage } from './screens/MapAi';
+import { SettingsPage } from './screens/Settings';
 
 export function App() {
   const route = useRoute();
@@ -70,6 +71,7 @@ function Screen({ route, t }: { route: Route; t: Tracker }) {
     case 'codefile': return <CodeFile t={t} route={route} />;
     case 'sync': return <SyncPage t={t} />;
     case 'map': return <MapPage t={t} />;
+    case 'settings': return <SettingsPage />;
     default: return <Overview t={t} />;
   }
 }
@@ -82,6 +84,7 @@ function Header({ route, project, t, openPal }: { route: Route; project: string;
     [['changes'], 'Changes', chg ? String(chg) : '', link(project, 'changes')],
     [['tests', 'test'], 'Tests', t ? String(t.tests.length) : '', link(project, 'tests')],
     [['code', 'codefile'], 'Code', '', link(project, 'code')],
+    [['settings'], 'Settings', '', link(project, 'settings')],
   ];
   return (
     <header className="top">
@@ -225,7 +228,7 @@ interface DailySync {
 function DailySyncLine({ project }: { project: string }) {
   const { data: d } = useApi<DailySync>('/api/daily-sync');
   if (!d) return null;
-  if (!d.on) return <div className="muted" style={{ fontSize: 13 }}>Daily sync: off (TRACKER_DAILY_SYNC=off).</div>;
+  if (!d.on) return <div className="muted" style={{ fontSize: 13 }}>Daily sync: off. <a className="linkbtn" href={link(project, 'settings')}>Settings</a> turns it on.</div>;
   const mine = d.projects.find((x) => x.project === project);
   if (!mine) return null; // sync is off for this project: the panel says so above
   return (
@@ -235,7 +238,7 @@ function DailySyncLine({ project }: { project: string }) {
       {mine.waiting && ` It waits: ${mine.waiting}`}
       {' '}
       {!d.ai.on
-        ? 'The AI step after the sync is off (TRACKER_DAILY_AI=off).'
+        ? 'The AI step after the sync is off (see Settings).'
         : d.ai.now
           ? `AI step now: ${d.ai.now.project}, ${d.ai.now.step === 'review' ? 'the AI update' : 'the mapping loop'} (since ${when(d.ai.now.startedAt)}).`
           : d.ai.waitingUntil

@@ -199,7 +199,7 @@ if (cmd === 'add') {
   // itself; this command shows the due state, and syncs the due projects.
   const { dailySyncState, runDue } = await import('./daily-sync.ts');
   for (const d of dailySyncState().projects) console.log(`${d.project}: ${d.due ? 'due now' : `due at ${d.dueAt}`} (last sync ${d.lastSyncAt ?? 'never'})`);
-  await runDue(console.log);
+  await runDue(console.log, { evenIfOff: true });
 } else if (cmd === 'map-loop') {
   // Headless Claude maps one unit after the other with the map-features skill (server/map-loop.ts).
   const [id] = args;

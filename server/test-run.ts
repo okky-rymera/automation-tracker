@@ -21,6 +21,7 @@
  * The copy's .env can say ECHOWP=true. The job always sets ECHOWP=false and BASE_URL, so the
  * tests use the tracker's site, and the plugin's own echowp setup (which can call sudo) does nothing.
  */
+import { setting } from './settings.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -150,8 +151,9 @@ const PW_CONFIGS = ['playwright.config.ts', 'playwright.config.js', 'playwright.
  * the CPUs gives slow requests and timeouts. TRACKER_TEST_WORKERS changes it (for trials).
  */
 export function testWorkers(): number {
-  const env = Number.parseInt(process.env.TRACKER_TEST_WORKERS ?? '', 10);
-  if (env > 0) return env;
+  // The Settings screen, or TRACKER_TEST_WORKERS. 0: automatic.
+  const n = setting<number>('testWorkers');
+  if (n > 0) return n;
   return Math.max(1, Math.min(MAX_WORKERS, Math.floor(os.cpus().length / 2)));
 }
 const MAX_WORKERS = 4;

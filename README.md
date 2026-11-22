@@ -209,6 +209,12 @@ For a short trial, set `TRACKER_CYPRESS_SPECS` to a comma-separated list of spec
 
 Each site has its own log (`full-run-cy-1.log` …) and Cucumber messages file (`cucumber-messages-cy-1.ndjson` …) in the run folder. After the baseline page loads, each site must have recorded lines of the plugin. Else the job stops with the reason.
 
+### Settings
+
+The Settings tab holds the settings of the whole tracker: the daily sync, the AI step after it, and the test runs (full-run days, the library code limit, the number of test sites). A change works within 1 minute, with no restart (`server/settings.ts`, table `settings`).
+
+An environment variable of the server wins over the screen, and the screen shows that setting as locked: `TRACKER_DAILY_SYNC`, `TRACKER_DAILY_SYNC_HOURS`, `TRACKER_DAILY_AI`, `TRACKER_DAILY_AI_MODEL`, `TRACKER_DAILY_AI_UNITS`, `TRACKER_DAILY_AI_MAX_USE`, `TRACKER_FULL_RUN_DAYS`, `TRACKER_LIBRARY_SHARE` (0.9 = 90%) and `TRACKER_TEST_WORKERS`.
+
 ### Daily sync
 
 The tracker server syncs each project with sync on once a day, when it is due (`server/daily-sync.ts`). There is no fixed time: the computer does not need to be on at night.
@@ -217,10 +223,10 @@ The tracker server syncs each project with sync on once a day, when it is due (`
 - The server checks each minute, from 1 minute after it starts. It syncs the due projects one after the other, with the tests on "when code changed": a partial run, or a full run each 7 days.
 - A project that cannot sync now (a sync, an AI update or a mapping loop runs) is tried again at the next check.
 - The sync panel shows when the project is due next.
-- `TRACKER_DAILY_SYNC=off` turns it off. `TRACKER_DAILY_SYNC_HOURS=12` changes the 24 hours.
+- The Settings screen (the Settings tab) turns it off, or changes the 24 hours.
 - `npm run project -- daily-sync` shows when each project is due, and syncs the due projects now.
 
-**The AI step after the sync** (on by default; `TRACKER_DAILY_AI=off` turns it off). It uses Sonnet; `TRACKER_DAILY_AI_MODEL=opus` changes that. When no project is due for a sync, the server gives one project at a time to Claude:
+**The AI step after the sync** (on by default; the Settings screen turns it off). It uses Sonnet; the Settings screen changes the model. When no project is due for a sync, the server gives one project at a time to Claude:
 
 1. The AI update checks the features whose tests or code changed since the last AI check. The list keeps these features from day to day, so a day with no AI step loses nothing.
 2. The mapping loop does at most 10 units: changed, new and unlinked test files, then the code that no test runs.
@@ -229,7 +235,7 @@ The tracker server syncs each project with sync on once a day, when it is due (`
 - The syncs go first. When a sync becomes due, the AI step stops after the current unit or feature.
 - **Important:** the AI step uses your Claude plan, the same plan as your own Claude sessions. It does not start, and it stops between units, when a run reports 80% use or more of the 5-hour or weekly limit. It waits until that limit resets.
 - A feature that the AI update cannot check on 2 days is parked. The Sync screen lists it, with "Try again".
-- `TRACKER_DAILY_AI_UNITS`, `TRACKER_DAILY_AI_MAX_USE` (percent) and `TRACKER_DAILY_AI_MODEL` change the numbers and the model.
+- The Settings screen changes the number of units, the plan-use stop and the model.
 
 ### Partial runs (test selection)
 
@@ -247,7 +253,7 @@ The sync makes a full run in these cases:
 
 - the sync asks for "always"
 - there is no selected run, or it has no requests, windows or plugin commit
-- the last full run is 7 days old or older (`TRACKER_FULL_RUN_DAYS` changes it). This tests the library changes again, and clears the `untested` list.
+- the last full run is 7 days old or older (the Settings screen changes it). This tests the library changes again, and clears the `untested` list.
 - a test support file changed (page objects, config, Cypress `support/`): the script cannot see which specs use it. Two Cypress exceptions:
   - A changed step file selects only the tests that used its changed steps. The run saves the step patterns of each test.
   - A changed fixture selects the tests whose spec or step names it.

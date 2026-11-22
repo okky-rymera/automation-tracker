@@ -9,13 +9,14 @@
  * A full run when:
  *  - the sync asks for "always"
  *  - there is no selected run, or it has no raw requests, windows or plugin commit
- *  - the last full run is older than FULL_RUN_DAYS (7; TRACKER_FULL_RUN_DAYS changes it). This is the
+ *  - the last full run is older than fullRunDays() (7; the Settings screen or TRACKER_FULL_RUN_DAYS). This is the
  *    safety net: it tests the skipped library changes again, and makes a new full map.
  *  - a test support file changed that the script cannot map to tests (page objects, config, Cypress
  *    support/, a hook or shared code in a step file). A Cypress step file or fixture selects only
  *    the tests that use it (coverage/select-tests.py)
  *  - select-tests.py fails, or every spec file is selected
  */
+import { setting } from './settings.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, type ProjectConfig } from './projects.ts';
@@ -24,15 +25,10 @@ import type { Ctx, RunPlan } from './test-run.ts';
 
 export type Framework = 'playwright' | 'cypress';
 
-export const FULL_RUN_DAYS = (() => {
-  const v = Number.parseFloat(process.env.TRACKER_FULL_RUN_DAYS ?? '');
-  return v > 0 ? v : 7;
-})();
-/** A changed function that this share of tests (or more) ran is library code. TRACKER_LIBRARY_SHARE changes it. */
-export const LIBRARY_SHARE = (() => {
-  const v = Number.parseFloat(process.env.TRACKER_LIBRARY_SHARE ?? '');
-  return v > 0 && v <= 1 ? v : 0.9;
-})();
+/** Days between full runs (the Settings screen, or TRACKER_FULL_RUN_DAYS). */
+export const fullRunDays = () => setting<number>('fullRunDays');
+/** A changed function that this share of tests (or more) ran is library code (the Settings screen, or TRACKER_LIBRARY_SHARE). */
+export const libraryShare = () => setting<number>('libraryShare') / 100;
 
 export interface Untested {
   file: string;
@@ -75,6 +71,7 @@ export async function selectRun(p: ProjectConfig, fw: Framework, to: string, mod
   }
   const full = fullRunDate(info);
   const days = full ? (Date.now() - full.getTime()) / 86_400_000 : Infinity;
+  const FULL_RUN_DAYS = fullRunDays();
   if (days >= FULL_RUN_DAYS) return { why: full ? `full run (the last full run is ${Math.floor(days)} days old; one full run each ${FULL_RUN_DAYS} days)` : 'full run (no full run date)' };
 
   // The spec folder, and the folder that the test paths are relative to.
@@ -93,7 +90,7 @@ export async function selectRun(p: ProjectConfig, fw: Framework, to: string, mod
     // (step definitions, cypress/support) from other files, so a changed step would select no test.
     if (!testsRoot) return { why: 'full run (cypress.config.* is at the top of the repo: support file changes cannot be found)' };
   }
-  const args = [path.join(ROOT, 'coverage', 'select-tests.py'), p.path, dir, from, to, '--playwright-dir', specDir, '--tests-root', testsRoot, '--library-share', String(LIBRARY_SHARE), '--json'];
+  const args = [path.join(ROOT, 'coverage', 'select-tests.py'), p.path, dir, from, to, '--playwright-dir', specDir, '--tests-root', testsRoot, '--library-share', String(libraryShare()), '--json'];
   if (p.excludeDirs) args.push('--exclude', p.excludeDirs.join(','));
   const r = await ctx.run('python3', args, { cwd: ROOT, env: ctx.env(), quiet: true });
   if (r.code !== 0) return { why: `full run (select-tests.py failed: ${r.out.trim().split('\n').slice(-1)[0] ?? ''})` };
@@ -130,7 +127,7 @@ export async function selectRun(p: ProjectConfig, fw: Framework, to: string, mod
     info: {
       fullRunAt: info.fullRunAt ?? full?.toISOString() ?? null,
       untested,
-      partial: { fromRun: run.dir, fromCommit: from, selectedTests: sel.selected, libraryShare: LIBRARY_SHARE, libraryChanges: added.length },
+      partial: { fromRun: run.dir, fromCommit: from, selectedTests: sel.selected, libraryShare: libraryShare(), libraryChanges: added.length },
     },
   };
   const why = `partial run: ${plan.files.length} of ${allFiles.size} spec files (${sel.selected} tests touch the changed code); ${added.length} new library change${added.length === 1 ? '' : 's'} not tested again (${untested.length} since the last full run)`;
@@ -145,5 +142,5 @@ export function untestedChanges(p: ProjectConfig): Record<Framework, { untested:
     const info = readJson(path.join(ROOT, run.dir, 'run-info.json'));
     return { untested: Array.isArray(info?.untested) ? info.untested : [], fullRunAt: fullRunDate(info)?.toISOString() ?? null, run: run.dir };
   };
-  return { playwright: one('playwright'), cypress: one('cypress'), fullRunDays: FULL_RUN_DAYS };
+  return { playwright: one('playwright'), cypress: one('cypress'), fullRunDays: fullRunDays() };
 }
