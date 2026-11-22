@@ -370,23 +370,48 @@ function say(projectId: string, line: string, onLine?: (l: string) => void) {
   onLine?.(line);
 }
 
-/** For the app: the last loops and units, the mapping progress, and the defaults. */
+/** The number of units in one page of the unit list: the newest page, and each "older units" page. */
+export const MAP_RUNS_PAGE = 50;
+const RUN_COLUMNS = "id, loop_id, unit_kind, unit_ref, started_at, finished_at, status, cost_usd, duration_ms, features, COALESCE(report, '') <> '' AS has_report, error";
+const runRow = (r: any) => ({ ...r, has_report: !!r.has_report, features: r.features ? JSON.parse(r.features) : [] });
+
+/**
+ * For the app: the last loops, the newest page of units, the mapping progress, and the defaults.
+ * The app asks again every few seconds, so this stays small: no report text (mapRunReport gives one
+ * report), and no older units (mapOlderRuns gives them one page at a time).
+ */
 export function mapLoopState(projectId: string) {
   markLoopStopped(projectId);
   const loops = db.prepare('SELECT * FROM map_loops WHERE project_id = ? ORDER BY id DESC LIMIT 10').all(projectId) as any[];
-  const runs = db.prepare('SELECT id, loop_id, unit_kind, unit_ref, started_at, finished_at, status, cost_usd, duration_ms, features, report, error FROM map_runs WHERE project_id = ? ORDER BY id DESC LIMIT 50').all(projectId) as any[];
+  const runs = db.prepare(`SELECT ${RUN_COLUMNS} FROM map_runs WHERE project_id = ? ORDER BY id DESC LIMIT ?`).all(projectId, MAP_RUNS_PAGE) as any[];
   const total = db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS usd, COUNT(*) AS n FROM map_runs WHERE project_id = ?').get(projectId) as any;
+  // The units of the last loop that are done. The unit list can hold fewer units than the loop ran.
+  const loopDone = loops[0] ? ((db.prepare("SELECT COUNT(*) AS n FROM map_runs WHERE loop_id = ? AND status <> 'running'").get(loops[0].id) as any).n as number) : 0;
   return {
     running: mapLoopRunning(projectId),
     loops,
-    runs: runs.map((r) => ({ ...r, features: r.features ? JSON.parse(r.features) : [] })),
+    loopDone,
+    runs: runs.map(runRow),
     totalUsd: total.usd as number,
     count: total.n as number,
+    pageSize: MAP_RUNS_PAGE,
     defaults: MAP_DEFAULTS,
     limits: MAP_LIMITS,
     log: logs.get(projectId) ?? [],
     error: lastError.get(projectId) ?? null,
   };
+}
+
+/** One page of the units that are older than unit `beforeId`, newest first. */
+export function mapOlderRuns(projectId: string, beforeId: number) {
+  const rows = db.prepare(`SELECT ${RUN_COLUMNS} FROM map_runs WHERE project_id = ? AND id < ? ORDER BY id DESC LIMIT ?`).all(projectId, beforeId, MAP_RUNS_PAGE) as any[];
+  return rows.map(runRow);
+}
+
+/** The report of one unit, or null when the project has no such unit. */
+export function mapRunReport(projectId: string, runId: number): string | null {
+  const r = db.prepare('SELECT report FROM map_runs WHERE project_id = ? AND id = ?').get(projectId, runId) as any;
+  return r ? (r.report ?? '') : null;
 }
 
 /** Units that failed 2 times in one loop, and wait until their files change (`map park`). */

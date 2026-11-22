@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { mutate, reloadAll, useApi } from '../../api';
+import { useEffect, useRef, useState } from 'react';
+import { getJson, mutate, reloadAll, useApi } from '../../api';
 import { when, type Tracker } from '../data';
 import { link } from '../route';
 import { useAct } from '../ui';
@@ -7,11 +7,11 @@ import { ParkedUnits } from './ParkedUnits';
 
 interface MapRun {
   id: number; loop_id: number; unit_kind: 'playwright' | 'cypress' | 'code'; unit_ref: string; started_at: string; finished_at: string | null;
-  status: 'running' | 'done' | 'skipped' | 'failed' | 'stopped'; cost_usd: number | null; duration_ms: number | null; features: number[]; report: string; error: string | null;
+  status: 'running' | 'done' | 'skipped' | 'failed' | 'stopped'; cost_usd: number | null; duration_ms: number | null; features: number[]; has_report: boolean; error: string | null;
 }
 interface MapLoop { id: number; started_at: string; finished_at: string | null; status: 'running' | 'done' | 'stopped' | 'failed'; started_by: string; model: string; max_units: number; stop_reason: string | null }
 interface MapLoopState {
-  running: boolean; loops: MapLoop[]; runs: MapRun[]; totalUsd: number; count: number; defaults: { model: string; maxUnits: number }; limits: { maxUnits: number }; log: string[]; error: string | null;
+  running: boolean; loops: MapLoop[]; loopDone: number; runs: MapRun[]; totalUsd: number; count: number; pageSize: number; defaults: { model: string; maxUnits: number }; limits: { maxUnits: number }; log: string[]; error: string | null;
 }
 const usd = (n: number | null) => (n === null ? '' : `$${n.toFixed(2)}`);
 const KIND: Record<MapRun['unit_kind'], string> = { playwright: 'Playwright file', cypress: 'Cypress file', code: 'Code area' };
@@ -28,11 +28,30 @@ export function MapPage({ t }: { t: Tracker }) {
   const act = useAct();
   const [tick, setTick] = useState(0);
   const { data } = useApi<MapLoopState>(`/api/projects/${p}/map-loop?t=${tick}`);
+  // The state has only the newest page of units. "Show older units" adds a page here, one time.
+  const [older, setOlder] = useState<MapRun[]>([]);
+  const [olderState, setOlderState] = useState<'idle' | 'loading' | 'end'>('idle');
+  const project = useRef(p);
   const [s, setS] = useState<MapLoopState | null>(null);
+  // The newest state, for "Show older units": its reply can come after one or more refreshes.
+  const latest = useRef<MapLoopState | null>(null);
+  latest.current = s;
+  useEffect(() => {
+    project.current = p;
+    // Forget the last project's units. Else "Show older units" can add them to this project's list.
+    setS(null);
+    setOlder([]);
+    setOlderState('idle');
+  }, [p]);
   const [form, setForm] = useState<{ model: string; maxUnits: number } | null>(null);
   useEffect(() => {
     if (data) setS(data);
+    // Keep the kept copy of a unit up to date while it is still in the newest page.
+    if (data) setOlder((o) => (o.length ? merge(data.runs, o) : o));
   }, [data]);
+  // New units can make older units come back after an empty "older" page.
+  const count = s?.count;
+  useEffect(() => setOlderState((o) => (o === 'end' ? 'idle' : o)), [count]);
   const running = !!s?.running;
   // While no loop runs, check every 30 s: a loop can start from the command line.
   useEffect(() => {
@@ -45,6 +64,27 @@ export function MapPage({ t }: { t: Tracker }) {
   if (!s) return <main className="page"><div className="muted">Loading…</div></main>;
   const f = form ?? s.defaults;
   const loop = s.loops[0];
+  // Newest first. The newest page comes from each refresh, the older units from "Show older units".
+  const runs = older.length ? merge(s.runs, older) : s.runs;
+  const hidden = Math.max(0, s.count - runs.length);
+  const showOlder = () =>
+    act(async () => {
+      const before = runs[runs.length - 1]?.id;
+      if (!before) return;
+      setOlderState('loading');
+      try {
+        const out = (await getJson(`/api/projects/${p}/map-loop/runs?before=${before}`)) as { runs: MapRun[] };
+        if (project.current !== p) return; // The user opened another project meanwhile.
+        const page = out.runs;
+        // Keep the newest page too: when new units start, it moves up, and the units under it must stay.
+        // Use the newest refresh, not the one of the click: a refresh during the request has newer copies.
+        setOlder((o) => merge(merge(latest.current?.runs ?? [], o), page));
+        setOlderState(page.length ? 'idle' : 'end');
+      } catch (e) {
+        if (project.current === p) setOlderState('idle');
+        throw e;
+      }
+    });
   const call = (path: string, body: unknown, msg: string) => act(async () => (await mutate('POST', `/api/projects/${p}/map-loop${path}`, body, { quiet: true }), setTick((n) => n + 1)), msg);
   return (
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1100 }}>
@@ -66,7 +106,7 @@ export function MapPage({ t }: { t: Tracker }) {
         {running ? (
           <>
             <span className="dot dot-run" aria-hidden="true" />
-            <span>Mapping… {loop && `${s.runs.filter((r) => r.loop_id === loop.id && r.status !== 'running').length} of at most ${loop.max_units} units done`}</span>
+            <span>Mapping… {loop && `${s.loopDone} of at most ${loop.max_units} units done`}</span>
             <button className="btn btn-sm" onClick={() => call('/stop', {}, 'Stopping after this step')}>Stop</button>
           </>
         ) : (
@@ -92,9 +132,9 @@ export function MapPage({ t }: { t: Tracker }) {
       {running && s.log.length > 0 && <pre className="log">{s.log.slice(-15).join('\n')}</pre>}
       <ParkedUnits project={p} tick={tick} />
       <section className="card">
-        <div className="sec-head"><h2 className="h2">Units <span className="faint" style={{ fontWeight: 400 }}>{s.runs.length}</span></h2></div>
+        <div className="sec-head"><h2 className="h2">Units <span className="faint" style={{ fontWeight: 400 }}>{hidden ? `newest ${runs.length} of ${s.count}` : runs.length}</span></h2></div>
         <div>
-          {s.runs.map((r) => (
+          {runs.map((r) => (
             <div key={r.id} className="draft" style={{ flexDirection: 'column', gap: 4 }}>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 13 }}>
                 <span className={`tag ${STATUS[r.status][1]}`}>{STATUS[r.status][0]}</span>
@@ -104,12 +144,38 @@ export function MapPage({ t }: { t: Tracker }) {
                 {r.features.map((id) => <a key={id} className="linkbtn mono" href={link(p, 'feature', id)}>F-{id}</a>)}
               </div>
               {r.error && <div className="err">{r.error}</div>}
-              {r.report && <details><summary className="faint" style={{ cursor: 'pointer', fontSize: 13 }}>Report of the run</summary><div className="muted" style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{r.report}</div></details>}
+              {r.has_report && <RunReport project={p} runId={r.id} />}
             </div>
           ))}
-          {!s.runs.length && <div className="lc-empty" style={{ borderBottom: 0 }}>No unit yet.</div>}
+          {!runs.length && <div className="lc-empty" style={{ borderBottom: 0 }}>No unit yet.</div>}
+          {hidden > 0 && (
+            <div style={{ padding: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
+              {olderState !== 'end' && <button className="btn btn-sm" disabled={olderState === 'loading'} onClick={showOlder}>
+                {olderState === 'loading' ? 'Loading…' : `Show ${Math.min(s.pageSize, hidden)} older units`}
+              </button>}
+              <span className="faint" style={{ fontSize: 13 }}>{hidden} older {hidden === 1 ? 'unit is' : 'units are'} not shown</span>
+            </div>
+          )}
         </div>
       </section>
     </main>
+  );
+}
+
+/** The units of both lists, one time each, newest first. A unit in `a` wins over the same unit in `b`. */
+function merge(a: MapRun[], b: MapRun[]): MapRun[] {
+  const ids = new Set(a.map((r) => r.id));
+  return [...a, ...b.filter((r) => !ids.has(r.id))].sort((x, y) => y.id - x.id);
+}
+
+/** The report of one unit. It loads when you open it: the unit list does not carry the report text. */
+function RunReport({ project, runId }: { project: string; runId: number }) {
+  const [open, setOpen] = useState(false);
+  const { data, error } = useApi<{ report: string }>(open ? `/api/projects/${project}/map-loop/runs/${runId}/report` : null);
+  return (
+    <details onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary className="faint" style={{ cursor: 'pointer', fontSize: 13 }}>Report of the run</summary>
+      {open && (error ? <div className="err">{error}</div> : <div className="muted" style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{data ? data.report : 'Loading…'}</div>)}
+    </details>
   );
 }

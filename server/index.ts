@@ -19,7 +19,7 @@ import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
 import { aiUpdateState, AiUpdateError, retryReview, startAiUpdate } from './ai-update.ts';
-import { listParked, mapLoopState, MapLoopError, startMapLoop, stopMapLoop, unpark } from './map-loop.ts';
+import { listParked, mapLoopState, MapLoopError, mapOlderRuns, mapRunReport, startMapLoop, stopMapLoop, unpark } from './map-loop.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
@@ -252,6 +252,19 @@ app.post('/api/projects/:id/ai-update', (req, res) => {
 });
 // ---- Mapping loop: headless map-features (server/map-loop.ts) ----
 app.get('/api/projects/:id/map-loop', (req, res) => res.json(mapLoopState(P(req))));
+// ?before=<unit id>: one page of the units that are older than this unit.
+app.get('/api/projects/:id/map-loop/runs', (req, res) => {
+  const before = Number(req.query.before);
+  if (!Number.isInteger(before) || before <= 0) return res.status(400).json({ error: 'Send ?before=<unit id>, a whole number above 0.' });
+  res.json({ runs: mapOlderRuns(P(req), before) });
+});
+app.get('/api/projects/:id/map-loop/runs/:rid/report', (req, res) => {
+  const rid = Number(req.params.rid);
+  if (!Number.isInteger(rid) || rid <= 0) return res.status(400).json({ error: 'The unit ID must be a whole number above 0.' });
+  const report = mapRunReport(P(req), rid);
+  if (report === null) return res.status(404).json({ error: 'No such unit in this project.' });
+  res.json({ report });
+});
 const loopEdit = (fn: (req: express.Request) => unknown) => (req: express.Request, res: express.Response) => {
   try {
     res.json(fn(req) ?? { ok: true });

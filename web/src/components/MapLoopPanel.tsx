@@ -13,7 +13,7 @@ interface MapRun {
   cost_usd: number | null;
   duration_ms: number | null;
   features: number[];
-  report: string;
+  has_report: boolean;
   error: string | null;
 }
 interface MapLoop {
@@ -184,16 +184,23 @@ export function MapLoopPanel({ project }: { project: string }) {
                 )}
               </div>
               {r.error && <div style={{ color: 'var(--bad)' }}>{r.error}</div>}
-              {r.report && (
-                <details>
-                  <summary className="cursor-pointer text-ink-3">Report of the run</summary>
-                  <div className="mt-1 whitespace-pre-wrap text-ink-2">{r.report}</div>
-                </details>
-              )}
+              {r.has_report && <RunReport project={project} runId={r.id} />}
             </li>
           );
         })}
       </ul>
     </div>
+  );
+}
+
+/** The report of one unit. It loads when you open it: the unit list does not carry the report text. */
+function RunReport({ project, runId }: { project: string; runId: number }) {
+  const [open, setOpen] = useState(false);
+  const { data, error } = useApi<{ report: string }>(open ? `/api/projects/${project}/map-loop/runs/${runId}/report` : null);
+  return (
+    <details onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary className="cursor-pointer text-ink-3">Report of the run</summary>
+      {open && (error ? <div style={{ color: 'var(--bad)' }}>{error}</div> : <div className="mt-1 whitespace-pre-wrap text-ink-2">{data ? data.report : 'Loading…'}</div>)}
+    </details>
   );
 }

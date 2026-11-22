@@ -263,11 +263,12 @@ export interface CypressScenario {
 const inflight = new Map<string, { at: number; promise: Promise<unknown> }>();
 
 /** One request per URL: parts of a page that ask within 2 seconds share it. */
-function getJson(url: string): Promise<unknown> {
+export function getJson(url: string): Promise<unknown> {
   const hit = inflight.get(url);
   if (hit && Date.now() - hit.at < 2000) return hit.promise;
+  // An error reply can be an HTML page, not JSON. Then the error shows the HTTP status text.
   const promise = fetch(url).then((r) =>
-    r.ok ? r.json() : r.json().then((e) => Promise.reject(new Error(e.error ?? r.statusText))),
+    r.ok ? r.json() : r.json().catch(() => ({})).then((e) => Promise.reject(new Error(e.error ?? `${r.status} ${r.statusText}`))),
   );
   inflight.set(url, { at: Date.now(), promise });
   promise.catch(() => inflight.delete(url));
@@ -294,7 +295,7 @@ export async function mutate<T = unknown>(method: 'POST' | 'PATCH' | 'DELETE', u
   const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const out = await r.json().catch(() => ({}));
   if (!opts.quiet) reloadAll();
-  if (!r.ok) throw new Error(out.error ?? r.statusText);
+  if (!r.ok) throw new Error(out.error ?? `${r.status} ${r.statusText}`);
   return out as T;
 }
 
