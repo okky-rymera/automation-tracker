@@ -34,6 +34,7 @@ import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, mapLoopRunning, processAlive, run, SETPRIV, syncRunning, type Job } from './sync.ts';
 import { aiRunning } from './ai-update.ts';
 import { stopTestSites } from './echowp.ts';
+import { cypressRoot, runCypress } from './cypress-run.ts';
 import { clearDeadLock, runTests, stopLeftoverRunSpec, type RunPlan } from './test-run.ts';
 import { LIMIT_TEXT, notePlanUse, readPlanLine } from './plan-limit.ts';
 
@@ -282,17 +283,21 @@ async function runUnit(p: ProjectConfig, u: Unit, o: { model: string }, onStart:
 }
 
 /**
- * A short coverage run of one Playwright spec file, before its unit, when the selected coverage run
- * has no test of the file (a new file, and no sync ran it yet). It is a partial run: the new run
- * keeps the other tests of the selected run (coverage/merge-run.py), and it becomes the selected run.
- * Not for Cypress (slow), and not without a selected Playwright run (nothing to keep). A failure only
- * goes in the log: the model then finds the code by reading it.
+ * A short coverage run of one test file, before its unit, when a test of the file that the runs can
+ * run has no coverage yet ("next" gives coverage: false; a new or changed file that no sync ran yet).
+ * For Playwright and Cypress files. It is a partial run: the new run keeps the other tests of the
+ * selected run (coverage/merge-run.py), and it becomes the selected run. Not without a selected run
+ * of that framework (nothing to keep). A failure only goes in the log: the model then finds the code
+ * by reading it.
  */
 export async function coverageFirst(p: ProjectConfig, u: Unit, job: Job, log: (l: string) => void, shouldStop?: () => string | null) {
-  if (u.kind !== 'playwright' || u.raw?.coverage !== false) return;
+  if ((u.kind !== 'playwright' && u.kind !== 'cypress') || u.raw?.coverage !== false) return;
+  if (u.raw?.coverageTried) return log(`"${u.ref}" had a short coverage run already, and its files did not change since. No run again. The model reads the code.`);
+  const kind = u.kind;
+  const name = kind === 'playwright' ? 'Playwright' : 'Cypress';
   const fresh = getProject(p.id) ?? p;
-  const base = fresh.runs.playwright;
-  if (!base) return log(`No coverage run for "${u.ref}": the project has no selected Playwright run to add it to. The model reads the code.`);
+  const base = fresh.runs[kind];
+  if (!base) return log(`No coverage run for "${u.ref}": the project has no selected ${name} run to add it to. The model reads the code.`);
   let info: any = {};
   try {
     info = JSON.parse(fs.readFileSync(path.join(ROOT, base.dir, 'run-info.json'), 'utf8'));
@@ -305,28 +310,46 @@ export async function coverageFirst(p: ProjectConfig, u: Unit, job: Job, log: (l
   } catch (e) {
     return log(`No coverage run for "${u.ref}": ${(e as Error).message}`);
   }
-  // A unit ref is relative to the spec folder ("frontend/x.spec.js"). The run names a file relative to
-  // the folder above it ("specs/frontend/x.spec.js"), as server/selection.ts does.
-  if (!fresh.playwrightDir) return log(`No coverage run for "${u.ref}": the project has no Playwright folder.`);
-  const file = path.posix.join(path.posix.relative(path.posix.dirname(fresh.playwrightDir), fresh.playwrightDir), u.ref);
+  let file: string;
+  if (kind === 'playwright') {
+    // A unit ref is relative to the spec folder ("frontend/x.spec.js"). The run names a file relative to
+    // the folder above it ("specs/frontend/x.spec.js"), as server/selection.ts does.
+    if (!fresh.playwrightDir) return log(`No coverage run for "${u.ref}": the project has no Playwright folder.`);
+    file = path.posix.join(path.posix.relative(path.posix.dirname(fresh.playwrightDir), fresh.playwrightDir), u.ref);
+  } else {
+    // A unit ref is relative to the Cypress test folder. The Cypress run names a spec file relative to
+    // the folder of cypress.config.* (server/cypress-run.ts).
+    const cyRoot = cypressRoot(fresh);
+    if (!cyRoot || !fresh.cypressDir) return log(`No coverage run for "${u.ref}": the project has no Cypress config.`);
+    file = path.relative(cyRoot, path.join(fresh.path, fresh.cypressDir, u.ref)).split(path.sep).join('/');
+  }
+  const missing: string[] = u.raw?.missingCoverage ?? [];
   const plan: RunPlan = {
     files: [file],
     baseDir: base.dir,
-    info: { fullRunAt: info.fullRunAt ?? null, untested: info.untested ?? [], partial: { fromRun: base.dir, fromCommit: info.pluginCommit ?? null, reason: `the mapping loop: "${u.ref}" was not in the coverage run` } },
+    info: { fullRunAt: info.fullRunAt ?? null, untested: info.untested ?? [], partial: { fromRun: base.dir, fromCommit: info.pluginCommit ?? null, reason: `the mapping loop: ${missing.length || 'some'} test(s) of "${u.ref}" had no coverage` } },
   };
-  log(`"${u.ref}" is not in the coverage run. A short coverage run of this file first.`);
+  log(`${missing.length || 'Some'} test(s) of "${u.ref}" have no coverage yet. A short ${name} coverage run of this file first.`);
+  const ctx = {
+    run: (c: string, a: string[], o: any) => run(job, c, a, o),
+    env: (extra?: Record<string, string>) => childEnv(extra),
+    log: () => {},
+    // A stop of the daily sync (a due sync, a high plan use) ends the run between its steps too.
+    cancelled: () => job.cancelled || !!shouldStop?.(),
+    signal: job.abort.signal,
+  };
   try {
-    const r = await runTests(fresh, commit, {
-      run: (c, a, o) => run(job, c, a, o),
-      env: (extra) => childEnv(extra),
-      log: () => {},
-      // A stop of the daily sync (a due sync, a high plan use) ends the run between its steps too.
-      cancelled: () => job.cancelled || !!shouldStop?.(),
-      signal: job.abort.signal,
-    }, plan);
+    const r = kind === 'playwright' ? await runTests(fresh, commit, ctx, plan) : await runCypress(fresh, commit, ctx, plan);
     log(r.selected ? `Coverage run done and selected: ${r.runDir ?? ''}` : `The coverage run was not selected: ${r.reason ?? 'no reason given'}. The model reads the code.`);
   } catch (e) {
     log(`The coverage run failed: ${(e as Error).message}. The model reads the code.`);
+  }
+  // One run for each version of the file, also when it failed. A stop is not a try.
+  if (!ctx.cancelled() && u.raw?.fileHash) {
+    db.prepare(
+      `INSERT INTO coverage_tries (project_id, kind, ref, hash, tried_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (project_id, kind, ref) DO UPDATE SET hash = excluded.hash, tried_at = excluded.tried_at`,
+    ).run(p.id, kind, u.ref, u.raw.fileHash, now());
   }
 }
 

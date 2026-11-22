@@ -37,6 +37,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
+import { leftOutSpec, leftOutTest } from './cypress-rules.ts';
 import { getProject, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore } from './features.ts';
@@ -137,7 +138,7 @@ function testFiles(p: ProjectConfig, kind: 'playwright' | 'cypress') {
     // A unit that failed 2 times in one loop waits until its files change.
     const park = parked.get(file);
     if (park && park.hash === hash && (state === 'new' || state === 'changed' || state === 'unlinked')) state = 'parked';
-    return { file, repoFile, tests, unit, state, undecided, park };
+    return { file, repoFile, tests, unit, state, undecided, park, hash };
   });
 }
 
@@ -186,17 +187,30 @@ function next(p: ProjectConfig, kind: Kind) {
   const pick = files.find((f) => f.state === 'changed') ?? files.find((f) => f.state === 'new') ?? files.find((f) => f.state === 'unlinked');
   if (!pick) return out({ kind, done: true, message: `Every ${kind} file is processed and has not changed since.`, parked: files.filter((f) => f.state === 'parked').length });
   const since = pick.unit?.processed_at;
-  // Are the tests of the file in the coverage run? The mapping loop makes a short coverage run of a
-  // Playwright file first when they are not (server/map-loop.ts).
+  // Which tests of the file have no coverage yet? The mapping loop makes a short coverage run of the
+  // file first when one has none (server/map-loop.ts). Tests that the runs never run do not count:
+  // skipped Playwright tests, and Cypress tests that the runs leave out (other plugins, a token).
   const view = resolveView(p, 'both');
   const cov = view && loadCoverage(p, view);
   const owners = cov ? runTestOwners(p) : null;
-  const ids = new Set(pick.tests.map((t) => t.id as string));
-  const coverage = !!cov && cov.tests.some((t) => ids.has(owners!.get(t.id) ?? ''));
+  const covered = new Set(cov ? cov.tests.map((t) => owners!.get(t.id)).filter(Boolean) : []);
+  const fileLeftOut = kind === 'cypress' ? leftOutSpec(p, pick.file) : null;
+  const runnable = fileLeftOut
+    ? []
+    : pick.tests.filter((t) => (kind === 'playwright' ? !json(t.data).skipped : !leftOutTest(json(t.tags), json(t.data).exampleTags)));
+  const missingCoverage = runnable.filter((t) => !covered.has(t.id)).map((t) => t.id as string);
+  const coverage = !missingCoverage.length;
+  // The loop makes one short coverage run for each version of a file. When that run did not fill the
+  // gap (a test that fails before it reaches the plugin, a tag the rules do not know), it does not run again.
+  const tried = db.prepare('SELECT hash FROM coverage_tries WHERE project_id = ? AND kind = ? AND ref = ?').get(p.id, kind, pick.file) as { hash: string } | undefined;
+  const coverageTried = !coverage && tried?.hash === pick.hash;
   out({
     kind,
     ref: pick.file,
     coverage,
+    ...(missingCoverage.length ? { missingCoverage, fileHash: pick.hash } : {}),
+    ...(coverageTried ? { coverageTried, coverageNote: 'A short coverage run of this file ran already and did not give coverage for these tests. Find their code by reading it.' } : {}),
+    ...(fileLeftOut ? { coverageNote: `The test runs leave this file out: ${fileLeftOut}. Find the code by reading it.` } : {}),
     repoFile: pick.repoFile,
     absPath: path.join(p.path, pick.repoFile),
     state: pick.state,

@@ -673,6 +673,19 @@ const MIGRATIONS: string[] = [
     updated_at TEXT NOT NULL
   );
   `,
+  // 32: the short coverage runs of the mapping loop (server/map-loop.ts coverageFirst). One row for
+  //     each test file that had one, with the hash of its files then. "map next" does not ask for a
+  //     run again while the hash stays the same, also when the run did not fill the gap.
+  `
+  CREATE TABLE coverage_tries (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    tried_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, kind, ref)
+  );
+  `,
 ];
 
 function open(): DatabaseSync {

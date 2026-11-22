@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { db } from './db.ts';
 import { addCoverageRun, ROOT, type ProjectConfig } from './projects.ts';
 import { CYPRESS_PROFILE, CYPRESS_SITE_NAME, removeSitePlugin, SITE_COPY_MARKER, startTestSites, stopTestSitesSync, trackerEchowp, type TestSites } from './echowp.ts';
+import { leftOutTag, PLUGIN_STEP } from './cypress-rules.ts';
 import { DATA, fullRunInfo, LOCK, mergePlan, pluginAdminLogin, SITE_MARK, stamp, takeLock, testWorkers, type Ctx, type RunPlan, type TestResult } from './test-run.ts';
 
 const CHP_REPO = 'Rymera-Web-Co/cypress-helper-plugin';
@@ -35,8 +36,6 @@ const THP_SLUG = 'test-helper-plugin';
 /** In the site's plugin copy (server/echowp.ts useRealPluginCopy). When it is gone after the run, a test deleted or reinstalled the plugin. */
 const MARKER = SITE_COPY_MARKER;
 const CONFIGS = ['cypress.config.js', 'cypress.config.ts', 'cypress.config.mjs', 'cypress.config.cjs', 'cypress.config.mts', 'cypress.config.cts'];
-/** A spec file with one of these steps deletes or installs a plugin. */
-const PLUGIN_STEP = /plugins? (is|are) (deleted|not installed)|is downloaded, installed/i;
 
 /**
  * The Cypress project folder: the folder of cypress.config.* at or above the project's Cypress
@@ -145,7 +144,7 @@ export function cypressExclusions(p: ProjectConfig, cyRoot: string): { tags: str
         const text = fs.readFileSync(full, 'utf8');
         for (const line of text.split('\n')) {
           if (!line.trim().startsWith('@')) continue;
-          for (const t of line.match(/@[^\s@]+/g) ?? []) if (t.startsWith('@integration') || t === '@zip-test') tags.add(t);
+          for (const t of line.match(/@[^\s@]+/g) ?? []) if (leftOutTag(t)) tags.add(t);
         }
         const rel = path.relative(cyRoot, full).split(path.sep).join('/');
         const inSpecRoot = path.relative(specRoot, full).split(path.sep);

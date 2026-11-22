@@ -30,6 +30,7 @@ export interface CypressScenario {
   tags: string[]; // feature + rule + scenario tags
   steps: CypressStep[];
   examples: number; // number of example rows (0 for a plain scenario)
+  exampleTags?: string[][]; // tags of each Examples block, only when a block has tags
   parseError?: string;
   /** From the Cypress coverage run: one entry per run of the scenario (one per example row). runId = test ID in the run. */
   run: { runId: string; title: string; status: string; functions: number }[];
@@ -154,6 +155,8 @@ export function parseCypressRepo(project: ProjectConfig): Omit<CypressScenario, 
               ...s.steps.map((st: any) => ({ keyword: st.keyword.trim(), text: st.text, background: false })),
             ],
             examples: s.examples.reduce((n: number, ex: any) => n + ex.tableBody.length, 0),
+            // The tags of each Examples block, only when a block has tags. The runs leave out rows by these too.
+            ...(s.examples.some((ex: any) => ex.tags?.length) ? { exampleTags: s.examples.map((ex: any) => (ex.tags ?? []).map((t: any) => t.name)) } : {}),
           });
         }
       }

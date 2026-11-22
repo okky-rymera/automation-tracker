@@ -318,6 +318,15 @@ The user's flow: the sync runs the tests, then the AI checks the changes, links 
 5. [x] **The plan limit in the AI update.** `--output-format stream-json --verbose`, read with `server/plan-limit.ts` (moved from the loop). Checked on 22 Nov 2026 with Haiku: the answer comes in `structured_output` of the result line, and the plan use was read (5-hour 3%).
 6. [x] **The daily AI step** (`server/daily-sync.ts`). After the syncs, one project at a time: `runReview`, then the loop with at most `TRACKER_DAILY_AI_UNITS` (10) units. A due sync stops it between units or features (`shouldStop`). At 80% plan use (`TRACKER_DAILY_AI_MAX_USE`) it waits for the reset. On by default since 22 Nov 2026 (the user turned it on), with Sonnet (`TRACKER_DAILY_AI_MODEL`). It was off during the build: the dev server reloads on each edit, and the step must not start on the user's plan mid-build. `TRACKER_DAILY_AI=off` turns it off.
 7. [x] **Coverage only when it is missing.** `next` gives `coverage: true|false` for a test unit. Before a Playwright unit with `false`, the loop makes a partial coverage run of that one file, merged into the selected run. Not for Cypress (slow), and not without a selected run.
+   - Changed on 22 Nov 2026 (the user's flow: "the same with Cypress"): Cypress files get the short run too.
+   - `coverage` is now for each test. It is `false` when a test that the runs can run has no coverage. `missingCoverage` lists these tests.
+   - These tests do not count, so they never start a run:
+     - skipped Playwright tests
+     - Cypress tests with `@integration…` or `@zip-test`, also on all Examples blocks of the scenario
+     - Cypress files in the Integration folder, or with a step that deletes or installs a plugin
+   - The loop makes one short run for each version of a file (table `coverage_tries`). When the run does not fill the gap, the file does not run again until it changes.
+   - The rules are in `server/cypress-rules.ts`. The read-only `map` commands do not load the run code.
+   - Test on a DB copy: one Cypress file, 1 site, 1 minute, 6 passed, 483 tests kept. On the real data, 0 Playwright files and 0 Cypress files need a run now.
    - Bug found in the test: the run names spec files from the folder above the spec folder (`specs/frontend/x.spec.js`), the unit from the spec folder (`frontend/x.spec.js`). With the wrong name, the merge kept the file's old tests too (52 tests, not 49). Fixed: 49 tests, 3 of the file, 46 kept.
 
 8. [x] **Fixes after the review** (22 Nov 2026): a stop during the coverage run ends the loop before the unit; the daily loop makes one database backup for each day, not one for each project; the daily done and capped state comes from `map_loops` (`started_by = 'sync'`) and the plan use from `data/plan-use.json`, so a server restart keeps them; the AI update kills a run with SIGKILL 30 s after SIGTERM, and stops a feature check after 20 minutes; the payload reference shows `leftOut`, `library` and code `scopes`.
