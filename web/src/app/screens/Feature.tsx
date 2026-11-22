@@ -302,6 +302,8 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
   const [addReq, setAddReq] = useState(false);
   const [modal, setModal] = useState<null | 'link' | 'move'>(null);
   const [mq, setMq] = useState('');
+  const shots = f.screenshots.filter((x) => x.scopeIds.includes(s.id));
+  const [big, setBig] = useState<number | null>(null);
   const tags = (
     <>
       {changed && <span className="tag tag-changed">{chgLabel}</span>}
@@ -373,6 +375,21 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
                 {links.map((l) => <TestRow key={l.id} t={t} f={f} l={l} scopeId={s.id} />)}
                 {!links.length && <div className="lc-empty">None yet.</div>}
               </section>
+              {shots.length > 0 && (
+                <section className="lc" aria-label="Screenshots of this scope">
+                  <div className="lc-head lc-head-row">
+                    <div className="lc-titlerow"><span className="lc-title">Screenshots</span><span className="lc-count">{shots.length}</span></div>
+                    <button className="btn btn-ghost btn-sm add-btn" onClick={() => setQuery({ tab: 'shots', scope: null })}>Tag more</button>
+                  </div>
+                  <div className="scope-shots">
+                    {shots.map((sh) => (
+                      <button key={sh.id} className="scope-shot" onClick={() => setBig(sh.id)} title={sh.caption || `IMG-${sh.id}: show full size`}>
+                        <img src={screenshotUrl(p, sh.id)} alt={sh.caption || `Screenshot IMG-${sh.id}`} loading="lazy" />
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              )}
             </div>
             <div className="scope-foot">
               <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, marginRight: 'auto' }}>
@@ -391,6 +408,9 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
             </div>
           </div>
         </>
+      )}
+      {big !== null && (
+        <button className="lightbox" onClick={() => setBig(null)} aria-label="Close the image"><img src={screenshotUrl(p, big)} alt="" /></button>
       )}
       {modal === 'link' && (
         <Picker

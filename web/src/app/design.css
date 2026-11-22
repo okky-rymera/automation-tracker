@@ -332,6 +332,10 @@ kbd{font-family:'JetBrains Mono',monospace;font-size:11px;padding:1px 5px;border
 .shot-acts .shot-del{position:static}
 .lightbox{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(10,10,10,.8);border:0;cursor:zoom-out}
 .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
+.scope-shots{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px}
+.scope-shot{padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface-2);cursor:zoom-in}
+.scope-shot:hover{border-color:var(--accent)}
+.scope-shot img{display:block;width:160px;aspect-ratio:16/10;object-fit:cover;object-position:top}
 .grp-title{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .grp-title .ie{width:auto;flex:0 1 auto;margin:-4px -8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
 .check-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:0;background:transparent;padding:8px 10px;border-radius:8px;cursor:pointer}
