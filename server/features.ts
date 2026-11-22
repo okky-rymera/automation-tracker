@@ -576,6 +576,15 @@ export const edits = {
   deleteFeature(p: string, id: string) {
     const f = own('features', p, id);
     tx(() => {
+      // The links go with the feature. A test with no other link would then make its file come back
+      // in the mapping loop (server/map.ts, state "unlinked"), and the AI could make the deleted
+      // feature again. So such a test is left out, with the reason (server/left-out.ts).
+      const title = (db.prepare('SELECT title FROM features WHERE id = ?').get(f) as any)?.title ?? '';
+      db.prepare(
+        `INSERT OR IGNORE INTO test_left_out (project_id, test_id, reason, by, created_at)
+         SELECT DISTINCT l.project_id, l.test_id, ?, 'person', ? FROM links l
+         WHERE l.feature_id = ? AND NOT EXISTS (SELECT 1 FROM links o WHERE o.project_id = l.project_id AND o.test_id = l.test_id AND o.feature_id <> l.feature_id)`,
+      ).run(`A person deleted F-${f} "${title}".`, now(), f);
       db.prepare('DELETE FROM features WHERE id = ?').run(f); // labels, lists, scopes and links go too
       sweepBefore();
     });
@@ -646,6 +655,14 @@ export const edits = {
       db.prepare(
         `DELETE FROM feature_code WHERE feature_id = ? AND removed = 1
          AND file || char(0) || function IN (SELECT file || char(0) || function FROM feature_code WHERE feature_id = ? AND removed = 0)`,
+      ).run(into, from);
+      // Before a duplicate entry goes, its scope tags go to the entry that stays (the scopes moved above).
+      db.prepare(
+        `INSERT OR IGNORE INTO code_scopes (code_id, scope_id)
+         SELECT keep.id, cs.scope_id FROM feature_code old
+         JOIN feature_code keep ON keep.feature_id = ? AND keep.file = old.file AND keep.function = old.function AND keep.removed = 0
+         JOIN code_scopes cs ON cs.code_id = old.id
+         WHERE old.feature_id = ?`,
       ).run(into, from);
       db.prepare(
         `DELETE FROM feature_code WHERE feature_id = ?
@@ -868,6 +885,37 @@ export const edits = {
         }
         if (dup) dropShot.run(dup.id); // a live screenshot wins over a deleted marker, as in mergeFeature
         moveShot.run(to, sort++, sh.id);
+      }
+      // Mapped code with only this scope's tag moves with the scope. The old feature keeps a removed
+      // marker, so the AI skill does not add the code there again. Code with other tags too stays, and
+      // loses this tag.
+      const codeRows = db
+        .prepare(
+          `SELECT c.*, (SELECT COUNT(*) FROM code_scopes o WHERE o.code_id = c.id) AS n
+           FROM feature_code c JOIN code_scopes cs ON cs.code_id = c.id
+           WHERE cs.scope_id = ? AND c.feature_id = ? AND c.removed = 0`,
+        )
+        .all(s.id, from) as any[];
+      for (const c of codeRows) {
+        if (c.n > 1) {
+          db.prepare('DELETE FROM code_scopes WHERE code_id = ? AND scope_id = ?').run(c.id, s.id);
+          continue;
+        }
+        const there = db.prepare('SELECT id, removed FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(to, c.file, c.function) as any;
+        let keep: number;
+        if (there && !there.removed) {
+          // The target holds the same code: it keeps its row, with this scope's tag and the person's work.
+          keep = there.id;
+          db.prepare("UPDATE feature_code SET source = CASE WHEN ? = 'manual' THEN 'manual' ELSE source END, checked = MAX(checked, ?) WHERE id = ?").run(c.source, c.checked, keep);
+        } else {
+          if (there) db.prepare('DELETE FROM feature_code WHERE id = ?').run(there.id); // a live entry wins over a removed marker
+          keep = Number(
+            db.prepare('INSERT INTO feature_code (project_id, feature_id, file, function, source, checked) VALUES (?, ?, ?, ?, ?, ?)').run(p, to, c.file, c.function, c.source, c.checked).lastInsertRowid,
+          );
+        }
+        db.prepare('INSERT OR IGNORE INTO code_scopes (code_id, scope_id) VALUES (?, ?)').run(keep, s.id);
+        db.prepare('DELETE FROM code_scopes WHERE code_id = ?').run(c.id);
+        db.prepare('UPDATE feature_code SET removed = 1 WHERE id = ?').run(c.id);
       }
       // The group from before the AI change is a group of the old feature: it cannot come back here.
       dropBefore('scope', s.id, ['group']);
@@ -1101,11 +1149,23 @@ export const edits = {
     });
   },
   /** Body { check: true }: a person checked an AI code entry. */
+  /** Body { check: true } and/or { scopeIds: [] } (the scopes of the feature that this code does). */
   updateFeatureCode(p: string, id: string, b: any) {
-    const r = db.prepare('SELECT id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;
+    const r = db.prepare('SELECT id, feature_id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;
     if (!r) throw new EditError('Unknown code entry');
-    if (b.check !== true) throw new EditError('Send { "check": true }');
-    db.prepare('UPDATE feature_code SET checked = 1 WHERE id = ?').run(r.id);
+    if (b.check !== true && !('scopeIds' in b)) throw new EditError('Send { "check": true } or { "scopeIds": [] }');
+    if ('scopeIds' in b && !Array.isArray(b.scopeIds)) throw new EditError('scopeIds must be a list');
+    const ids: number[] = 'scopeIds' in b ? [...new Set<number>(b.scopeIds.map((s: unknown) => scopeOf(p, r.feature_id, s)))] : [];
+    tx(() => {
+      if (b.check === true) db.prepare('UPDATE feature_code SET checked = 1 WHERE id = ?').run(r.id);
+      if ('scopeIds' in b) {
+        db.prepare('DELETE FROM code_scopes WHERE code_id = ?').run(r.id);
+        const add = db.prepare('INSERT INTO code_scopes (code_id, scope_id) VALUES (?, ?)');
+        for (const s of ids) add.run(r.id, s);
+        // A person set the scopes: the AI skill then only suggests other scopes.
+        db.prepare("UPDATE feature_code SET source = 'manual' WHERE id = ?").run(r.id);
+      }
+    });
   },
   /** Removes code from a feature. The row stays as a marker, so the AI skill does not add it again. */
   deleteFeatureCode(p: string, id: string) {

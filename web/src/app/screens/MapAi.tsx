@@ -3,6 +3,7 @@ import { mutate, reloadAll, useApi } from '../../api';
 import { when, type Tracker } from '../data';
 import { link } from '../route';
 import { useAct } from '../ui';
+import { ParkedUnits } from './ParkedUnits';
 
 interface MapRun {
   id: number; loop_id: number; unit_kind: 'playwright' | 'cypress' | 'code'; unit_ref: string; started_at: string; finished_at: string | null;
@@ -55,7 +56,7 @@ export function MapPage({ t }: { t: Tracker }) {
           it runs or tries the feature on the tracker's own test site, and saves the result as AI draft. The changes then wait for you on the Changes page.
         </p>
         <p className="faint" style={{ margin: 0, fontSize: 13, maxWidth: '80ch' }}>
-          It uses your Claude plan (claude.ai login), not an API key. It stops when no unit is left, at the unit limit, when a unit fails two times, or when you click Stop.
+          It uses your Claude plan (claude.ai login), not an API key. It stops when no unit is left, at the unit limit, or when you click Stop. A unit that fails two times is parked until its files change, and the loop goes on.
           When the 5-hour or weekly limit of the plan is reached, or the run starts to use paid extra usage, it stops the unit at once and ends the loop. That unit is not saved:
           it runs again at the next start. A unit that takes more than 60 minutes is stopped and counts as failed. The cost is a list-price estimate of the plan use, not a bill.
           A sync and an AI update wait while the loop runs.
@@ -89,6 +90,7 @@ export function MapPage({ t }: { t: Tracker }) {
       {s.error && <div className="err">{s.error}</div>}
       {loop && !running && <div className="faint" style={{ fontSize: 13 }}>Last loop ({when(loop.started_at)}, {loop.model}): {loop.stop_reason ?? loop.status}</div>}
       {running && s.log.length > 0 && <pre className="log">{s.log.slice(-15).join('\n')}</pre>}
+      <ParkedUnits project={p} tick={tick} />
       <section className="card">
         <div className="sec-head"><h2 className="h2">Units <span className="faint" style={{ fontWeight: 400 }}>{s.runs.length}</span></h2></div>
         <div>

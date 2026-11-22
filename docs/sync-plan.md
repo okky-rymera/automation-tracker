@@ -307,6 +307,31 @@ Estimate with all steps: Cypress about 3 to 6 minutes for each sync plus 2 to 3 
      - A cancel stops between the copies of the sites.
      - Tests: `reset site-1` on a stopped site put a real copy in; with a held lock it only warned.
 
+## Phase 8: One automatic flow, from the sync to the AI (22 Nov 2026)
+
+The user's flow: the sync runs the tests, then the AI checks the changes, links the tests, and sorts the code that no test runs, with no button. With 40+ plugins, nobody can press the AI buttons for each plugin each day.
+
+1. [x] **Each test gets a decision.** `map apply` takes `leftOut: [{ testId, reason }]` (`server/left-out.ts`). A done test file with a test that has no link row and no left-out row is `unlinked`, and `next` gives it after the changed and new files, with `unlinkedTests`. The apply refuses a test-file payload that leaves a test with no decision. A feature delete leaves its tests out (reason: the deleted feature). The Code screen lists the left-out tests with Remove.
+2. [x] **Parked units.** A unit that fails 2 times in one loop is parked (`map park`, table `parked_units`, with the hash of its files), and the loop goes on. `next` skips it until its files change. "Map with AI" lists it with "Try again".
+3. [x] **Code links to scopes.** Table `code_scopes`. A `code` entry of a payload takes `scopes`. A scope move takes the code with only that scope's tag to the target feature (a removed marker stays on the old feature); a merge keeps the tags; a scope delete removes the tag. `PATCH .../feature-code/:cid { scopeIds }` sets them by hand. The feature page tags a scope with code but no test ("Code, no test"); the Tests screen lists these scopes ("Scopes to write tests for"). The AI update prompt names the scopes of the changed code.
+4. [x] **The AI update keeps its list.** `projects.ai_reviewed_commit` and table `ai_review_pending`. `runReview` adds the features to review of `ai_reviewed_commit..HEAD` (a feature in the list keeps its older from commit), then checks them. A failed feature stays, with one fail for each day; after 2 days it is parked (Sync screen, "Try again"). A plan limit or a stop is not a fail.
+5. [x] **The plan limit in the AI update.** `--output-format stream-json --verbose`, read with `server/plan-limit.ts` (moved from the loop). Checked on 22 Nov 2026 with Haiku: the answer comes in `structured_output` of the result line, and the plan use was read (5-hour 3%).
+6. [x] **The daily AI step** (`server/daily-sync.ts`). After the syncs, one project at a time: `runReview`, then the loop with at most `TRACKER_DAILY_AI_UNITS` (10) units. A due sync stops it between units or features (`shouldStop`). At 80% plan use (`TRACKER_DAILY_AI_MAX_USE`) it waits for the reset. On by default since 22 Nov 2026 (the user turned it on), with Sonnet (`TRACKER_DAILY_AI_MODEL`). It was off during the build: the dev server reloads on each edit, and the step must not start on the user's plan mid-build. `TRACKER_DAILY_AI=off` turns it off.
+7. [x] **Coverage only when it is missing.** `next` gives `coverage: true|false` for a test unit. Before a Playwright unit with `false`, the loop makes a partial coverage run of that one file, merged into the selected run. Not for Cypress (slow), and not without a selected run.
+   - Bug found in the test: the run names spec files from the folder above the spec folder (`specs/frontend/x.spec.js`), the unit from the spec folder (`frontend/x.spec.js`). With the wrong name, the merge kept the file's old tests too (52 tests, not 49). Fixed: 49 tests, 3 of the file, 46 kept.
+
+8. [x] **Fixes after the review** (22 Nov 2026): a stop during the coverage run ends the loop before the unit; the daily loop makes one database backup for each day, not one for each project; the daily done and capped state comes from `map_loops` (`started_by = 'sync'`) and the plan use from `data/plan-use.json`, so a server restart keeps them; the AI update kills a run with SIGKILL 30 s after SIGTERM, and stops a feature check after 20 minutes; the payload reference shows `leftOut`, `library` and code `scopes`.
+9. [x] **Fixes after the second review** (22 Nov 2026):
+   - A daily loop that a person stopped, or that failed, does not start again that day. A loop that a server restart ended does not count.
+   - The 10 units are for each day: the units of all of today's daily loops count.
+   - The plan use is kept for each limit window, so the weekly Opus limit does not stop a Sonnet step. The server reads the file again when a loop from the command line wrote it.
+   - The review commit moves past an error only when the old commit is gone. A pending feature whose start commit is gone is checked against the code now.
+   - Stop and the daily stop also end the short coverage run.
+   - A due project that waits (its own loop runs) does not stop the AI step of the other projects.
+10. [x] **A real unit** (Sonnet, on the copy): `next` gave `cart-page.spec.js` as `unlinked` with `PW-04a4166f`; the model linked it to S-39; the row went to the copy only. 2 minutes, $0.32.
+
+Tests (on a copy of the database, 22 Nov 2026): an unlinked test brings its file back; a payload with no decision is refused; `leftOut` moves `next` on; a park skips the file; a feature delete writes left-out rows; code tags follow a scope move and a merge; the review queue held the 4 features of sync 8; fails count once a day and park on the second day; a high plan use makes the AI step wait; a due sync blocks it; a loop with `shouldStop` ends before its first unit; the app screens show the new parts. No failed logins, and the plugin copy stayed clean.
+
 ## Later
 
 - [ ] JS coverage from the browser (Playwright can record V8 coverage in Chromium). Then JS changes can select tests too.
@@ -320,7 +345,7 @@ Estimate with all steps: Cypress about 3 to 6 minutes for each sync plus 2 to 3 
 - (Decided: Opus, $1 for each feature, with the claude.ai login. See phase 3.)
 - (Decided on 21 Nov 2026: keep test selection, with a library limit. See phase 6.)
 - The library limit: 90% is the suggestion. The full run: each week or each night.
-- Whether the mapping loop also runs after each sync (decided for now: button only).
+- (Decided on 22 Nov 2026: the mapping loop and the AI update run after the daily sync. See phase 8. On by default is the plan; the user turns it on.)
 
 ## Safety
 

@@ -22,16 +22,20 @@ export interface CodeRow {
   function: string;
   source: 'ai' | 'manual';
   checked: boolean;
+  /** The scopes of the feature that this code does (code_scopes). */
+  scopeIds: number[];
 }
 
 export function codeRows(projectId: string, featureId?: number): CodeRow[] {
   const rows = db
     .prepare(
-      `SELECT id, feature_id AS featureId, file, function, source, checked FROM feature_code
+      `SELECT id, feature_id AS featureId, file, function, source, checked,
+         (SELECT group_concat(scope_id) FROM code_scopes cs WHERE cs.code_id = feature_code.id) AS scopes
+       FROM feature_code
        WHERE project_id = ? AND removed = 0 ${featureId ? 'AND feature_id = ?' : ''} ORDER BY file, function`,
     )
     .all(...(featureId ? [projectId, featureId] : [projectId])) as any[];
-  return rows.map((r) => ({ ...r, checked: !!r.checked }));
+  return rows.map(({ scopes, ...r }) => ({ ...r, checked: !!r.checked, scopeIds: scopes ? String(scopes).split(',').map(Number) : [] }));
 }
 
 const zero = (): LineCounts => ({ runnable: 0, library: 0, tested: 0, setup: 0, background: 0, never: 0, runByTests: 0, cypressOnly: 0, markedLibrary: 0, markedCovered: 0 });

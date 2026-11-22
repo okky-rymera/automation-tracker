@@ -9,7 +9,8 @@ interface AiUpdateRow {
   id: number; featureId: number; syncId: number | null; fromCommit: string; toCommit: string; model: string; startedAt: string; finishedAt: string | null;
   status: 'waiting' | 'running' | 'no-change' | 'applied' | 'proposed' | 'failed'; costUsd: number | null; durationMs: number | null; summary: string; applyReport: string[] | null; error: string | null;
 }
-interface AiState { running: boolean; rows: AiUpdateRow[]; totalUsd: number; count: number; defaults: { model: string; budgetUsd: number }; error: string | null }
+interface PendingReview { featureId: number; title: string; fromCommit: string; fails: number; lastError: string | null; parked: boolean }
+interface AiState { running: boolean; rows: AiUpdateRow[]; pending: PendingReview[]; totalUsd: number; count: number; defaults: { model: string; budgetUsd: number }; error: string | null }
 const AI_STATUS: Record<AiUpdateRow['status'], [string, string]> = {
   waiting: ['Waiting', 'tag-ro'], running: ['Checking…', 'tag-new'], 'no-change': ['No change needed', 'tag-ok'], applied: ['Saved as AI draft', 'tag-ok'],
   proposed: ['Proposal only, not saved', 'tag-skip'], failed: ['Failed', 'tag-fail'],
@@ -117,7 +118,7 @@ export function SyncPage({ t }: { t: Tracker }) {
               ))}
             </ul>
           </Sec>
-          <AiUpdates t={t} canStart={!running && r.review.length > 0} />
+          <AiUpdates t={t} canStart={!running} />
           <Sec title="Likely renamed tests" count={r.renames.length} sub="A new title or file gives a test a new ID. Its links stay on the old ID.">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {r.renames.map((x) => (
@@ -203,15 +204,38 @@ function AiUpdates({ t, canStart }: { t: Tracker; canStart: boolean }) {
               <option value="sonnet">Sonnet (uses less of the plan)</option><option value="opus">Opus (more detail)</option>
             </select>
             <button
-              className="btn btn-sm" disabled={!canStart} title={canStart ? `At most ${usd(s.defaults.budgetUsd)} for each feature` : 'The last sync has no features to review'}
+              className="btn btn-sm" disabled={!canStart} title={canStart ? `At most ${usd(s.defaults.budgetUsd)} for each feature` : 'A sync runs now'}
               onClick={() => act(async () => (await mutate('POST', `/api/projects/${p}/ai-update`, { model: model ?? s.defaults.model }, { quiet: true }), setTick((n) => n + 1)), 'AI update started')}
             >Check the features to review with AI</button>
           </>
         )}
       </div>
       <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12, fontSize: 13 }}>
-        <span className="faint">Claude reads the changed code and checks each feature to review. It saves its changes as AI draft, and they show on the Changes page. It never changes text that a person wrote or checked: then it adds a question.</span>
+        <span className="faint">
+          Claude reads the changed code and checks each feature to review. It saves its changes as AI draft, and they show on the Changes page. It never changes text that a person wrote or checked: then it adds a question.
+          The list keeps every feature to review since the last AI check, also from earlier syncs. The daily sync runs this check by itself after the sync.
+        </span>
         {s.error && <div className="err">{s.error}</div>}
+        {s.pending.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontWeight: 600 }}>Waiting for the AI check: {s.pending.filter((x) => !x.parked).length}{s.pending.some((x) => x.parked) && `, parked: ${s.pending.filter((x) => x.parked).length}`}</span>
+            <ul className="plain">
+              {s.pending.map((x) => (
+                <li key={x.featureId} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <a className="linkbtn" href={link(p, 'feature', x.featureId)}><span className="mono faint">F-{x.featureId}</span> {x.title}</a>
+                  <span className="faint mono">since {short(x.fromCommit)}</span>
+                  {x.parked ? (
+                    <>
+                      <span className="tag tag-fail" title={x.lastError ?? undefined}>Parked: failed on {x.fails} days</span>
+                      <button className="btn btn-sm" onClick={() => act(async () => (await mutate('POST', `/api/projects/${p}/ai-review-pending/${x.featureId}/retry`, {}, { quiet: true }), setTick((n) => n + 1)), `F-${x.featureId} goes to the next AI check`)}>Try again</button>
+                    </>
+                  ) : x.fails > 0 && <span className="tag tag-skip" title={x.lastError ?? undefined}>Failed {x.fails} {x.fails === 1 ? 'time' : 'times'}</span>}
+                  {x.lastError && <span className="faint" style={{ flexBasis: '100%', overflowWrap: 'anywhere' }}>{x.lastError}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {s.rows.map((u) => (
           <div key={u.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, borderTop: '1px solid var(--line)', paddingTop: 10 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

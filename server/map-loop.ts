@@ -9,15 +9,15 @@
  *     ALLOWED_TOOLS (--permission-mode dontAsk refuses each other tool). It runs under setpriv
  *     --no-new-privs, with the no-sudo stubs first in PATH.
  *  3. The runner checks that the unit was saved or skipped (processed_units). If not, `next` would
- *     give the same unit again, so a unit gets one more try, and then the loop stops.
+ *     give the same unit again, so a unit gets one more try. After 2 fails, the runner parks it
+ *     (`map park`): `next` skips it until its files change, and the loop goes on with the next unit.
  *  4. The runner stops the test site after each unit.
  * The run uses the claude.ai login (the plan), not an API key, so it has no dollar limit. The
  * runner reads the plan limit events of the run (stream-json, rate_limit_event):
  *  - The 5-hour or weekly limit is reached: the runner stops the run, and the loop stops. The unit
  *    is "stopped", not "failed": it was not saved, and it runs again at the next start.
  *  - The run starts to use extra usage (paid, past the plan): the same stop.
- * The loop stops at: no unit left, the unit limit, a unit that fails two times, a plan limit, or a
- * stop from a person. A unit that runs longer than 60 minutes is stopped and counts as failed.
+ * The loop stops at: no unit left, the unit limit, a plan limit, or a stop from a person. A unit that runs longer than 60 minutes is stopped and counts as failed.
  *
  * Each start is a row in map_loops, and each unit a row in map_runs, with its cost (a list-price
  * estimate of the plan use) and the final message of the run (what it did, its open questions). A
@@ -34,7 +34,8 @@ import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, mapLoopRunning, processAlive, run, SETPRIV, syncRunning, type Job } from './sync.ts';
 import { aiRunning } from './ai-update.ts';
 import { stopTestSites } from './echowp.ts';
-import { clearDeadLock, stopLeftoverRunSpec } from './test-run.ts';
+import { clearDeadLock, runTests, stopLeftoverRunSpec, type RunPlan } from './test-run.ts';
+import { LIMIT_TEXT, notePlanUse, readPlanLine } from './plan-limit.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -61,77 +62,15 @@ const SCRATCH = path.join(ROOT, 'data', 'map-loop');
 
 export class MapLoopError extends Error {}
 
-const WINDOW_NAMES: Record<string, string> = { five_hour: '5-hour', seven_day: 'weekly', seven_day_opus: 'weekly Opus', seven_day_sonnet: 'weekly Sonnet' };
-const windowName = (k: unknown) => WINDOW_NAMES[String(k)] ?? String(k ?? 'plan').replace(/_/g, ' ');
-const OK_STATUS = new Set(['allowed', 'allowed_warning']);
-
-/** What one output line of `claude -p --output-format stream-json` says about the plan limits. */
-export interface PlanLine {
-  /** Set when the run must stop: the plan limit is reached, or extra usage (paid) started. */
-  stop?: string;
-  /** The plan use, for the log, for example "5-hour 24%, weekly 53%". */
-  use?: string;
-}
-
-/**
- * Reads a rate_limit_event line (Claude Code 2.1, checked on 20 Nov 2026):
- * { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: <unix s>,
- *   rateLimitType: "five_hour", isUsingOverage: false,
- *   unifiedWindows: { five_hour: { utilization: 0.24, resetsAt, status }, seven_day: {...} } } }
- * Each status other than "allowed" and "allowed_warning" stops the run. A limit of one model (for
- * example seven_day_opus) stops only a run of that model: a Sonnet run can go on when the Opus
- * limit is used up. Gives null for other lines.
- */
-export function readPlanLine(line: string, model: string): PlanLine | null {
-  if (!line.startsWith('{') || !line.includes('"rate_limit_event"')) return null;
-  let v: any;
-  try {
-    v = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (v?.type !== 'rate_limit_event') return null;
-  const info = v.rate_limit_info ?? {};
-  const windows: [string, any][] = Object.entries(info.unifiedWindows ?? {});
-  const use = windows
-    .filter(([, w]) => typeof w?.utilization === 'number')
-    .map(([k, w]) => `${windowName(k)} ${Math.round(w.utilization * 100)}%`)
-    .join(', ');
-  const out: PlanLine = use ? { use } : {};
-  const resets = (t: unknown) => (typeof t === 'number' ? ` It resets ${new Date(t * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}.` : '');
-  if (info.isUsingOverage === true) {
-    out.stop = 'The run started to use extra usage (paid, past the plan), so the loop stopped it.';
-    return out;
-  }
-  const bad = windows.find(([k, w]) => appliesTo(k, model) && typeof w?.status === 'string' && !OK_STATUS.has(w.status));
-  if (typeof info.status === 'string' && !OK_STATUS.has(info.status) && appliesTo(info.rateLimitType, model)) {
-    out.stop = `The ${windowName(info.rateLimitType)} limit of the Claude plan is reached.${resets(info.resetsAt)}`;
-  } else if (bad) {
-    out.stop = `The ${windowName(bad[0])} limit of the Claude plan is reached.${resets(bad[1].resetsAt)}`;
-  }
-  return out;
-}
-
-const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku', 'fable'];
-/** A limit window applies to all models, or only to one model family (its name has the family). */
-function appliesTo(windowKey: unknown, model: string): boolean {
-  const k = String(windowKey ?? '').toLowerCase();
-  const family = MODEL_FAMILIES.find((f) => k.includes(f));
-  return !family || model.toLowerCase().includes(family);
-}
-
-/**
- * The plan limit message of Claude Code itself (a fallback when no event came), at the start of a
- * line: "You've hit your 5-hour limit", "Claude AI usage limit reached". Only at the start: a
- * report about a plugin setting (WooCommerce has a coupon "Usage limit") must not match.
- */
-export const LIMIT_TEXT = /^\s*(?:You've hit your [\w -]*limit|You've reached your [\w -]*limit|Claude AI usage limit reached|Usage limit reached|You're out of usage)/i;
+export { LIMIT_TEXT, readPlanLine, type PlanLine } from './plan-limit.ts';
 
 export interface MapLoopOptions {
   model?: string;
   maxUnits?: number;
   startedBy?: 'app' | 'cli' | 'sync';
   onLine?: (line: string) => void;
+  /** Checked before each unit. A reason stops the loop there (the daily sync: a sync is due, or the plan use is high). */
+  shouldStop?: () => string | null;
 }
 
 /** Tools of the run. Each other tool, and each other command, is refused without a question. */
@@ -188,6 +127,7 @@ function prompt(p: ProjectConfig, u: Unit, scratch: string): string {
 You run headless, in a loop. No person reads this session or answers a question. So:
 - Do only this one unit. Do not start a second unit.
 - Finish the unit with "map apply" (or "map skip" when the unit has no feature). A unit that is not saved counts as failed.
+- Decide each test of the file: link it, or put it in "leftOut" with a reason. When "next" gives "unlinkedTests", decide only those tests: the other tests are done.
 - Put a question for a person in the feature's "questions" list, not in this session.
 - Write the payload JSON and the screenshots only in this folder: ${scratch}
 - Do not run Cypress (\`npx cypress\` is refused). For a Cypress unit, read the step definitions and try the feature with playwright-cli.
@@ -274,6 +214,7 @@ async function runUnit(p: ProjectConfig, u: Unit, o: { model: string }, onStart:
       return;
     }
     const plan = readPlanLine(l, o.model);
+    notePlanUse(plan);
     if (plan) {
       if (plan.use) planUse = plan.use;
       // Do not wait for claude: it can wait for the limit to reset. Stop the run now.
@@ -340,6 +281,55 @@ async function runUnit(p: ProjectConfig, u: Unit, o: { model: string }, onStart:
   }
 }
 
+/**
+ * A short coverage run of one Playwright spec file, before its unit, when the selected coverage run
+ * has no test of the file (a new file, and no sync ran it yet). It is a partial run: the new run
+ * keeps the other tests of the selected run (coverage/merge-run.py), and it becomes the selected run.
+ * Not for Cypress (slow), and not without a selected Playwright run (nothing to keep). A failure only
+ * goes in the log: the model then finds the code by reading it.
+ */
+export async function coverageFirst(p: ProjectConfig, u: Unit, job: Job, log: (l: string) => void, shouldStop?: () => string | null) {
+  if (u.kind !== 'playwright' || u.raw?.coverage !== false) return;
+  const fresh = getProject(p.id) ?? p;
+  const base = fresh.runs.playwright;
+  if (!base) return log(`No coverage run for "${u.ref}": the project has no selected Playwright run to add it to. The model reads the code.`);
+  let info: any = {};
+  try {
+    info = JSON.parse(fs.readFileSync(path.join(ROOT, base.dir, 'run-info.json'), 'utf8'));
+  } catch {
+    /* an old run: no full-run date */
+  }
+  let commit: string;
+  try {
+    commit = (await execFileAsync('git', ['-C', fresh.path, 'rev-parse', 'HEAD'], { encoding: 'utf8' })).stdout.trim();
+  } catch (e) {
+    return log(`No coverage run for "${u.ref}": ${(e as Error).message}`);
+  }
+  // A unit ref is relative to the spec folder ("frontend/x.spec.js"). The run names a file relative to
+  // the folder above it ("specs/frontend/x.spec.js"), as server/selection.ts does.
+  if (!fresh.playwrightDir) return log(`No coverage run for "${u.ref}": the project has no Playwright folder.`);
+  const file = path.posix.join(path.posix.relative(path.posix.dirname(fresh.playwrightDir), fresh.playwrightDir), u.ref);
+  const plan: RunPlan = {
+    files: [file],
+    baseDir: base.dir,
+    info: { fullRunAt: info.fullRunAt ?? null, untested: info.untested ?? [], partial: { fromRun: base.dir, fromCommit: info.pluginCommit ?? null, reason: `the mapping loop: "${u.ref}" was not in the coverage run` } },
+  };
+  log(`"${u.ref}" is not in the coverage run. A short coverage run of this file first.`);
+  try {
+    const r = await runTests(fresh, commit, {
+      run: (c, a, o) => run(job, c, a, o),
+      env: (extra) => childEnv(extra),
+      log: () => {},
+      // A stop of the daily sync (a due sync, a high plan use) ends the run between its steps too.
+      cancelled: () => job.cancelled || !!shouldStop?.(),
+      signal: job.abort.signal,
+    }, plan);
+    log(r.selected ? `Coverage run done and selected: ${r.runDir ?? ''}` : `The coverage run was not selected: ${r.reason ?? 'no reason given'}. The model reads the code.`);
+  } catch (e) {
+    log(`The coverage run failed: ${(e as Error).message}. The model reads the code.`);
+  }
+}
+
 /** The units that a run saved or skipped since it started. Code: the area that the model named. */
 function savedUnits(p: ProjectConfig, u: Unit, since: string): { ref: string; status: string; features: number[] }[] {
   const rows = (
@@ -399,6 +389,18 @@ export function mapLoopState(projectId: string) {
   };
 }
 
+/** Units that failed 2 times in one loop, and wait until their files change (`map park`). */
+export function listParked(projectId: string) {
+  return (db.prepare('SELECT kind, ref, reason, parked_at FROM parked_units WHERE project_id = ? ORDER BY parked_at DESC').all(projectId) as any[]).map((r) => ({
+    kind: r.kind as string, ref: r.ref as string, reason: r.reason as string, parkedAt: r.parked_at as string,
+  }));
+}
+
+/** "Try again": the unit comes back in the loop. */
+export function unpark(projectId: string, kind: string, ref: string): boolean {
+  return db.prepare('DELETE FROM parked_units WHERE project_id = ? AND kind = ? AND ref = ?').run(projectId, kind, ref).changes > 0;
+}
+
 /** Asks the running loop to stop. The current unit stops too; its partial work is not saved. */
 export function stopMapLoop(projectId: string) {
   const rows = db.prepare("SELECT id FROM map_loops WHERE project_id = ? AND status = 'running'").all(projectId) as any[];
@@ -422,7 +424,18 @@ export function stopMapLoop(projectId: string) {
       }, KILL_GRACE_MS).unref();
     }
     const job = live.get(l.id);
-    if (job) job.cancelled = true;
+    if (job) {
+      job.cancelled = true;
+      job.abort.abort();
+      // The commands of the job (the coverage run before a unit) run in their own process groups.
+      for (const c of new Set([...(job.children ?? []), ...(job.child ? [job.child] : [])])) {
+        try {
+          if (c.pid) process.kill(-c.pid, 'SIGTERM');
+        } catch {
+          /* gone */
+        }
+      }
+    }
   }
 }
 
@@ -445,7 +458,7 @@ export function startMapLoop(p: ProjectConfig, o: MapLoopOptions = {}): { loopId
   live.set(loopId, null);
   lastError.delete(p.id);
   logs.set(p.id, []);
-  const done = loop(p, loopId, { model, maxUnits }, o.onLine).catch((e) => {
+  const done = loop(p, loopId, { model, maxUnits, shouldStop: o.shouldStop, daily: o.startedBy === 'sync' }, o.onLine).catch((e) => {
     lastError.set(p.id, `The mapping loop stopped: ${(e as Error).message}`);
     db.prepare("UPDATE map_loops SET status = 'failed', finished_at = ?, stop_reason = ? WHERE id = ? AND status = 'running'").run(now(), (e as Error).message, loopId);
     // A unit row must not stay "running" when the loop fails after it added the row.
@@ -454,7 +467,7 @@ export function startMapLoop(p: ProjectConfig, o: MapLoopOptions = {}): { loopId
   return { loopId, done };
 }
 
-async function loop(p: ProjectConfig, loopId: number, o: { model: string; maxUnits: number }, onLine?: (l: string) => void) {
+async function loop(p: ProjectConfig, loopId: number, o: { model: string; maxUnits: number; shouldStop?: () => string | null; daily?: boolean }, onLine?: (l: string) => void) {
   const log = (l: string) => say(p.id, l, onLine);
   const end = (status: string, reason: string) => {
     db.prepare('UPDATE map_loops SET status = ?, finished_at = ?, stop_reason = COALESCE(stop_reason, ?) WHERE id = ?').run(status, now(), reason, loopId);
@@ -462,9 +475,13 @@ async function loop(p: ProjectConfig, loopId: number, o: { model: string; maxUni
   };
   // Let the caller (an HTTP request) answer first.
   await new Promise((r) => setImmediate(r));
-  // A backup before the first change, as CLAUDE.md asks for large changes.
+  // A backup before the first change, as CLAUDE.md asks for large changes. The daily AI step starts a
+  // loop for each project each day: one backup for each day is enough there.
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
-  const backup = path.join(path.dirname(DB_FILE), `tracker-backup-${stamp}-before-map-loop.db`);
+  const backup = path.join(
+    path.dirname(DB_FILE),
+    o.daily ? `tracker-backup-${stamp.slice(0, 8)}-before-daily-ai.db` : `tracker-backup-${stamp}-before-map-loop.db`,
+  );
   if (!fs.existsSync(backup)) db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
   log(`Backup: ${path.relative(ROOT, backup)}. Model ${o.model}, at most ${o.maxUnits} units. The loop stops at the 5-hour or weekly limit of the Claude plan.`);
 
@@ -474,12 +491,15 @@ async function loop(p: ProjectConfig, loopId: number, o: { model: string; maxUni
     const stop = (db.prepare('SELECT stop_reason FROM map_loops WHERE id = ?').get(loopId) as any)?.stop_reason;
     if (stop) return end('stopped', stop);
     if (units >= o.maxUnits) return end('done', `The unit limit (${o.maxUnits}) is reached.`);
+    const why = o.shouldStop?.();
+    if (why) return end('stopped', why);
     const u = await nextUnit(p);
     // A stop can come while "map next" runs. Then there is nothing to cancel yet: check again.
     const stopNow = (db.prepare('SELECT stop_reason FROM map_loops WHERE id = ?').get(loopId) as any)?.stop_reason;
     if (stopNow) return end('stopped', stopNow);
     if (!u) return end('done', 'No unit is left to map.');
     const key = `${u.kind}:${u.ref}`;
+    // The park after the second fail did not work (see below): stop, or the loop would run it again and again.
     if ((failed.get(key) ?? 0) >= 2) return end('failed', `The unit ${u.kind} "${u.ref}" failed two times. Look at its report.`);
 
     const since = now();
@@ -489,6 +509,14 @@ async function loop(p: ProjectConfig, loopId: number, o: { model: string; maxUni
     log(`Unit ${units + 1}: ${u.kind} ${u.kind === 'code' ? '(the model picks the area)' : `"${u.ref}"`}`);
     const job: Job = { syncId: 0, child: null, cancelled: false, abort: new AbortController() };
     live.set(loopId, job);
+    await coverageFirst(p, u, job, log, o.shouldStop);
+    // A stop during the coverage run: no claude run was started yet, so nothing else would stop it.
+    const stopAfterRun = job.cancelled ? 'Stopped' : ((db.prepare('SELECT stop_reason FROM map_loops WHERE id = ?').get(loopId) as any)?.stop_reason as string | null) ?? o.shouldStop?.() ?? null;
+    if (stopAfterRun) {
+      live.set(loopId, null);
+      db.prepare("UPDATE map_runs SET status = 'stopped', finished_at = ?, error = ? WHERE id = ?").run(now(), `Not started: ${stopAfterRun}`, runId);
+      return end('stopped', stopAfterRun);
+    }
     const r = await runUnit(p, u, { model: o.model }, (pid) => db.prepare('UPDATE map_runs SET claude_pid = ? WHERE id = ?').run(pid ?? null, runId), job);
     live.set(loopId, null);
     // A stop from a person. The app of another process (a loop that the command line started) sets
@@ -536,8 +564,20 @@ async function loop(p: ProjectConfig, loopId: number, o: { model: string; maxUni
     log(`Unit ${units}: ${status}${r.costUsd !== null ? `, $${r.costUsd.toFixed(2)}` : ''}${r.durationMs ? `, ${Math.round(r.durationMs / 60000)} min` : ''}${r.planUse ? ` (plan use: ${r.planUse})` : ''}${error ? `: ${error}` : ''}`);
     if (r.planLimit) return end('stopped', `${r.planLimit} Start the loop again after the reset.`);
     if (cancelled) return end('stopped', stopReason ?? 'Stopped');
-    // A unit that took too long counts as failed. The loop goes on; a second fail of the unit stops it.
-    if (status === 'failed') failed.set(key, (failed.get(key) ?? 0) + 1);
+    // A unit that took too long counts as failed. The loop goes on. After a second fail, the unit is
+    // parked: "map next" skips it until its files change, so a daily loop does not try it each day.
+    if (status === 'failed') {
+      const n = (failed.get(key) ?? 0) + 1;
+      failed.set(key, n);
+      if (n >= 2) {
+        try {
+          await mapCmd(['park', p.id, u.kind, u.ref, `Failed 2 times (loop ${loopId}): ${(error ?? '').slice(0, 300)}`]);
+          log(`Unit ${u.kind} "${u.ref}" failed 2 times. It is parked until its files change. "Try again" in the app removes the park.`);
+        } catch (e) {
+          log(`Could not park ${u.kind} "${u.ref}": ${(e as Error).message}`);
+        }
+      }
+    }
   }
 }
 

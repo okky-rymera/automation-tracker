@@ -13,17 +13,28 @@
  *
  * Each run is a row in ai_updates, with its cost (total_cost_usd of the JSON output).
  * The AI step is separate from the sync: the fixed steps never need it.
+ *
+ * The review list (docs/sync-plan.md phase 8). runReview, which the app button and the daily sync
+ * use, does not use only the last sync's list: a day with no AI update must not lose features.
+ *  - queueReview adds the features to review of ai_reviewed_commit..HEAD of the copy to
+ *    ai_review_pending, and moves ai_reviewed_commit to HEAD. A feature that is in the list already
+ *    keeps its older from commit, so its diff covers all changes since its last check.
+ *  - runReview checks the pending features, one group for each from commit. A feature that ends as
+ *    applied, no-change or proposed leaves the list. A failed feature stays, with one fail for each
+ *    day. After MAX_FAIL_DAYS failed days it is parked: a person sees it and clicks "Try again".
+ *  - A plan limit or a stop (shouldStop) is not a fail: those features stay in the list as they are.
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { db, now } from './db.ts';
+import { db, now, tx } from './db.ts';
 import { changeReport, type ChangeReport } from './changes.ts';
 import { ITEM_KINDS } from './features.ts';
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, mapLoopRunning, processAlive, run, syncRunning, type Job } from './sync.ts';
+import { LIMIT_TEXT, notePlanUse, readPlanLine } from './plan-limit.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -49,7 +60,15 @@ export interface AiUpdateOptions {
   apply?: boolean;
   syncId?: number | null;
   onLine?: (line: string) => void;
+  /** Checked before each feature. A reason stops the update there (the daily sync: a sync is due). */
+  shouldStop?: () => string | null;
 }
+
+/** A check of one feature that takes longer than this is stopped, and counts as failed. */
+const FEATURE_TIMEOUT_MS = 20 * 60 * 1000;
+
+/** The error of a feature that did not run (a plan limit, or a stop). It is not a fail of the feature. */
+export const NOT_RUN = 'Not run: ';
 
 export const DEFAULTS = { model: 'opus', budgetUsd: 1, auth: 'login' as AuthMode };
 
@@ -162,7 +181,7 @@ export function aiUpdateState(projectId: string) {
   const running = aiRunning(projectId);
   const rows = aiUpdates(projectId);
   const total = db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS usd, COUNT(*) AS n FROM ai_updates WHERE project_id = ?').get(projectId) as any;
-  return { running, rows, totalUsd: total.usd as number, count: total.n as number, defaults: DEFAULTS, error: lastError.get(projectId) ?? null };
+  return { running, rows, pending: pendingReviews(projectId), totalUsd: total.usd as number, count: total.n as number, defaults: DEFAULTS, error: lastError.get(projectId) ?? null };
 }
 
 /**
@@ -170,23 +189,162 @@ export function aiUpdateState(projectId: string) {
  * saved a change report. It uses that saved report: the same commits and features that the app shows.
  * Throws when an update or a sync runs, or when no sync has features to review.
  */
-export function startAiUpdate(p: ProjectConfig, o: { model?: string; budgetUsd?: number }): { syncId: number } {
+export function startAiUpdate(p: ProjectConfig, o: { model?: string; budgetUsd?: number }): { pending: number } {
   if (aiRunning(p.id)) throw new AiUpdateError('An AI update runs already for this project.');
   if (syncRunning(p.id)) throw new AiUpdateError('A sync runs now. Start the AI update when it ends.');
   if (mapLoopRunning(p.id)) throw new AiUpdateError('A mapping loop runs now. Start the AI update when it ends.');
-  const s = db.prepare('SELECT id, report FROM syncs WHERE project_id = ? AND report IS NOT NULL ORDER BY id DESC LIMIT 1').get(p.id) as any;
-  if (!s) throw new AiUpdateError('No sync has a change report yet. Sync first.');
-  const saved = JSON.parse(s.report) as ChangeReport;
-  if (!saved.review?.length) throw new AiUpdateError('The last sync has no features to review.');
+  const line = queueReview(p);
+  const pending = pendingReviews(p.id).filter((x) => !x.parked).length;
+  if (!pending) throw new AiUpdateError(`No feature to review. ${line}`);
   lastError.delete(p.id);
-  aiUpdate(p, { from: saved.from, to: saved.to, report: saved, syncId: s.id, model: o.model, budgetUsd: o.budgetUsd }).catch((e) => {
+  runReview(p, { model: o.model, budgetUsd: o.budgetUsd }).catch((e) => {
     lastError.set(p.id, `The AI update did not start: ${(e as Error).message}`);
     console.error(`AI update of ${p.id} failed:`, e);
   });
-  return { syncId: s.id };
+  return { pending };
 }
 
 export class AiUpdateError extends Error {}
+
+// ---- The review list ----
+
+/** Failed days after which a pending feature is parked until a person clicks "Try again". */
+export const MAX_FAIL_DAYS = 2;
+const today = () => new Date().toISOString().slice(0, 10);
+
+/** True when the copy has this commit. */
+function hasCommit(p: ProjectConfig, sha: string): boolean {
+  try {
+    git(p.path, ['cat-file', '-e', `${sha}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function copyHead(p: ProjectConfig): string | null {
+  try {
+    return git(p.path, ['rev-parse', 'HEAD']).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Adds the features to review of ai_reviewed_commit..HEAD to the pending list, and moves
+ * ai_reviewed_commit to HEAD. The first time, the range starts at the from commit of the last sync
+ * with a change report. Returns a line for the log.
+ */
+export function queueReview(p: ProjectConfig): string {
+  const to = copyHead(p);
+  if (!to) return 'The copy has no commit.';
+  const cur = (db.prepare('SELECT ai_reviewed_commit AS c FROM projects WHERE id = ?').get(p.id) as any)?.c as string | null;
+  const lastSync = db.prepare('SELECT from_commit FROM syncs WHERE project_id = ? AND report IS NOT NULL ORDER BY id DESC LIMIT 1').get(p.id) as any;
+  const from = cur ?? lastSync?.from_commit ?? null;
+  const setCommit = () => db.prepare('UPDATE projects SET ai_reviewed_commit = ? WHERE id = ?').run(to, p.id);
+  if (!from || from === to) {
+    setCommit();
+    return from ? 'No new commit since the last AI review.' : 'No sync with a change report yet: the AI review starts from this commit.';
+  }
+  // The old commit is gone (a force push): no report can start there. Start again from HEAD.
+  if (!hasCommit(p, from)) {
+    setCommit();
+    return `The commit ${from.slice(0, 8)} is not in the copy now (a force push?). The AI review starts again from ${to.slice(0, 8)}.`;
+  }
+  let r: ChangeReport;
+  try {
+    r = changeReport(p, from, to);
+  } catch (e) {
+    // Another error (a git lock, a read error): keep the commit, so the next run tries the same range.
+    return `No change report for ${from.slice(0, 8)}..${to.slice(0, 8)} (${(e as Error).message}). The next AI review tries again.`;
+  }
+  const add = db.prepare('INSERT INTO ai_review_pending (project_id, feature_id, from_commit) VALUES (?, ?, ?) ON CONFLICT (project_id, feature_id) DO NOTHING');
+  tx(() => {
+    for (const x of r.review) add.run(p.id, x.featureId, from);
+    setCommit();
+  });
+  return `${from.slice(0, 8)}..${to.slice(0, 8)}: ${r.review.length} features to review.`;
+}
+
+export interface PendingReview {
+  featureId: number;
+  title: string;
+  fromCommit: string;
+  fails: number;
+  lastError: string | null;
+  parked: boolean;
+}
+
+export function pendingReviews(projectId: string): PendingReview[] {
+  return (db
+    .prepare('SELECT r.*, f.title FROM ai_review_pending r JOIN features f ON f.id = r.feature_id WHERE r.project_id = ? ORDER BY r.fails, r.feature_id')
+    .all(projectId) as any[]).map((r) => ({ featureId: r.feature_id, title: r.title, fromCommit: r.from_commit, fails: r.fails, lastError: r.last_error, parked: r.fails >= MAX_FAIL_DAYS }));
+}
+
+/** "Try again": a parked feature goes back into the next AI update. */
+export function retryReview(projectId: string, featureId: number): boolean {
+  return db.prepare('UPDATE ai_review_pending SET fails = 0, last_fail_day = NULL WHERE project_id = ? AND feature_id = ?').run(projectId, featureId).changes > 0;
+}
+
+export interface ReviewOptions {
+  model?: string;
+  budgetUsd?: number;
+  onLine?: (line: string) => void;
+  shouldStop?: () => string | null;
+}
+
+/**
+ * Checks the pending features (queueReview first). Returns the number of features that ran, and the
+ * reason when a plan limit or a stop ended it early.
+ */
+export async function runReview(p: ProjectConfig, o: ReviewOptions = {}): Promise<{ checked: number; stoppedBy: string | null }> {
+  const say = o.onLine ?? (() => {});
+  say(`AI review: ${queueReview(p)}`);
+  const to = copyHead(p);
+  const pending = pendingReviews(p.id).filter((x) => !x.parked);
+  if (!to || !pending.length) return { checked: 0, stoppedBy: null };
+  const groups = new Map<string, number[]>();
+  for (const x of pending) groups.set(x.fromCommit, [...(groups.get(x.fromCommit) ?? []), x.featureId]);
+  const fail = db.prepare(
+    `UPDATE ai_review_pending SET fails = fails + CASE WHEN last_fail_day IS ? THEN 0 ELSE 1 END, last_fail_day = ?, last_error = ?
+     WHERE project_id = ? AND feature_id = ?`,
+  );
+  const done = db.prepare('DELETE FROM ai_review_pending WHERE project_id = ? AND feature_id = ?');
+  let checked = 0;
+  for (let [from, ids] of groups) {
+    // A start commit that is gone (a force push): check these features against the code now.
+    if (!hasCommit(p, from)) {
+      say(`The commit ${from.slice(0, 8)} is not in the copy now: ${ids.length} features are checked against ${to.slice(0, 8)} only.`);
+      const move = db.prepare('UPDATE ai_review_pending SET from_commit = ? WHERE project_id = ? AND feature_id = ?');
+      for (const fid of ids) move.run(to, p.id, fid);
+      from = to;
+    }
+    let report: ChangeReport;
+    try {
+      report = changeReport(p, from, to);
+    } catch (e) {
+      const msg = `No change report for ${from.slice(0, 8)}..${to.slice(0, 8)}: ${(e as Error).message}`;
+      for (const fid of ids) fail.run(today(), today(), msg, p.id, fid);
+      say(msg);
+      continue;
+    }
+    const rows = await aiUpdate(p, { from, to, report, features: ids, model: o.model, budgetUsd: o.budgetUsd, onLine: o.onLine, shouldStop: o.shouldStop });
+    let stoppedBy: string | null = null;
+    for (const r of rows) {
+      if (r.status === 'applied' || r.status === 'no-change' || r.status === 'proposed') {
+        done.run(p.id, r.featureId);
+        checked++;
+      } else if (r.error?.startsWith(NOT_RUN)) {
+        stoppedBy ??= r.error.slice(NOT_RUN.length);
+      } else {
+        fail.run(today(), today(), r.error ?? 'failed', p.id, r.featureId);
+        checked++;
+      }
+    }
+    if (stoppedBy) return { checked, stoppedBy };
+  }
+  return { checked, stoppedBy: null };
+}
 
 // ---- The answer of the model ----
 
@@ -309,6 +467,18 @@ export async function buildPrompt(p: ProjectConfig, r: ChangeReport, featureId: 
   const cut = diff.length > MAX_DIFF;
   if (cut) diff = diff.slice(0, MAX_DIFF);
   const fns = r.functions.filter((f) => files.includes(f.file));
+  // The scopes of the feature's code entries (code_scopes): the AI checks those scopes first.
+  const codeScopes = new Map<string, string[]>();
+  for (const c of db
+    .prepare(
+      `SELECT c.file, c.function, s.id, s.title FROM feature_code c JOIN code_scopes cs ON cs.code_id = c.id JOIN scopes s ON s.id = cs.scope_id
+       WHERE c.feature_id = ? AND c.removed = 0`,
+    )
+    .all(featureId) as any[]) {
+    const k = `${c.file}\0${c.function}`;
+    codeScopes.set(k, [...(codeScopes.get(k) ?? []), `S-${c.id} "${c.title}"`]);
+  }
+  const scopesOf = (file: string, name: string) => [...(codeScopes.get(`${file}\0${name}`) ?? []), ...(codeScopes.get(`${file}\0`) ?? [])];
   const gone = r.codeGone.filter((g) => g.featureId === featureId);
   const renames = r.renames.filter((x) => linked.has(x.from.id));
   const unlinked = r.tests.added.filter((t) => t.links === 0).slice(0, 40);
@@ -330,7 +500,7 @@ ${JSON.stringify(feature, null, 2)}
 \`\`\`
 
 ## Changed PHP functions in the files of this feature
-${fns.length ? fns.map((f) => `- ${f.change}: ${f.file} ${f.name}`).join('\n') : '- none'}
+${fns.length ? fns.map((f) => { const sc = scopesOf(f.file, f.name); return `- ${f.change}: ${f.file} ${f.name}${sc.length ? ` (code of ${sc.join(', ')})` : ''}`; }).join('\n') : '- none'}
 ${gone.length ? `\n## Code of this feature that is not in the code now\n${gone.map((g) => `- ${g.file} ${g.function ?? '(whole file)'}: ${g.reason}${g.movedTo ? ' -> ' + g.movedTo : ''}`).join('\n')}\n` : ''}${renames.length ? `\n## Linked tests that were likely renamed (a person moves the links in the app)\n${renames.map((x) => `- ${x.from.id} "${x.from.title}" -> ${x.to.id} "${x.to.title}"`).join('\n')}\n` : ''}
 ## New tests that no feature links yet
 ${unlinked.length ? unlinked.map((t) => `- ${t.id} (${t.framework}, ${t.file}): ${t.title}`).join('\n') : '- none'}
@@ -367,6 +537,8 @@ interface ClaudeResult {
   costUsd: number | null;
   durationMs: number | null;
   error: string | null;
+  /** Set when the plan limit (or paid extra usage) stopped the run: the reason, with the reset time. */
+  planLimit?: string | null;
 }
 
 /** A detached checkout of commit `to`, when the copy is not at that commit or has changed files. */
@@ -396,7 +568,10 @@ export async function runClaude(
     // The prompt goes on standard input: one argument can hold at most 128 KB on Linux.
     '-p',
     '--model', o.model,
-    '--output-format', 'json',
+    // One JSON line for each event: the plan limit events (rate_limit_event) come only in this format.
+    // The last line is the result, with the answer in structured_output, as with --output-format json.
+    '--output-format', 'stream-json',
+    '--verbose',
     '--json-schema', JSON.stringify(SCHEMA),
     '--max-budget-usd', String(o.budgetUsd),
     // Only the read tools exist in the session: no Bash, no Edit or Write, no web.
@@ -416,29 +591,73 @@ export async function runClaude(
     for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
   }
   const job: Job = { syncId: 0, child: null, cancelled: false, abort: new AbortController() };
-  const started = run(job, 'claude', args, { cwd, env, quiet: true, input: prompt });
-  onStart?.(job.child?.pid); // run() starts the process at once
-  const res = await started;
-  // The JSON result is one line (output format json). Other lines (stderr, hooks) can come after it,
-  // so each line is read alone, from the last line back.
-  const lines = res.out.trim().split('\n');
+  // Read each line as it comes: a plan limit event stops the run at once (claude can wait for the
+  // reset). The result line is kept. Other lines (stderr, hooks) are only for the error text.
   let out: any = null;
-  for (let i = lines.length - 1; i >= 0 && !out; i--) {
-    if (!lines[i].startsWith('{')) continue;
-    try {
-      const v = JSON.parse(lines[i]);
-      if (v && v.type === 'result') out = v;
-    } catch {
-      /* not the start of the JSON yet */
+  let planLimit: string | null = null;
+  let timedOut = false;
+  const timers: NodeJS.Timeout[] = [];
+  /** SIGTERM to the process group now, and SIGKILL after a grace time: claude can ignore SIGTERM. */
+  const stopRun = () => {
+    const kill = (sig: NodeJS.Signals) => {
+      try {
+        if (job.child?.pid) process.kill(-job.child.pid, sig);
+      } catch {
+        /* gone */
+      }
+    };
+    kill('SIGTERM');
+    timers.push(setTimeout(() => kill('SIGKILL'), 30_000));
+  };
+  const readLine = (l: string, stream: 'stdout' | 'stderr') => {
+    if (stream !== 'stdout' || !l.startsWith('{')) return;
+    const plan = readPlanLine(l, o.model);
+    notePlanUse(plan);
+    if (plan) {
+      if (plan.stop && !planLimit) {
+        planLimit = plan.stop;
+        stopRun();
+      }
+      return;
     }
+    if (l.includes('"type":"result"')) {
+      try {
+        const v = JSON.parse(l);
+        if (v?.type === 'result') out = v;
+      } catch {
+        /* not JSON */
+      }
+    }
+  };
+  const started = run(job, 'claude', args, { cwd, env, quiet: true, input: prompt, onLine: readLine });
+  onStart?.(job.child?.pid); // run() starts the process at once
+  // One feature must not hold the update (and the daily sync after it) for ever.
+  timers.push(
+    setTimeout(() => {
+      timedOut = true;
+      stopRun();
+    }, FEATURE_TIMEOUT_MS),
+  );
+  const res = await started.finally(() => timers.forEach(clearTimeout));
+  if (timedOut && !out) {
+    return { ok: false, proposal: null, costUsd: null, durationMs: FEATURE_TIMEOUT_MS, error: `The check took longer than ${FEATURE_TIMEOUT_MS / 60000} minutes and was stopped.` };
+  }
+  if (planLimit) {
+    return { ok: false, proposal: null, costUsd: typeof out?.total_cost_usd === 'number' ? out.total_cost_usd : null, durationMs: null, error: planLimit, planLimit };
   }
   if (!out) {
+    const hit = res.out.split('\n').find((l) => LIMIT_TEXT.test(l));
+    if (hit) return { ok: false, proposal: null, costUsd: null, durationMs: null, error: `The Claude plan limit is reached: ${hit.trim()}`, planLimit: `The Claude plan limit is reached: ${hit.trim()}` };
     const tail = res.out.trim().split('\n').slice(-3).join(' | ');
     onLine?.(`claude exit ${res.code ?? res.signal}: ${tail}`);
     return { ok: false, proposal: null, costUsd: null, durationMs: null, error: `claude gave no JSON result (exit ${res.code ?? res.signal}): ${tail}` };
   }
   const costUsd = typeof out.total_cost_usd === 'number' ? out.total_cost_usd : null;
   const durationMs = typeof out.duration_ms === 'number' ? out.duration_ms : null;
+  if (out.is_error && typeof out.result === 'string' && LIMIT_TEXT.test(out.result)) {
+    const limit = `The Claude plan limit is reached: ${out.result.slice(0, 300)}`;
+    return { ok: false, proposal: null, costUsd, durationMs, error: limit, planLimit: limit };
+  }
   if (out.is_error || out.subtype !== 'success' || !out.structured_output) {
     return { ok: false, proposal: null, costUsd, durationMs, error: `claude stopped: ${out.subtype ?? 'error'}${out.result ? ': ' + String(out.result).slice(0, 300) : ''}` };
   }
@@ -604,6 +823,11 @@ export async function aiUpdate(p: ProjectConfig, o: AiUpdateOptions): Promise<Ai
   try {
     for (const fid of ids) {
       const id = rowOf.get(fid)!;
+      const stop = o.shouldStop?.();
+      if (stop) {
+        say(`Stopped before F-${fid}: ${stop}`);
+        break;
+      }
       db.prepare("UPDATE ai_updates SET status = 'running', started_at = ? WHERE id = ?").run(now(), id);
       // The answer and its cost stay known when a later step fails, so the cost is never lost.
       let c: ClaudeResult | null = null;
@@ -614,7 +838,9 @@ export async function aiUpdate(p: ProjectConfig, o: AiUpdateOptions): Promise<Ai
         c = await runClaude(prompt, code.dir, { model, budgetUsd, auth }, say, (pid) =>
           db.prepare('UPDATE ai_updates SET claude_pid = ? WHERE id = ?').run(pid ?? null, id),
         );
-        if (!c.ok || !c.proposal) {
+        if (c.planLimit) {
+          finish(id, { ...base(), status: 'failed', error: `${NOT_RUN}${c.planLimit}` });
+        } else if (!c.ok || !c.proposal) {
           finish(id, { ...base(), status: 'failed', error: c.error });
         } else {
           const { payload, dropped } = toPayload(p, fid, c.proposal, `${r.from.slice(0, 8)}..${r.to.slice(0, 8)} F-${fid}`);
@@ -636,11 +862,15 @@ export async function aiUpdate(p: ProjectConfig, o: AiUpdateOptions): Promise<Ai
       const row = toRow(db.prepare('SELECT * FROM ai_updates WHERE id = ?').get(id));
       say(`F-${fid}: ${row.status}${row.costUsd !== null ? `, $${row.costUsd.toFixed(2)}` : ''}${row.error ? `: ${row.error}` : row.summary ? `: ${row.summary}` : ''}`);
       rows.push(row);
+      // The plan limit: the next features would stop at once too.
+      if (c?.planLimit) break;
     }
   } finally {
     // Rows that did not end (an error outside the loop body) must not stay "waiting".
-    for (const id of rowOf.values()) if (live.has(id)) finish(id, { status: 'failed', error: 'The update stopped before this feature' });
+    for (const id of rowOf.values()) if (live.has(id)) finish(id, { status: 'failed', error: `${NOT_RUN}the update stopped before this feature` });
     code.done();
   }
+  // The rows of the features that did not run, too: the caller keeps them for the next update.
+  for (const fid of ids) if (!rows.some((r) => r.featureId === fid)) rows.push(toRow(db.prepare('SELECT * FROM ai_updates WHERE id = ?').get(rowOf.get(fid)!)));
   return rows;
 }

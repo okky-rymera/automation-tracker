@@ -137,6 +137,21 @@ export interface Tracker {
   newTests: Set<string>;
 }
 
+/**
+ * Scopes that have plugin code (the AI put code on them) but no linked test: the tests to write next.
+ * Most code first.
+ */
+export function scopesToTest(t: Tracker): { fid: number; feature: string; sid: number; scope: string; code: number }[] {
+  const code = new Map<number, number>();
+  for (const f of t.codeMap?.features ?? []) for (const e of f.entries) for (const sid of e.scopeIds) code.set(sid, (code.get(sid) ?? 0) + 1);
+  const out: { fid: number; feature: string; sid: number; scope: string; code: number }[] = [];
+  for (const f of t.fd.features) {
+    const tested = new Set(f.links.flatMap((l) => l.scopeIds));
+    for (const s of f.scopes) if (code.has(s.id) && !tested.has(s.id)) out.push({ fid: f.id, feature: f.title, sid: s.id, scope: s.title, code: code.get(s.id)! });
+  }
+  return out.sort((a, b) => b.code - a.code || a.fid - b.fid);
+}
+
 /* ------------------------------------------------------------------ */
 /* Loading                                                             */
 /* ------------------------------------------------------------------ */

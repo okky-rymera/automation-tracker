@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { mutate, pct } from '../../api';
-import type { TestInfo, Tracker } from '../data';
+import { scopesToTest, type TestInfo, type Tracker } from '../data';
 import { link, setQuery, useSticky, withBack, type Route } from '../route';
 import { ILock, Picker, Seg, useAct, type PickRow } from '../ui';
 
@@ -98,6 +98,7 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
   ];
   const pw = t.tests.filter((x) => x.fw === 'playwright').length;
   const cards = (['playwright', 'cypress'] as const).map((fw) => ({ fw, ...codeShare(t.tests.filter((x) => x.fw === fw)) }));
+  const toTest = scopesToTest(t);
   return (
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -118,6 +119,22 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
           </div>
         ))}
       </div>
+      {toTest.length > 0 && (
+        <details className="card" style={{ padding: '12px 16px' }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Scopes to write tests for <span className="faint" style={{ fontWeight: 400 }}>{toTest.length}</span></summary>
+          <p className="faint" style={{ fontSize: 13, margin: '8px 0' }}>
+            The AI put plugin code on these scopes, but no test is linked to them. A new test for one of them covers code that no test runs now. Most code first.
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+            {toTest.map((x) => (
+              <li key={x.sid}>
+                <a className="linkbtn" href={link(t.project, 'feature', x.fid, { scope: x.sid })}>{x.scope}</a>{' '}
+                <span className="faint">in F-{x.fid} {x.feature} · {x.code} code {x.code === 1 ? 'entry' : 'entries'}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
         <Seg label="Show tests" value={show} onChange={(k) => setQuery({ show: k === 'none' ? null : k })} items={items} />
         <label className="sr" htmlFor="tq">Filter tests</label>

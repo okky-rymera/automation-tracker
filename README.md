@@ -83,6 +83,8 @@ The Claude Code skill `map-features` (in `.claude/skills/`) writes a first draft
 - Text it writes shows "AI draft" in the app. Its links show "linked by AI". Click the mark, or change the text, to remove the mark. "Mark as reviewed" on a feature removes all its marks.
 - It does not change or remove text that a person wrote or checked. It does not add again a link that a person removed, and it does not change a link that a person made.
 - It records each unit it did. A unit shows again when its files change.
+- It decides each test of a file: a link to the scopes it checks, or "left out" with a reason (a setup file, a helper). A done file comes back when it has a test with no link and no "left out" row. The Code screen lists the left-out tests, with a Remove button. When you delete a feature, its tests are left out too, so the AI does not make the feature again.
+- It names the scopes of each code entry. A scope with code but no linked test shows "Code, no test" on the feature page, and the Tests screen lists these scopes under "Scopes to write tests for". You can change the scopes of a code entry on the feature's Code tab.
 
 The skill writes through `npm run -s map -- <command>` (see `server/map.ts`). To see the progress: `npm run -s map -- status <project>`.
 
@@ -90,7 +92,9 @@ The skill writes through `npm run -s map -- <command>` (see `server/map.ts`). To
 
 Features tab > "Map with AI" > "Start mapping". Claude Code runs the skill headless (`claude -p`), one unit after the other, with your claude.ai login. You can also start it on the command line: `npm run project -- map-loop <project> [--units 10] [--model opus]`.
 
-- It stops when no unit is left, at the unit limit, when a unit fails two times, or when you click "Stop". When a unit takes more than 60 minutes, the loop stops it, and the unit counts as failed.
+- It stops when no unit is left, at the unit limit, or when you click "Stop". When a unit takes more than 60 minutes, the loop stops it, and the unit counts as failed.
+- A unit that fails two times in one loop is parked, and the loop goes on with the next unit. A parked unit waits until its files change. The "Map with AI" screen lists the parked units, with "Try again".
+- Before a Playwright file whose tests are not in the coverage run (a new file that no sync ran yet), the loop makes a short coverage run of that file. The new run keeps the other tests of the selected run, as a partial sync does.
 - It uses your Claude plan, so it has no dollar limit.
 - At the 5-hour or weekly limit of the plan, the loop stops the unit at once and ends. It does the same when the run starts to use paid extra usage.
 - The loop does not save the stopped unit. That unit runs again at the next start. The loop shows when the limit resets.
@@ -215,6 +219,17 @@ The tracker server syncs each project with sync on once a day, when it is due (`
 - The sync panel shows when the project is due next.
 - `TRACKER_DAILY_SYNC=off` turns it off. `TRACKER_DAILY_SYNC_HOURS=12` changes the 24 hours.
 - `npm run project -- daily-sync` shows when each project is due, and syncs the due projects now.
+
+**The AI step after the sync** (on by default; `TRACKER_DAILY_AI=off` turns it off). It uses Sonnet; `TRACKER_DAILY_AI_MODEL=opus` changes that. When no project is due for a sync, the server gives one project at a time to Claude:
+
+1. The AI update checks the features whose tests or code changed since the last AI check. The list keeps these features from day to day, so a day with no AI step loses nothing.
+2. The mapping loop does at most 10 units: changed, new and unlinked test files, then the code that no test runs.
+
+- A project gets the AI step after each sync, until the loop finds no unit left. At the unit limit, it waits until the next day, so each project gets some AI work each day.
+- The syncs go first. When a sync becomes due, the AI step stops after the current unit or feature.
+- **Important:** the AI step uses your Claude plan, the same plan as your own Claude sessions. It does not start, and it stops between units, when a run reports 80% use or more of the 5-hour or weekly limit. It waits until that limit resets.
+- A feature that the AI update cannot check on 2 days is parked. The Sync screen lists it, with "Try again".
+- `TRACKER_DAILY_AI_UNITS`, `TRACKER_DAILY_AI_MAX_USE` (percent) and `TRACKER_DAILY_AI_MODEL` change the numbers and the model.
 
 ### Partial runs (test selection)
 

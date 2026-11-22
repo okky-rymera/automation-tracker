@@ -5,6 +5,7 @@ import { Card, useAct } from '../ui';
 
 interface Decision { file: string; function: string; kind: 'library'; reason: string; by: 'ai' | 'person'; commit: string | null; createdAt: string }
 interface Untested { file: string; function: string; commit: string }
+interface LeftOut { testId: string; title: string | null; file: string | null; framework: string | null; reason: string; by: 'ai' | 'person'; createdAt: string }
 type UntestedByTool = Record<'playwright' | 'cypress', { untested: Untested[]; fullRunAt: string | null; run: string } | null> & { fullRunDays: number };
 
 const TOOL = { playwright: 'Playwright', cypress: 'Cypress' } as const;
@@ -17,6 +18,7 @@ export function LibraryReview({ t }: { t: Tracker }) {
   const act = useAct();
   const { data: decisions } = useApi<Decision[]>(`/api/projects/${t.project}/code-decisions`);
   const { data: untested } = useApi<UntestedByTool>(`/api/projects/${t.project}/untested`);
+  const { data: leftOut } = useApi<LeftOut[]>(`/api/projects/${t.project}/left-out-tests`);
   const file = (path: string) => <a className="mono" style={{ fontSize: 12 }} href={link(t.project, 'codefile', null, { path })}>{path}</a>;
   const tools = untested ? (Object.keys(TOOL) as (keyof typeof TOOL)[]).filter((k) => untested[k]?.untested.length) : [];
 
@@ -78,6 +80,35 @@ export function LibraryReview({ t }: { t: Tracker }) {
               </div>
             );
           })
+        )}
+      </Card>
+      <Card className="q-card">
+        <div className="q-q">Tests the AI left out</div>
+        <div className="q-sub">
+          The AI links each test to the scopes it checks. A test that fits no feature (a setup step, a helper, a test of something that is gone) is left out with a reason.
+          When a person deletes a feature, its tests are left out too, so the AI does not make the feature again. Remove a row that is wrong: the AI then looks at the test again.
+        </div>
+        {!leftOut ? (
+          <div className="muted" style={{ fontSize: 13 }}>Loading…</div>
+        ) : !leftOut.length ? (
+          <div className="muted" style={{ fontSize: 13 }}>None.</div>
+        ) : (
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {leftOut.map((x) => (
+              <li key={x.testId} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <a className="linkbtn" style={{ fontSize: 13, overflowWrap: 'anywhere', textAlign: 'left' }} href={link(t.project, 'test', x.testId)}>{x.title ?? x.testId}</a>
+                  {x.file && <span className="mono faint" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>{x.file}</span>}
+                  <span style={{ fontSize: 13 }}>{x.reason}</span>
+                  <span className="faint" style={{ fontSize: 12 }}>{x.by === 'ai' ? 'AI' : 'A person'}, {day(x.createdAt)}{x.title ? '' : ' · the test is not in the last scan'}</span>
+                </div>
+                <button className="btn btn-sm" aria-label={`Remove the left-out row for ${x.title ?? x.testId}`}
+                  onClick={() => act(() => mutate('DELETE', `/api/projects/${t.project}/left-out-tests`, { testId: x.testId }), 'The AI looks at this test again in the next mapping loop')}>
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
     </div>

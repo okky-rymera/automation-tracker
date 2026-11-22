@@ -160,6 +160,8 @@ export interface CodeEntry {
   function: string;
   source: 'ai' | 'manual';
   checked: boolean;
+  /** The scopes of the feature that this code does. */
+  scopeIds: number[];
   /** False: the file is not in the plugin repo now. */
   inRepo: boolean;
   /** False: the coverage run has no such file or function (code changed, or a new file). */

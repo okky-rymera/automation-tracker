@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { featureTotal, mutate, pct, screenshotUrl, type FeatureItem, type FeatureLink, type ItemField, type Screenshot } from '../../api';
+import { featureTotal, mutate, pct, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot } from '../../api';
 import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, scopeLinks, scopeStatus, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
 import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, type PickRow } from '../ui';
@@ -297,6 +297,8 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
   const changed = scopeChanged(f, s);
   const chgLabel = s.aiFields.length ? (s.aiFields.includes('title') && !(s.before && 'title' in s.before) ? 'New' : 'Changed') : 'Has changes';
   const links = f.links.filter((l) => l.scopeIds.includes(s.id));
+  // Code of this scope that no linked test checks: a test to write.
+  const codeNoTest = !links.length && !!t.codeMap?.features.find((x) => x.featureId === f.id)?.entries.some((e) => e.scopeIds.includes(s.id));
   const [addReq, setAddReq] = useState(false);
   const [modal, setModal] = useState<null | 'link' | 'move'>(null);
   const [mq, setMq] = useState('');
@@ -304,6 +306,7 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
     <>
       {changed && <span className="tag tag-changed">{chgLabel}</span>}
       <span className={`tag ${ST_TAG[st]}`}>{ST_LABEL[st]}</span>
+      {codeNoTest && <span className="tag tag-skip" title="The AI put plugin code on this scope, but no test is linked to it. Write a test for it.">Code, no test</span>}
     </>
   );
   const q = mq.trim().toLowerCase();
@@ -535,6 +538,7 @@ function DetailsTab({ t, f }: { t: Tracker; f: FeatureX }) {
 function CodeTab({ t, f }: { t: Tracker; f: FeatureX }) {
   const act = useAct();
   const p = t.project;
+  const [tagging, setTagging] = useState<CodeEntry | null>(null);
   const entry = t.codeMap?.features.find((x) => x.featureId === f.id);
   const lc = entry?.lines;
   const ft = lc ? featureTotal(lc) : 0;
@@ -563,6 +567,8 @@ function CodeTab({ t, f }: { t: Tracker; f: FeatureX }) {
                   {e.source === 'ai' && !e.checked && <span className="tag tag-new">New</span>}
                   {!e.inRepo && <span className="tag tag-fail">Not in the repo</span>}
                   {e.inRepo && !e.measured && <span className="tag tag-none" title="The coverage run has no such file or function. The code changed, or the file is new.">Not measured</span>}
+                  {e.scopeIds.map((id) => <span key={id} className="tag tag-ro" title={f.scopes.find((s) => s.id === id)?.title}>S-{id}</span>)}
+                  <button className="btn btn-ghost btn-sm add-btn" onClick={() => setTagging(e)}>{e.scopeIds.length ? 'Change scopes' : 'Tag scopes'}</button>
                 </div>
                 <div role="cell" style={{ overflowWrap: 'anywhere' }}><a className="linkbtn mono" style={{ fontSize: 12 }} href={withBack(link(p, 'codefile', null, { path: e.file }), `Back to F-${f.id}`)}>{e.file}</a></div>
                 <div role="cell" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -583,6 +589,10 @@ function CodeTab({ t, f }: { t: Tracker; f: FeatureX }) {
             ))}
           </div>
         </div>
+      )}
+      {tagging && (
+        <ScopeTags f={f} title={`Scopes that ${tagging.function || tagging.file} does`} sub="No scope: the code does the feature in general." ids={tagging.scopeIds}
+          url={`/api/projects/${p}/feature-code/${tagging.id}`} onClose={() => setTagging(null)} />
       )}
     </div>
   );
@@ -649,14 +659,18 @@ function ShotsTab({ t, f }: { t: Tracker; f: FeatureX }) {
       {big !== null && (
         <button className="lightbox" onClick={() => setBig(null)} aria-label="Close the image"><img src={screenshotUrl(p, big)} alt="" /></button>
       )}
-      {tagging && <ScopeTags t={t} f={f} sh={tagging} onClose={() => setTagging(null)} />}
+      {tagging && (
+        <ScopeTags f={f} title={`Scopes that IMG-${tagging.id} shows`} sub="No scope: the image shows the feature in general." ids={tagging.scopeIds}
+          url={`/api/projects/${t.project}/screenshots/${tagging.id}`} onClose={() => setTagging(null)} />
+      )}
     </div>
   );
 }
 
-function ScopeTags({ t, f, sh, onClose }: { t: Tracker; f: FeatureX; sh: Screenshot; onClose: () => void }) {
+/** A dialog to choose the scopes of a screenshot or a code entry. */
+function ScopeTags({ f, title, sub, ids, url, onClose }: { f: FeatureX; title: string; sub: string; ids: number[]; url: string; onClose: () => void }) {
   const act = useAct();
-  const [sel, setSel] = useState(new Set(sh.scopeIds));
+  const [sel, setSel] = useState(new Set(ids));
   const flip = (id: number) => setSel((s) => {
     const n = new Set(s);
     if (n.has(id)) n.delete(id);
@@ -665,10 +679,10 @@ function ScopeTags({ t, f, sh, onClose }: { t: Tracker; f: FeatureX; sh: Screens
   });
   return (
     <Dialog
-      title={`Scopes that IMG-${sh.id} shows`} sub="No scope: the image shows the feature in general." onClose={onClose}
+      title={title} sub={sub} onClose={onClose}
       foot={<>
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={() => act(async () => (await mutate('PATCH', `/api/projects/${t.project}/screenshots/${sh.id}`, { scopeIds: [...sel] }), onClose()), 'Scopes saved')}>Save</button>
+        <button className="btn btn-primary" onClick={() => act(async () => (await mutate('PATCH', url, { scopeIds: [...sel] }), onClose()), 'Scopes saved')}>Save</button>
       </>}
     >
       {f.scopes.map((s) => (

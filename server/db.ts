@@ -620,6 +620,50 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (project_id, file, function)
   );
   `,
+  // 30: the automatic AI flow (docs/sync-plan.md phase 8).
+  //  test_left_out: tests that the AI (or a feature delete of a person) left out of each feature on
+  //    purpose, with the reason. "map next" does not give their file again for them.
+  //  code_scopes: the scopes of a mapped code entry, like link_scopes for a test link.
+  //  parked_units: mapping units that failed 2 times in one loop. "map next" skips them while the
+  //    hash of their files stays the same.
+  //  ai_review_pending: features that the AI update could not check (failed, or stopped by the plan
+  //    limit), with the commit to compare from. fails counts the failed days; at 2 the feature is parked.
+  //  projects.ai_reviewed_commit: the commit up to which the AI update checked the changes.
+  `
+  CREATE TABLE test_left_out (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    test_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    by TEXT NOT NULL CHECK (by IN ('ai', 'person')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, test_id)
+  );
+  CREATE TABLE code_scopes (
+    code_id INTEGER NOT NULL REFERENCES feature_code(id) ON DELETE CASCADE,
+    scope_id INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    PRIMARY KEY (code_id, scope_id)
+  );
+  CREATE INDEX code_scopes_scope ON code_scopes(scope_id);
+  CREATE TABLE parked_units (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    parked_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, kind, ref)
+  );
+  CREATE TABLE ai_review_pending (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    from_commit TEXT NOT NULL,
+    fails INTEGER NOT NULL DEFAULT 0,
+    last_fail_day TEXT,
+    last_error TEXT,
+    PRIMARY KEY (project_id, feature_id)
+  );
+  ALTER TABLE projects ADD COLUMN ai_reviewed_commit TEXT;
+  `,
 ];
 
 function open(): DatabaseSync {

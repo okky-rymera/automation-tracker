@@ -6,6 +6,7 @@ import { syncProject } from './scan.ts';
 import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBefore, sweepReviewed } from './features.ts';
 import { listMarks, markEdits } from './line-marks.ts';
 import { listDecisions, removeDecision } from './code-decisions.ts';
+import { listLeftOut, removeLeftOut } from './left-out.ts';
 import { untestedChanges } from './selection.ts';
 import { dailySyncState, startDailySync } from './daily-sync.ts';
 import { testSource } from './test-source.ts';
@@ -16,8 +17,8 @@ import { availableViews, loadCoverage, resolveView, runFreshness } from './cover
 import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
-import { aiUpdateState, AiUpdateError, startAiUpdate } from './ai-update.ts';
-import { mapLoopState, MapLoopError, startMapLoop, stopMapLoop } from './map-loop.ts';
+import { aiUpdateState, AiUpdateError, retryReview, startAiUpdate } from './ai-update.ts';
+import { listParked, mapLoopState, MapLoopError, startMapLoop, stopMapLoop, unpark } from './map-loop.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
@@ -232,6 +233,11 @@ app.post('/api/projects/:id/sync', syncEdit((req) => {
 app.post('/api/projects/:id/sync/cancel', syncEdit((req) => cancelSync(P(req))));
 // ---- AI update after a sync (server/ai-update.ts) ----
 app.get('/api/projects/:id/ai-updates', (req, res) => res.json(aiUpdateState(P(req))));
+// "Try again" for a feature that the AI update parked after it failed on 2 days.
+app.post('/api/projects/:id/ai-review-pending/:fid/retry', edit((req) => {
+  if (!retryReview(proj(req).id, Number(req.params.fid))) throw new EditError(`F-${req.params.fid} is not in the AI review list`);
+  return { ok: true };
+}));
 app.post('/api/projects/:id/ai-update', (req, res) => {
   try {
     const model = ['sonnet', 'opus', 'haiku'].includes(req.body?.model) ? req.body.model : undefined;
@@ -304,6 +310,23 @@ app.delete('/api/projects/:id/code-decisions', edit((req) => {
   const { file, function: fn } = req.body ?? {};
   if (typeof file !== 'string' || typeof fn !== 'string') throw new EditError('Give "file" and "function"');
   if (!removeDecision(proj(req), file, fn)) throw new EditError(`No decision for ${file} ${fn}`);
+  return { ok: true };
+}));
+// Tests that the AI or a feature delete left out of each feature on purpose (server/left-out.ts).
+// A remove makes the test's file come back in the mapping loop.
+app.get('/api/projects/:id/left-out-tests', (req, res) => res.json(listLeftOut(proj(req).id)));
+app.delete('/api/projects/:id/left-out-tests', edit((req) => {
+  const { testId } = req.body ?? {};
+  if (typeof testId !== 'string') throw new EditError('Give "testId"');
+  if (!removeLeftOut(proj(req).id, testId)) throw new EditError(`${testId} is not left out`);
+  return { ok: true };
+}));
+// Mapping units that failed 2 times in one loop (server/map-loop.ts). A remove ("Try again") brings the unit back.
+app.get('/api/projects/:id/parked-units', (req, res) => res.json(listParked(proj(req).id)));
+app.delete('/api/projects/:id/parked-units', edit((req) => {
+  const { kind, ref } = req.body ?? {};
+  if (typeof kind !== 'string' || typeof ref !== 'string') throw new EditError('Give "kind" and "ref"');
+  if (!unpark(proj(req).id, kind, ref)) throw new EditError(`${kind} "${ref}" is not parked`);
   return { ok: true };
 }));
 app.post(SCREENSHOT_UPLOAD, edit((req) => edits.addScreenshot(P(req), req.params.fid, req.body)));

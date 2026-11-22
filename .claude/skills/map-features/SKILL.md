@@ -77,6 +77,12 @@ about these items: the person may want your suggestion.
   since it was processed (`state: "changed"`), then a new file. For a changed
   file, look at `previous.features` and at tests with `newSinceLastTime: true`:
   often you only add the new tests to the features that exist.
+- After the changed and new files, `next` gives a done file that has tests with
+  no decision (`state: "unlinked"`). `unlinkedTests` lists them. Decide only
+  those tests: link each one to the scopes it checks, or put it in `leftOut`.
+  Leave the other tests of the file as they are.
+- A unit that failed 2 times in one mapping loop is parked: `next` skips it
+  until its files change (`state: "parked"`).
 - For `code`, `next` gives candidate PHP files with the most **open**
   functions: no test runs them, no feature holds them, and they are not
   library code. A file with `changedSinceArea: true` is in a code area that is
@@ -249,9 +255,21 @@ Points to know:
   `id` and `links` for it.
 - The tool only adds scopes to a link. It never removes one. If a scope on a
   link is wrong, say so in the report: a person removes it in the app.
-- If a test fits no feature (a setup file, a helper, a test of something that
-  is gone), say so in the report and leave it out. If the whole file has no
-  feature, run `skip` with the reason.
+- **Decide each test of the file.** Link it, or put it in `leftOut`. The tool
+  refuses a test-file payload that leaves a test with no decision, because
+  `next` would give the file again and again. A test fits no feature when it is
+  a setup file, a helper, or a test of something that is gone:
+
+  ```json
+  "leftOut": [
+    { "testId": "PW-1a2b3c", "reason": "Setup only: it makes the products that other tests use." }
+  ]
+  ```
+
+  `leftOut` goes at the top level of the payload, next to `features`. A test
+  unit can send only `leftOut`, with an empty `features` list. If the whole
+  file has no feature, run `skip` with the reason. A person sees the left-out
+  tests in the app and can send one back to you.
 
 **Put the code of the feature in `code`.** The app uses it to show code
 coverage by feature (Features tab > "Code by feature"). Give:
@@ -260,6 +278,11 @@ coverage by feature (Features tab > "Code by feature"). Give:
 - `{ "file": "includes/class-x.php", "functions": ["Class_X::method"] }` when
   only some functions do it. Use the function names exactly as `code` or
   `test-code` lists them. The tool refuses a name that the coverage run does not know.
+- **Name the scopes of the code.** Add `"scopes": ["<scope title or S-id>"]` to
+  each entry: the scopes that this code does. Leave `scopes` out only for code
+  that does the feature in general (its menu, its settings page frame). The
+  app then shows which scopes have code but no test: the tests to write next.
+  Example: `{ "file": "includes/class-x.php", "functions": ["Class_X::save"], "scopes": ["Save the price"] }`.
 - Put in only code that does the feature: its settings, screens, hooks, REST
   routes and the logic behind them. Leave out shared helpers, plugin start-up
   code and test setup. One function can be in more than one feature when it
@@ -274,8 +297,9 @@ area (state `never`, `setup` or `background` in the `code` output), decide:
 
 - **Feature code**: it does something a user or admin can see or use (a
   setting, a screen, a REST route, a price rule, an email). Put it in the
-  `code` of a feature. If no feature fits, make a feature or a scope for it,
-  with no test link. Write its scopes from the code, as for any feature.
+  `code` of a feature, with the scope it does. If no scope fits, make a scope
+  for it, with no test link. If no feature fits, make a feature. Write the
+  scopes from the code, as for any feature.
 - **Library code**: start-up, hook registration, small helpers that many
   features call, glue, or code that nothing calls. Put it in the top-level
   `library` list of the payload, one entry for each function, with a reason:

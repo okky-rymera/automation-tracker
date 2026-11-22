@@ -33,7 +33,7 @@
         { "testId": "PW-9f8e7d6c" }
       ],
       "code": [
-        { "file": "includes/class-example-prices.php", "functions": ["Example_Prices::filter_price_html"] },
+        { "file": "includes/class-example-prices.php", "functions": ["Example_Prices::filter_price_html"], "scopes": ["S-14"] },
         { "file": "includes/class-example-price-settings.php" }
       ],
       "screenshots": [
@@ -44,6 +44,9 @@
         }
       ]
     }
+  ],
+  "leftOut": [
+    { "testId": "CY-5e6f7a8b", "reason": "Setup only: it makes the products that the other scenarios use." }
   ]
 }
 ```
@@ -101,6 +104,14 @@
   `S-14` (scope IDs are the same across all features; the ID must be in this
   feature). Leave it out only when the test checks the feature in general.
 - To add only links, send a feature with just `id` and `links`.
+- `leftOut` (top level, test units only): each test of the file that fits no
+  feature, with a reason. Each test of the file needs a link or a `leftOut`
+  entry, or the tool refuses the payload. When `next` gives `unlinkedTests`,
+  decide those tests. A test unit can send only `leftOut`, with an empty
+  `features` list.
+- `library` (top level, code units): functions that no test runs and that are
+  library code, each with `file`, `function` and `reason`. See SKILL.md, "Sort
+  the code that no test runs".
 - `group`: found by title, or made new.
 - `code`: the plugin code of the feature. `file` is relative to the repo root
   and must exist. `functions` (optional) are names exactly as `code` or
@@ -108,6 +119,9 @@
   `Class_Name::{closure}`. A name that is in the file more than one time (closures)
   holds all of them. No `functions` = the whole file. Entries are only added; an
   entry that a person removed is not added again (the report says so).
+  `scopes` (optional): the scopes that this code does, as titles or IDs, as for
+  links. Leave it out only for code that does the feature in general. Scope tags
+  are only added; on an entry that a person tagged, the report only suggests.
 
 - `screenshots`: images of the feature. `file` is the full path of a local
   PNG, JPEG, WebP or GIF file of 10 MB or less (save it in the session
@@ -284,8 +298,15 @@ This feature is made up. It shows the form only: do not copy its facts.
           "testId": "PW-00000001",
           "scopes": ["A new wholesale order shows the note text", "An order from a normal customer has no note"]
         }
+      ],
+      "code": [
+        { "file": "includes/class-example-order-note.php", "functions": ["Example_Order_Note::add_note"], "scopes": ["A new wholesale order shows the note text", "An empty note setting adds no note"] },
+        { "file": "includes/class-example-settings.php", "functions": ["Example_Settings::order_note_field"] }
       ]
     }
+  ],
+  "library": [
+    { "file": "includes/class-example-order-note.php", "function": "Example_Order_Note::__construct", "reason": "Only adds the hooks of the class." }
   ]
 }
 ```

@@ -15,6 +15,7 @@
  *                                                            unit kind "answer": the answer-questions skill)
  *   npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  (--files is needed for code)
  *   npm run -s map -- reset    <project> <kind> <ref>
+ *   npm run -s map -- park     <project> <kind> <ref> <reason>   (the mapping loop: a unit that failed 2 times)
  *   npm run -s map -- move-scope <project> <scope id> <feature id>   (a person's edit: see edits.moveScope)
  *   npm run -s map -- screenshots <project> <feature id> <folder>   (writes the images of the feature, to look at them)
  *
@@ -43,6 +44,7 @@ import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
 import { addLibrary } from './code-decisions.ts';
+import { addLeftOut, clearLeftOutForLinked, leftOutIds } from './left-out.ts';
 import { execFileSync } from 'node:child_process';
 
 /** The commit of the plugin copy now, or null. */
@@ -119,14 +121,33 @@ function testFiles(p: ProjectConfig, kind: 'playwright' | 'cypress') {
   const byFile = new Map<string, any[]>();
   for (const r of rows) byFile.set(r.file, [...(byFile.get(r.file) ?? []), r]);
   const done = new Map(units(p.id, kind).map((u) => [u.ref, u]));
+  // Tests with a link row (also one that a person removed: that is a decision too), and left-out tests.
+  const linked = new Set((db.prepare('SELECT DISTINCT test_id FROM links WHERE project_id = ?').all(p.id) as any[]).map((r) => r.test_id as string));
+  const leftOut = leftOutIds(p.id);
+  const parked = parkedUnits(p.id, kind);
   return [...byFile.entries()].map(([file, tests]) => {
     const repoFile = testRepoPath(p, kind, file);
     const unit = done.get(file);
     // Compare against the same files the unit saved (the test file, plus any extra files).
-    const state = !unit ? 'new' : unit.hash !== hashFiles(p, unit.files.length ? unit.files : [repoFile]) ? 'changed' : unit.status;
-    return { file, repoFile, tests, unit, state };
+    const files = unit?.files.length ? unit.files : [repoFile];
+    const hash = hashFiles(p, files);
+    // A done file with a test that has no link and is not left out: the AI decides that test.
+    const undecided = unit?.status === 'done' ? tests.filter((t) => !linked.has(t.id) && !leftOut.has(t.id)) : [];
+    let state = !unit ? 'new' : unit.hash !== hash ? 'changed' : undecided.length ? 'unlinked' : unit.status;
+    // A unit that failed 2 times in one loop waits until its files change.
+    const park = parked.get(file);
+    if (park && park.hash === hash && (state === 'new' || state === 'changed' || state === 'unlinked')) state = 'parked';
+    return { file, repoFile, tests, unit, state, undecided, park };
   });
 }
+
+/** Parked units of one kind, by ref (server/map-loop.ts parks a unit that failed 2 times in one loop). */
+function parkedUnits(projectId: string, kind: Kind): Map<string, { hash: string; reason: string; parkedAt: string }> {
+  const rows = db.prepare('SELECT ref, hash, reason, parked_at FROM parked_units WHERE project_id = ? AND kind = ?').all(projectId, kind) as any[];
+  return new Map(rows.map((r) => [r.ref, { hash: r.hash, reason: r.reason, parkedAt: r.parked_at }]));
+}
+
+const OPEN_STATES = ['changed', 'new', 'unlinked'];
 
 // ---- Commands ----
 
@@ -135,7 +156,7 @@ function status(p: ProjectConfig) {
   for (const kind of ['playwright', 'cypress'] as const) {
     const files = testFiles(p, kind);
     const count = (s: string) => files.filter((f) => f.state === s).length;
-    res[kind] = { files: files.length, done: count('done'), skipped: count('skipped'), changed: count('changed'), new: count('new') };
+    res[kind] = { files: files.length, done: count('done'), skipped: count('skipped'), changed: count('changed'), new: count('new'), unlinked: count('unlinked'), parked: count('parked') };
   }
   const code = units(p.id, 'code');
   const php = (db.prepare("SELECT COUNT(*) AS n FROM source_files WHERE project_id = ? AND lang = 'php'").get(p.id) as any).n;
@@ -146,14 +167,14 @@ function status(p: ProjectConfig) {
   const noCode = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.removed = 0)').get(p.id) as any).n;
   const noShots = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM screenshots s WHERE s.feature_id = f.id AND s.removed = 0)').get(p.id) as any).n;
   res.features = { total: f.n, aiDraft: f.ai ?? 0, withoutCode: noCode, withoutScreenshots: noShots };
-  res.order = 'Playwright files first, then Cypress files, then code areas. "next <project>" with no kind follows this order.';
+  res.order = 'Playwright files first, then Cypress files, then code areas. In each kind: changed files, new files, then done files with tests that have no link. "next <project>" with no kind follows this order.';
   out(res);
 }
 
 /** The order of the work: Playwright files first, then Cypress files, then the code that is left. */
 function nextAny(p: ProjectConfig) {
   for (const kind of ['playwright', 'cypress'] as const) {
-    if (testFiles(p, kind).some((f) => f.state === 'changed' || f.state === 'new')) return next(p, kind);
+    if (testFiles(p, kind).some((f) => OPEN_STATES.includes(f.state))) return next(p, kind);
   }
   return nextCode(p);
 }
@@ -161,18 +182,28 @@ function nextAny(p: ProjectConfig) {
 function next(p: ProjectConfig, kind: Kind) {
   if (kind === 'code') return nextCode(p);
   const files = testFiles(p, kind);
-  // Changed files first: they keep done work true. Then new files.
-  const pick = files.find((f) => f.state === 'changed') ?? files.find((f) => f.state === 'new');
-  if (!pick) return out({ kind, done: true, message: `Every ${kind} file is processed and has not changed since.` });
+  // Changed files first: they keep done work true. Then new files. Then done files with tests that have no link.
+  const pick = files.find((f) => f.state === 'changed') ?? files.find((f) => f.state === 'new') ?? files.find((f) => f.state === 'unlinked');
+  if (!pick) return out({ kind, done: true, message: `Every ${kind} file is processed and has not changed since.`, parked: files.filter((f) => f.state === 'parked').length });
   const since = pick.unit?.processed_at;
+  // Are the tests of the file in the coverage run? The mapping loop makes a short coverage run of a
+  // Playwright file first when they are not (server/map-loop.ts).
+  const view = resolveView(p, 'both');
+  const cov = view && loadCoverage(p, view);
+  const owners = cov ? runTestOwners(p) : null;
+  const ids = new Set(pick.tests.map((t) => t.id as string));
+  const coverage = !!cov && cov.tests.some((t) => ids.has(owners!.get(t.id) ?? ''));
   out({
     kind,
     ref: pick.file,
+    coverage,
     repoFile: pick.repoFile,
     absPath: path.join(p.path, pick.repoFile),
     state: pick.state,
     previous: pick.unit ? { processedAt: pick.unit.processed_at, status: pick.unit.status, features: pick.unit.features, note: pick.unit.note } : null,
-    remaining: { new: files.filter((f) => f.state === 'new').length, changed: files.filter((f) => f.state === 'changed').length },
+    remaining: { new: files.filter((f) => f.state === 'new').length, changed: files.filter((f) => f.state === 'changed').length, unlinked: files.filter((f) => f.state === 'unlinked').length },
+    // Only for state "unlinked": the tests to decide. Link each one, or put it in "leftOut" with a reason.
+    ...(pick.state === 'unlinked' ? { unlinkedTests: pick.undecided.map((t) => t.id) } : {}),
     tests: pick.tests.map((t) => {
       const d = json(t.data);
       return {
@@ -208,8 +239,13 @@ function nextCode(p: ProjectConfig) {
     s.add(r.function ?? '');
     held.set(r.file, s);
   }
+  const parked = parkedUnits(p.id, 'code');
   const list = php
     .filter((f) => !inAreas.has(f) || changedAreas.has(f))
+    .filter((f) => {
+      const park = parked.get(f);
+      return !park || park.hash !== hashFiles(p, [f]);
+    })
     .map((f) => {
       const fns = cov?.functionsByFile.get(f) ?? [];
       const by = (s: string) => fns.filter((x) => x.state === s).length;
@@ -293,13 +329,14 @@ function testCode(p: ProjectConfig, kind: Kind, ref: string | undefined) {
   });
 }
 
-/** Mapped code from a payload: { file, functions? }. No functions = the whole file. */
+/** Mapped code from a payload: { file, functions?, scopes? }. No functions = the whole file. scopes: titles or S-ids. */
 interface CodeIn {
   file: string;
   functions?: string[];
+  scopes?: (string | number)[];
 }
 
-function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], report: string[]) {
+function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: Map<string, number | null>, report: string[]) {
   for (const e of entries) {
     const file = str(e?.file, 500);
     const full = file && repoFile(p, file);
@@ -311,16 +348,31 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], report: str
       const bad = known ? fns.filter((n) => !known.has(n)) : [];
       if (bad.length) throw new EditError(`code: ${file} has no function ${bad.map((b) => `"${b}"`).join(', ')} in the coverage run. Use the names that "code" lists`);
     }
+    const keys = list<string | number>(e.scopes, `scopes of code ${file}`);
+    const want = keys.length ? resolveScopes(fid, keys, scopeIds, `Code ${file}`, report) : [];
     for (const fn of fns.length ? fns : ['']) {
-      const cur = db.prepare('SELECT id, removed FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
+      const cur = db.prepare('SELECT id, removed, source FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
       const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
       if (cur?.removed) {
         report.push(`F-${fid} code ${what}: a person removed it. Not added again.`);
         continue;
       }
-      if (cur) continue;
-      db.prepare("INSERT INTO feature_code (project_id, feature_id, file, function, source) VALUES (?, ?, ?, ?, 'ai')").run(p.id, fid, file, fn);
-      report.push(`F-${fid} code: added ${what}.`);
+      if (!cur) {
+        const id = Number(db.prepare("INSERT INTO feature_code (project_id, feature_id, file, function, source) VALUES (?, ?, ?, ?, 'ai')").run(p.id, fid, file, fn).lastInsertRowid);
+        addScopeTags('code_scopes', id, want);
+        report.push(`F-${fid} code: added ${what}${want.length ? ` / ${names(want)}` : ''}.`);
+        continue;
+      }
+      const have = new Set((db.prepare('SELECT scope_id FROM code_scopes WHERE code_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
+      const missing = want.filter((x) => !have.has(x));
+      if (!missing.length) continue;
+      // A person added this code or set its scopes: leave it as it is, and only suggest.
+      if (cur.source === 'manual') {
+        report.push(`F-${fid} code ${what}: a person set its scopes. Not changed. Suggested scopes: ${names(missing)}.`);
+        continue;
+      }
+      addScopeTags('code_scopes', cur.id, missing);
+      report.push(`F-${fid} code ${what}: added scopes ${names(missing)}.`);
     }
   }
 }
@@ -411,8 +463,9 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
       testId: l.testId, title: l.title, framework: l.framework, source: l.source, removed: !!l.removed, scopes: scopeNames(l.id),
     })),
     linkCount: links.length,
-    code: (db.prepare('SELECT file, function, source, removed FROM feature_code WHERE feature_id = ? ORDER BY file, function').all(f.id) as any[]).map((c) => ({
+    code: (db.prepare('SELECT id, file, function, source, removed FROM feature_code WHERE feature_id = ? ORDER BY file, function').all(f.id) as any[]).map((c) => ({
       file: c.file, function: c.function || null, source: c.source, removed: !!c.removed,
+      scopes: (db.prepare('SELECT s.id, s.title FROM code_scopes cs JOIN scopes s ON s.id = cs.scope_id WHERE cs.code_id = ? ORDER BY s.sort').all(c.id) as any[]).map((x) => `S-${x.id} ${x.title}`),
     })),
     screenshots: screenshotsOf(f.id),
     ...(all || links.length <= 25 ? {} : { note: 'At most 25 links shown. Add --all to see every link.' }),
@@ -482,6 +535,11 @@ interface Payload {
    * does not offer them again. Each needs a reason.
    */
   library?: { file: string; function: string; reason: string }[];
+  /**
+   * Tests of the unit that fit no feature, each with a reason (server/left-out.ts). "next" then does
+   * not give the file again for them.
+   */
+  leftOut?: { testId: string; reason: string }[];
 }
 
 const str = (v: unknown, max = 20000) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -508,8 +566,12 @@ function apply(p: ProjectConfig, file: string | undefined) {
   if (!ref) fail('unit.ref is empty');
   const library = Array.isArray(body.library) ? body.library : [];
   if (body.library !== undefined && !Array.isArray(body.library)) fail('library must be a list');
+  const leftOut = Array.isArray(body.leftOut) ? body.leftOut : [];
+  if (body.leftOut !== undefined && !Array.isArray(body.leftOut)) fail('leftOut must be a list');
+  if (leftOut.length && (kind === 'code' || update)) fail('leftOut works only for a Playwright or Cypress unit. Nothing was saved.');
   if (!Array.isArray(body.features)) body.features = [];
-  if (!body.features.length && !(kind === 'code' && library.length)) fail('features is empty. Use the skip command for a unit with no feature (a code unit can send only "library").');
+  if (!body.features.length && !(kind === 'code' && library.length) && !leftOut.length)
+    fail('features is empty. Use the skip command for a unit with no feature (a code unit can send only "library"; a test unit can send only "leftOut").');
   for (const it of library) {
     const known = it && typeof it.file === 'string' ? functionNames(p, it.file) : null;
     if (known && !known.has(String(it.function))) fail(`library: ${it.file} has no function "${it.function}" in the coverage run. Use the names that "code" lists. Nothing was saved.`);
@@ -568,9 +630,30 @@ function apply(p: ProjectConfig, file: string | undefined) {
           if (sid !== null) writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
-        writeCode(p, fid, list<CodeIn>(inF.code, 'code'), report);
+        writeCode(p, fid, list<CodeIn>(inF.code, 'code'), scopeIds, report);
         for (const x of list<ShotIn>(inF.screenshots, 'screenshots')) writeScreenshot(p, fid, x, scopeIds, report);
         if (totalChanges() > before) changed.add(fid);
+      }
+      if (leftOut.length) {
+        const fileTests = new Set((db.prepare('SELECT id FROM tests WHERE project_id = ? AND framework = ? AND file = ? AND removed_at IS NULL').all(p.id, kind, ref) as any[]).map((r) => r.id as string));
+        const other = leftOut.filter((x) => !fileTests.has(String(x?.testId ?? '').trim()));
+        if (other.length) throw new EditError(`leftOut: ${other.map((x) => x?.testId).join(', ')} is not a test of ${ref}`);
+        const n = addLeftOut(p.id, leftOut, 'ai');
+        report.push(`Left out: ${n} test${n === 1 ? '' : 's'} (${leftOut.map((x) => x.testId).join(', ')}).`);
+      }
+      // A test that got a link now is not "left out" any more.
+      clearLeftOutForLinked(p.id);
+      // Each test of the file needs a decision: a link (also one that a person removed) or a left-out row.
+      // Without it, "next" gives the same file again and again.
+      if (!update && kind !== 'code') {
+        const open = (db
+          .prepare(
+            `SELECT t.id FROM tests t WHERE t.project_id = ? AND t.framework = ? AND t.file = ? AND t.removed_at IS NULL
+             AND NOT EXISTS (SELECT 1 FROM links l WHERE l.project_id = t.project_id AND l.test_id = t.id)
+             AND NOT EXISTS (SELECT 1 FROM test_left_out o WHERE o.project_id = t.project_id AND o.test_id = t.id)`,
+          )
+          .all(p.id, kind, ref) as any[]).map((r) => r.id as string);
+        if (open.length) throw new EditError(`these tests have no link and are not in "leftOut": ${open.join(', ')}. Link each test, or put it in "leftOut" with a reason`);
       }
       if (library.length) {
         const n = addLibrary(p, library, 'ai', headCommit(p));
@@ -900,8 +983,8 @@ function clearScopeDescription(row: any, ai: Set<string>, label: string, report:
 
 const names = (ids: number[]) => ids.map((s) => `S-${s}`).join(', ');
 /** Adds scope tags to a link or a screenshot. Tags that are there stay. */
-function addScopeTags(table: 'link_scopes' | 'screenshot_scopes', id: number, scopeIds: number[]) {
-  const col = table === 'link_scopes' ? 'link_id' : 'screenshot_id';
+function addScopeTags(table: 'link_scopes' | 'screenshot_scopes' | 'code_scopes', id: number, scopeIds: number[]) {
+  const col = table === 'link_scopes' ? 'link_id' : table === 'code_scopes' ? 'code_id' : 'screenshot_id';
   const add = db.prepare(`INSERT OR IGNORE INTO ${table} (${col}, scope_id) VALUES (?, ?)`);
   for (const s of scopeIds) add.run(id, s);
 }
@@ -1044,6 +1127,25 @@ function reset(p: ProjectConfig, kind: Kind, ref: string | undefined) {
   out({ reset: r.changes > 0, kind, ref });
 }
 
+/**
+ * Parks a unit that failed 2 times in one mapping loop (server/map-loop.ts). "next" skips it while
+ * the hash of its files stays the same. A person can remove the park in the app.
+ */
+function park(p: ProjectConfig, kind: Kind, ref: string | undefined, reason: string) {
+  if (!ref) fail('Usage: park <project> <kind> <ref> <reason>');
+  let files: string[];
+  if (kind === 'code') files = [ref];
+  else {
+    const unit = units(p.id, kind).find((u) => u.ref === ref);
+    files = unit?.files.length ? unit.files : [testRepoPath(p, kind, ref)];
+  }
+  db.prepare(
+    `INSERT INTO parked_units (project_id, kind, ref, hash, reason, parked_at) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (project_id, kind, ref) DO UPDATE SET hash = excluded.hash, reason = excluded.reason, parked_at = excluded.parked_at`,
+  ).run(p.id, kind, ref, hashFiles(p, files), reason || 'Failed 2 times', now());
+  out({ parked: true, kind, ref });
+}
+
 // ---- main ----
 
 importProjectsJson();
@@ -1062,6 +1164,7 @@ const commands: Record<string, () => void> = {
     skip(projectOf(projectId), kindOf(args[0]), args[1], args.slice(2).join(' '), files);
   },
   reset: () => reset(projectOf(projectId), kindOf(args[0]), args[1]),
+  park: () => park(projectOf(projectId), kindOf(args[0]), args[1], args.slice(2).join(' ')),
   // Writes the image of each screenshot of a feature (not the deleted ones) to a folder, so the skill
   // can look at them. Only the files f<id>-shot-<screenshot id>.<ext> are written.
   screenshots: () => {
@@ -1101,7 +1204,7 @@ const commands: Record<string, () => void> = {
   },
 };
 if (!commands[cmd]) {
-  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset, move-scope, screenshots. See server/map.ts.');
+  console.log('Commands: status, next, features, feature, code, test-code, apply, skip, reset, park, move-scope, screenshots. See server/map.ts.');
   process.exit(cmd ? 1 : 0);
 }
 // A fresh scan first for the commands that use test IDs and files, so they match the repo now.

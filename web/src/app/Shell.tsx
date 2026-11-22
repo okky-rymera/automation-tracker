@@ -216,7 +216,10 @@ function SyncPop({ t, s, onClose }: { t: Tracker; s: SyncState; onClose: () => v
   );
 }
 
-interface DailySync { on: boolean; hours: number; running: string | null; projects: { project: string; lastSyncAt: string | null; dueAt: string; due: boolean; waiting: string | null }[] }
+interface DailySync {
+  on: boolean; hours: number; running: string | null; projects: { project: string; lastSyncAt: string | null; dueAt: string; due: boolean; waiting: string | null }[];
+  ai: { on: boolean; units: number; maxUse: number; now: { project: string; step: 'review' | 'map'; startedAt: string } | null; waitingUntil: string | null; note: string | null };
+}
 
 /** "Daily sync: once each 24 hours, when it is due. Next: Nov 23, 8:49 AM." (server/daily-sync.ts) */
 function DailySyncLine({ project }: { project: string }) {
@@ -230,6 +233,15 @@ function DailySyncLine({ project }: { project: string }) {
       Daily sync: once each {d.hours} hours, when it is due, with the tests on "when code changed".
       {mine.due ? ' This project is due now.' : ` Next: ${when(mine.dueAt)}, or the first time the tracker runs after that.`}
       {mine.waiting && ` It waits: ${mine.waiting}`}
+      {' '}
+      {!d.ai.on
+        ? 'The AI step after the sync is off (TRACKER_DAILY_AI=off).'
+        : d.ai.now
+          ? `AI step now: ${d.ai.now.project}, ${d.ai.now.step === 'review' ? 'the AI update' : 'the mapping loop'} (since ${when(d.ai.now.startedAt)}).`
+          : d.ai.waitingUntil
+            ? `The AI step waits for the plan reset at ${when(d.ai.waitingUntil)} (it stops at ${d.ai.maxUse}% plan use).`
+            : `After the sync, the AI step checks the changes and maps at most ${d.ai.units} units each day.`}
+      {d.ai.note && ` Last AI note: ${d.ai.note}`}
     </div>
   );
 }
