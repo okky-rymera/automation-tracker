@@ -39,7 +39,7 @@
       "screenshots": [
         {
           "file": "/tmp/claude-1000/<session scratchpad>/f39-shop-page.png",
-          "caption": "Shop page: a wholesale customer sees the wholesale price under the normal price",
+          "caption": "Shop page: a wholesale customer sees the wholesale price under the crossed-out regular price",
           "scopes": ["S-14"]
         }
       ]
@@ -147,7 +147,7 @@ holds test status and coverage, so the fields hold only what people know.
 not "WWP price filter v3".
 
 **description**: 1–3 sentences: what it does, for whom, and why.
-> Shows the wholesale price to wholesale customers on the shop and product pages. Other visitors see the normal price.
+> Shows the wholesale price to wholesale customers on the shop and product pages. Other visitors see the regular price.
 
 **roles**: the user roles that use or see it, as short names.
 > "Admin", "Shop manager", "Wholesale customer", "Guest", "API client"
@@ -170,7 +170,7 @@ with no requirements of its own means "default settings", not "nobody wrote it".
 **notes**: only what no test can check. A rule that a test can check is a
 **scope**, not a note: then the app shows if a test checks it. Ask "can a
 tester see this pass or fail?" If yes, write a scope.
-> Scope, not note: "A wholesale price higher than the normal price does not show"
+> Scope, not note: "A wholesale price higher than the regular price does not show"
 > Note: "Admins and shop managers see the same column, because the column has no permission check."
 > Note: "The plugin reads the setting when it starts, so a change shows on the next page load."
 
@@ -226,13 +226,13 @@ test. Each has a result a tester can see. One scope = one thing to check.
 > Title: "Checking the hide checkbox and saving removes the column"
 > Description: "The linked test sets the value directly. No test checks the box on the settings page."
 
-> Title: "Shows the role name and wholesale price of a variable product"
+> Title: "The column shows the role name and wholesale price of a variable product"
 > Requirements: "A variable product has a wholesale price for one wholesale role."
 >
 > Title: "The hide setting removes the column"
 > Requirements: "The setting Wholesale settings > Prices tab > \"Hide Wholesale Price on Admin Product Listing\" is checked."
 >
-> Title: "Guest sees only the normal price"
+> Title: "Guest sees only the regular price"
 
 **Settings that turn something off.** Many settings have a negative label:
 "Hide …", "Disable …", "Do not …". "With the setting on" then means "the
@@ -242,7 +242,7 @@ feature is gone", and readers misread it. So in all text:
 - Name the setting by its label, and say "checked" or "unchecked".
 - Or say what the setting does: "the hide setting removes the column".
 - Do not make a scope for the default case, when the feature is not in use
-  (see the next rule). Example: no scope "Shows the column" for a feature that
+  (see the next rule). Example: no scope "The column is visible" for a feature that
   hides the column.
 
 **No scope for the page before the feature changes it.** A scope must show a
@@ -270,7 +270,7 @@ report. The "feature on" test can check that page as its first step instead.
 
 Include scopes that no test checks yet. Gaps are the point of the list.
 Negative and edge cases are scopes too ("Wholesale price higher than the
-normal price does not show"). Most features have 3–10 scopes. More is allowed,
+regular price does not show"). Most features have 3–10 scopes. More is allowed,
 but check if the feature is really two features (for example a setting and the
 screen it changes can be one feature; two different screens are often two). If
 you think a split is right, suggest it in the report: do not split a feature

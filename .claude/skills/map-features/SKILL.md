@@ -470,6 +470,50 @@ scope. When the difference is a requirement, name it in a few plain words
 ("The hide setting removes the column"), and put the exact setting in the
 scope requirements.
 
+**One sentence pattern for scopes that check the same thing.** Some scopes
+check the same result in different places: another page, another role,
+create or update. Write them with the same pattern, so that only the
+different part changes. Before you write a scope, read the other scope titles
+of the feature. Copy their sentence order. The word list and the subject rule
+below always win: when an old title uses a word from the "Do not write"
+column, or has no subject, copy only its sentence order, not those words.
+
+- Good: "Wholesale customer sees the discounted wholesale price of a
+  percentage discount on the shop page", "… on the product page", "… in the cart".
+- Bad: "A percentage discount shows the discounted price on the shop page" and
+  "Wholesale customer sees the percentage wholesale price in the cart".
+
+Give each title a subject: "The column shows the role name", not "Shows the
+role name". Do not write a title with no verb, such as "Empty cell for a
+product with no wholesale price". When the feature requirements already name
+the user, do not use the user as the subject (see the actor rule above). Use
+the page or the thing as the subject: "The cart shows the wholesale price".
+
+**Do not make copies when you reword.** The tool finds an existing scope by
+its ID, or by its exact title. A changed title without an ID makes a new
+scope, and the test links are split between the two.
+
+- To reword a scope that the AI wrote, send its `id` with the new title.
+- Do not reword a scope that a person wrote or checked. Send its title exactly
+  as it is, or send only its `id`.
+- To send a screenshot again, use its `firstCaption` from `feature <id>`
+  exactly. A reworded caption can add a screenshot that a person deleted.
+
+Use these words, and only these words, for these things:
+
+| Thing | Write | Do not write |
+|---|---|---|
+| The price without a wholesale discount | regular price | retail price, normal price |
+| A price with a line through it | crossed-out price, or "with the regular price crossed out" | struck through, struck-through |
+| The page of one product | product page | single product page |
+| An API scope that creates or updates | "Create: …", "Update: …" | no prefix on one of the two |
+
+Quote a UI label as it is, also when it uses another word, for example the
+setting "Hide Retail Price".
+
+An API title has the prefix, then a subject, then a verb: "Create: a simple
+product gets the wholesale price, and the response shows it for that role".
+
 **Settings that turn something off** ("Hide …", "Disable …", "Do not …"): do
 not write "the setting is on" or "off" anywhere. Quote the label and say
 "checked" or "unchecked", or say what the setting does. See

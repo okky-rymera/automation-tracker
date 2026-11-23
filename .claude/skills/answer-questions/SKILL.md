@@ -113,7 +113,7 @@ Write the payload to the session scratchpad folder, then run `apply`.
       "id": 1,
       "answeredQuestions": [10, 11],
       "scopes": [
-        { "title": "Shows the wholesale sale price when a product has one", "requirements": ["A simple product has a wholesale price and a wholesale sale price for one role."] }
+        { "title": "Wholesale customer sees the wholesale sale price when a product has one", "requirements": ["A simple product has a wholesale price and a wholesale sale price for one role."] }
       ],
       "notes": ["The hide setting takes effect on the next page load, so the product list after Save shows the change."]
     }
