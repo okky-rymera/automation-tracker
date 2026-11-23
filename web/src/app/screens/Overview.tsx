@@ -1,6 +1,6 @@
 import { featureTotal, pct, type LineCounts } from '../../api';
 import { codeTxt, fmt, type Tracker } from '../data';
-import { link } from '../route';
+import { clearSticky, link } from '../route';
 import { Bar, Card } from '../ui';
 import { Warnings } from './Warnings';
 
@@ -30,6 +30,13 @@ export function Overview({ t }: { t: Tracker }) {
     .sort((a, b) => b.changes.length - a.changes.length || b.m.total - b.m.ok - (a.m.total - a.m.ok) || a.f.id - b.f.id)
     .slice(0, 5);
   const last = t.sync?.last;
+  // A test is linked when it has an active link to a feature or a scope (same rule as the Tests page "In no feature" filter).
+  const linkRows = (['playwright', 'cypress'] as const).map((fw) => {
+    const all = t.tests.filter((x) => x.fw === fw);
+    const linked = all.filter((x) => t.linkedTo.has(x.id)).length;
+    return { fw, name: fw === 'playwright' ? 'Playwright' : 'Cypress', total: all.length, linked, not: all.length - linked };
+  }).filter((r) => r.total > 0);
+  const notLinked = linkRows.reduce((s, r) => s + r.not, 0);
 
   return (
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -80,6 +87,33 @@ export function Overview({ t }: { t: Tracker }) {
             AI drafts, tests that are gone{last?.status === 'done' && last.finishedAt ? `, and tests the sync of ${new Date(last.finishedAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} changed` : ''}.
           </div>
           <div><a className="linkbtn" href={link(p, 'changes')}>Review the changes</a></div>
+        </Card>
+        <Card className="q-card">
+          <div className="q-q">Tests linked to features</div>
+          {linkRows.map((r) => (
+            <div key={r.fw} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                <span style={{ fontWeight: 600 }}>{r.name}</span>
+                <span className="q-sub">{r.linked} of {r.total} linked, {r.not} not linked</span>
+              </div>
+              <Bar total={r.total} label={`${r.linked} of ${r.total} ${r.name} tests are linked to a feature`} parts={[[r.linked, 'c-good']]} />
+            </div>
+          ))}
+          {!linkRows.length && <div className="q-sub">This project has no tests yet.</div>}
+          {/* "In no feature" is the Tests page default, so the link sends no filter. The list has both frameworks, so the link gives the sum.
+              The saved search is cleared only on a plain click: a new tab starts with no saved search, and the current tab keeps its search. */}
+          {notLinked > 0 && (
+            <div>
+              <a
+                className="linkbtn"
+                href={link(p, 'tests')}
+                onClick={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) clearSticky('tests.q'); }}
+              >
+                Show the {notLinked} {linkRows.length > 1 ? 'Playwright and Cypress ' : ''}tests in no feature
+              </a>
+            </div>
+          )}
+          {linkRows.length > 0 && notLinked === 0 && <div className="q-sub">All tests are linked to a feature.</div>}
         </Card>
       </div>
 

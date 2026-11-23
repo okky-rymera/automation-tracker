@@ -105,3 +105,7 @@ export function useSticky<T>(key: string, initial: T): [T, (v: T | ((old: T) => 
     });
   return [v, set];
 }
+/** Forget the saved value of one key, so the next screen that uses it starts from its initial value. */
+export function clearSticky(key: string) {
+  sticky.delete(key);
+}
