@@ -20,9 +20,10 @@ import { SettingsPage } from './screens/Settings';
 export function App() {
   const route = useRoute();
   return (
-    <ToastHost>
-      <div className="app">{route.project ? <ProjectApp route={route} project={route.project} /> : <Projects />}</div>
-    </ToastHost>
+    // The message box must be inside .app: the colors are set there.
+    <div className="app">
+      <ToastHost>{route.project ? <ProjectApp route={route} project={route.project} /> : <Projects />}</ToastHost>
+    </div>
   );
 }
 

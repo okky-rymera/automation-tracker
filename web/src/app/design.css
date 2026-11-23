@@ -222,6 +222,8 @@ kbd{font-family:'JetBrains Mono',monospace;font-size:11px;padding:1px 5px;border
 .idbtn:hover{background:var(--line);color:var(--ink)}
 .idbtn svg{opacity:.45}
 .idbtn:hover svg,.idbtn:focus-visible svg{opacity:1}
+button.copied,button.copied:hover{color:var(--good)}
+button.copied svg{opacity:1}
 .scope-head-wrap{display:flex;align-items:center;padding-left:6px}
 .scope-head-wrap:hover{background:var(--surface-2)}
 .scope-head-wrap .scope-head{flex:1;min-width:0;padding-left:4px;background:transparent}

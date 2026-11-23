@@ -18,6 +18,7 @@ export const IFolder = svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2
 export const IFile = svg(<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5" />, 1.8);
 export const IMore = svg(<><circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" /></>);
 export const IWarn = svg(<><path d="M12 3l10 18H2z" /><path d="M12 10v5M12 18h.01" /></>);
+export const ICheck = svg(<path d="M5 12l5 5L20 7" />, 2.4);
 export const IPencil = svg(<path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4" />);
 
 /* ---------------- Toast with Undo ---------------- */
@@ -112,19 +113,40 @@ export async function copyText(text: string) {
 /** An ID with a copy button. text: what goes on the clipboard (it can say more, like "F-1/S-3"). */
 export function IdBtn({ label, text = label, className = 'idbtn mono' }: { label: string; text?: string; className?: string }) {
   const say = useSay();
+  // After a copy, the button shows a check mark for a short time. A new click starts the time again.
+  // It keeps the copied text, so the mark does not stay when the same button shows a new ID (next test).
+  const [copied, setCopied] = useState<string | null>(null);
+  const done = copied === text;
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
   return (
     <button
       type="button"
-      className={className}
-      title={`Copy ${text}`}
-      aria-label={`Copy ${text}`}
+      className={`${className}${done ? ' copied' : ''}`}
+      title={done ? 'Copied' : `Copy ${text}`}
+      aria-label={done ? `Copied ${text}` : `Copy ${text}`}
       onClick={async (e) => {
         e.stopPropagation();
-        say((await copyText(text)) ? `Copied ${text}` : 'Could not copy');
+        const ok = await copyText(text);
+        say(ok ? `Copied ${text}` : 'Could not copy');
+        // The button can leave the page while the copy runs.
+        if (!mounted.current) return;
+        clearTimeout(timer.current);
+        // A failed copy removes the mark of an earlier copy.
+        if (!ok) return setCopied(null);
+        setCopied(text);
+        timer.current = setTimeout(() => setCopied(null), 1500);
       }}
     >
       {label}
-      <ICopy s={12} />
+      {done ? <ICheck s={12} /> : <ICopy s={12} />}
     </button>
   );
 }
