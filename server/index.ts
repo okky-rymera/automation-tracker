@@ -6,7 +6,7 @@ import { syncProject } from './scan.ts';
 import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBefore, sweepReviewed } from './features.ts';
 import { listMarks, markEdits } from './line-marks.ts';
 import { listDecisions, removeDecision } from './code-decisions.ts';
-import { listLeftOut, removeLeftOut } from './left-out.ts';
+import { listLeftOut, removeLeftOut, testDecisions } from './left-out.ts';
 import { untestedChanges } from './selection.ts';
 import { dailySyncState, startDailySync } from './daily-sync.ts';
 import { listSettings, saveSettings, SettingError } from './settings.ts';
@@ -339,6 +339,8 @@ app.delete('/api/projects/:id/code-decisions', edit((req) => {
 // Tests that the AI or a feature delete left out of each feature on purpose (server/left-out.ts).
 // A remove makes the test's file come back in the mapping loop.
 app.get('/api/projects/:id/left-out-tests', (req, res) => res.json(listLeftOut(proj(req).id)));
+// Tests with no link that the AI or a person decided not to link, with the reason (server/left-out.ts).
+app.get('/api/projects/:id/test-decisions', (req, res) => res.json(testDecisions(proj(req))));
 app.delete('/api/projects/:id/left-out-tests', edit((req) => {
   const { testId } = req.body ?? {};
   if (typeof testId !== 'string') throw new EditError('Give "testId"');

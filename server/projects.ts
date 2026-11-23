@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, json, tx } from './db.ts';
@@ -166,6 +167,18 @@ export function safeRepoPath(project: ProjectConfig, rel: string): string | null
 }
 
 /** Repo-relative path of a test file (the tests table keeps it relative to the framework folder). */
+/** One hash of the files' contents. A missing file counts as empty. The mapping loop (server/map.ts) saves it on each unit. */
+export function hashFiles(p: ProjectConfig, files: string[]) {
+  const h = crypto.createHash('sha1');
+  for (const f of [...files].sort()) {
+    const full = repoFile(p, f);
+    h.update(f + '\0');
+    if (full && fs.existsSync(full) && fs.statSync(full).isFile()) h.update(fs.readFileSync(full));
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+
 export function testRepoPath(p: ProjectConfig, kind: 'playwright' | 'cypress', file: string) {
   const dir = kind === 'playwright' ? p.playwrightDir : p.cypressDir;
   return dir ? path.posix.join(dir, file) : file;

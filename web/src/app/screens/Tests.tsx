@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { mutate, pct } from '../../api';
+import type { TestDecision } from '../../api';
 import { scopeToRemove, scopesToTest, testToRemove, type TestInfo, type Tracker } from '../data';
 import { link, setQuery, useSticky, withBack, type Route } from '../route';
 import { ILock, Picker, Seg, useAct, type PickRow } from '../ui';
 
-type Show = 'none' | 'all' | 'skipped' | 'failed' | 'new' | 'remove';
+type Show = 'none' | 'decided' | 'all' | 'skipped' | 'failed' | 'new' | 'remove';
 
 export function testTag(x: TestInfo | undefined): [string, string] {
   if (!x) return ['Gone', 'tag-fail'];
@@ -39,10 +40,34 @@ export function RemoveTag({ t, x }: { t: Tracker; x: TestInfo }) {
   );
 }
 
+const DECISION_LABEL: Record<TestDecision['kind'], string> = {
+  'left-out': 'Left out on purpose',
+  'file-skipped': 'Test file skipped',
+  unlinked: 'Link removed',
+};
+
+/** Why a test with no link is not linked: who decided, when, and the reason. */
+export function DecisionNote({ d }: { d: TestDecision }) {
+  const who = d.by === 'ai' ? 'The AI' : 'A person';
+  const when = d.at ? ` on ${new Date(d.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}` : '';
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+      <div><span className="tag tag-ro" title="This test is processed. It is not linked on purpose.">{DECISION_LABEL[d.kind]}</span></div>
+      <div className="faint" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>
+        {d.kind === 'unlinked' ? d.reason : <>{who} decided this{when}: {d.reason}</>}
+      </div>
+    </div>
+  );
+}
+
 /** Links of a test, as "F-3/S-16 title" lines. */
 export function TestLinks({ t, x, backLabel }: { t: Tracker; x: TestInfo; backLabel: string }) {
   const ls = t.linkedTo.get(x.id) ?? [];
-  if (!ls.length) return <span className="tag tag-none">In no feature</span>;
+  if (!ls.length) {
+    const d = t.decided.get(x.id);
+    if (!d) return <span className="tag tag-none">To decide</span>;
+    return <DecisionNote d={d} />;
+  }
   return (
     <>
       {ls.flatMap(({ fid, ftitle, link: l }) => {
@@ -95,17 +120,19 @@ export function LinkToScope({ t, x, onClose }: { t: Tracker; x: TestInfo; onClos
 export function Tests({ t, route }: { t: Tracker; route: Route }) {
   const asked = (route.q.get('show') as Show) || 'none';
   // The "To remove" button goes when no test is left in it: show the default list again.
-  const show: Show = asked === 'remove' && !t.tests.some((x) => testToRemove(t, x.id)) ? 'none' : asked;
+  // The same for "Not linked on purpose" when the last decided test gets a link.
+  const show: Show = (asked === 'remove' && !t.tests.some((x) => testToRemove(t, x.id))) || (asked === 'decided' && !t.decided.size) ? 'none' : asked;
   const [tq, setTq] = useSticky('tests.q', '');
   const [pick, setPick] = useState<TestInfo | null>(null);
   const ql = tq.trim().toLowerCase();
   const is = (k: Show, x: TestInfo) =>
-    k === 'all' || (k === 'none' && !t.linkedTo.has(x.id)) || (k === 'skipped' && x.skipped) || (k === 'failed' && x.result === 'failed' && !x.skipped) || (k === 'new' && t.newTests.has(x.id)) || (k === 'remove' && testToRemove(t, x.id));
+    k === 'all' || (k === 'none' && !t.linkedTo.has(x.id) && !t.decided.has(x.id)) || (k === 'decided' && t.decided.has(x.id)) || (k === 'skipped' && x.skipped) || (k === 'failed' && x.result === 'failed' && !x.skipped) || (k === 'new' && t.newTests.has(x.id)) || (k === 'remove' && testToRemove(t, x.id));
   const rows = t.tests.filter((x) => is(show, x) && (!ql || x.id.toLowerCase().includes(ql) || x.title.toLowerCase().includes(ql) || x.file.toLowerCase().includes(ql)));
   testOrder = rows.map((x) => x.id);
   const n = (k: Show) => t.tests.filter((x) => is(k, x)).length;
   const items: { key: Show; label: string; n: number }[] = [
-    { key: 'none', label: 'In no feature', n: n('none') },
+    { key: 'none', label: 'To decide', n: n('none') },
+    ...(t.decided.size ? [{ key: 'decided' as Show, label: 'Not linked on purpose', n: n('decided') }] : []),
     { key: 'all', label: 'All', n: t.tests.length },
     { key: 'skipped', label: 'Skipped', n: n('skipped') },
     ...(n('failed') ? [{ key: 'failed' as Show, label: 'Failing', n: n('failed') }] : []),
@@ -180,7 +207,7 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
               </div>
             );
           })}
-          {!rows.length && <div className="faint" style={{ padding: 16, fontSize: 13 }}>No test matches. {show === 'none' ? 'Every test is in a feature.' : ''}</div>}
+          {!rows.length && <div className="faint" style={{ padding: 16, fontSize: 13 }}>No test matches. {show === 'none' ? `Every test is in a feature${t.decided.size ? ', or is not linked on purpose' : ''}.` : ''}</div>}
         </div>
       </div>
       {pick && <LinkToScope t={t} x={pick} onClose={() => setPick(null)} />}

@@ -30,13 +30,16 @@ export function Overview({ t }: { t: Tracker }) {
     .sort((a, b) => b.changes.length - a.changes.length || b.m.total - b.m.ok - (a.m.total - a.m.ok) || a.f.id - b.f.id)
     .slice(0, 5);
   const last = t.sync?.last;
-  // A test is linked when it has an active link to a feature or a scope (same rule as the Tests page "In no feature" filter).
+  // A test is linked when it has an active link to a feature or a scope. A test with no link is "decided" when the AI or a person
+  // chose not to link it (left out, file skipped, or unlinked), else it waits for a decision. Same rules as the Tests page tabs.
   const linkRows = (['playwright', 'cypress'] as const).map((fw) => {
     const all = t.tests.filter((x) => x.fw === fw);
     const linked = all.filter((x) => t.linkedTo.has(x.id)).length;
-    return { fw, name: fw === 'playwright' ? 'Playwright' : 'Cypress', total: all.length, linked, not: all.length - linked };
+    const decided = all.filter((x) => t.decided.has(x.id)).length;
+    return { fw, name: fw === 'playwright' ? 'Playwright' : 'Cypress', total: all.length, linked, decided, not: all.length - linked - decided };
   }).filter((r) => r.total > 0);
   const notLinked = linkRows.reduce((s, r) => s + r.not, 0);
+  const decided = linkRows.reduce((s, r) => s + r.decided, 0);
 
   return (
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -100,9 +103,15 @@ export function Overview({ t }: { t: Tracker }) {
             <div key={r.fw} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                 <span style={{ fontWeight: 600 }}>{r.name}</span>
-                <span className="q-sub">{r.linked} of {r.total} linked, {r.not} not linked</span>
+                <span className="q-sub">
+                  {r.linked} of {r.total} linked{r.decided > 0 ? `, ${r.decided} not linked on purpose` : ''}, {r.not} to decide
+                </span>
               </div>
-              <Bar total={r.total} label={`${r.linked} of ${r.total} ${r.name} tests are linked to a feature`} parts={[[r.linked, 'c-good']]} />
+              <Bar
+                total={r.total}
+                label={`${r.linked} of ${r.total} ${r.name} tests are linked to a feature${r.decided ? `. ${r.decided} are not linked on purpose` : ''}`}
+                parts={[[r.linked, 'c-good'], [r.decided, 'c-decided']]}
+              />
             </div>
           ))}
           {!linkRows.length && <div className="q-sub">This project has no tests yet.</div>}
@@ -115,11 +124,24 @@ export function Overview({ t }: { t: Tracker }) {
                 href={link(p, 'tests')}
                 onClick={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) clearSticky('tests.q'); }}
               >
-                Show the {notLinked} {linkRows.length > 1 ? 'Playwright and Cypress ' : ''}tests in no feature
+                Show the {notLinked} {linkRows.length > 1 ? 'Playwright and Cypress ' : ''}tests to decide
               </a>
             </div>
           )}
-          {linkRows.length > 0 && notLinked === 0 && <div className="q-sub">All tests are linked to a feature.</div>}
+          {linkRows.length > 0 && notLinked === 0 && (
+            <div className="q-sub">{decided ? 'Every test is linked to a feature, or is not linked on purpose.' : 'All tests are linked to a feature.'}</div>
+          )}
+          {decided > 0 && (
+            <div>
+              <a
+                className="linkbtn"
+                href={link(p, 'tests', null, { show: 'decided' })}
+                onClick={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) clearSticky('tests.q'); }}
+              >
+                Show the {decided} {decided === 1 ? 'test' : 'tests'} not linked on purpose, and why
+              </a>
+            </div>
+          )}
         </Card>
       </div>
 

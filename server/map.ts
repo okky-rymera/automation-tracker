@@ -38,7 +38,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { db, json, now, tx } from './db.ts';
 import { leftOutSpec, leftOutTest } from './cypress-rules.ts';
-import { getProject, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
+import { getProject, hashFiles, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
@@ -74,17 +74,6 @@ function projectOf(id: string | undefined): ProjectConfig {
 }
 const kindOf = (k: string | undefined): Kind => (KINDS.includes(k as Kind) ? (k as Kind) : fail(`Kind must be one of: ${KINDS.join(', ')}`));
 
-/** One hash of the files' contents. A missing file counts as empty. */
-function hashFiles(p: ProjectConfig, files: string[]) {
-  const h = crypto.createHash('sha1');
-  for (const f of [...files].sort()) {
-    const full = repoFile(p, f);
-    h.update(f + '\0');
-    if (full && fs.existsSync(full) && fs.statSync(full).isFile()) h.update(fs.readFileSync(full));
-    h.update('\0');
-  }
-  return h.digest('hex');
-}
 
 interface Unit {
   kind: Kind;

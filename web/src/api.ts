@@ -196,6 +196,16 @@ export interface FeatureGroup {
   sort: number;
 }
 
+/** Why a test with no link is not linked: the AI or a person decided it (server/left-out.ts testDecisions). */
+export interface TestDecision {
+  testId: string;
+  kind: 'left-out' | 'file-skipped' | 'unlinked';
+  reason: string;
+  by: 'ai' | 'person';
+  at: string | null;
+  features?: { id: number; title: string }[];
+}
+
 export interface FeatureData {
   groups: FeatureGroup[];
   features: Feature[];

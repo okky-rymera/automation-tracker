@@ -187,6 +187,7 @@ kbd{font-family:'JetBrains Mono',monospace;font-size:11px;padding:1px 5px;border
 .c-fail{background:var(--bad-bar)}
 .c-skip{background:var(--warn-bar)}
 .c-cy{background:#2aa3b3}
+.c-decided{background:var(--ink-2);opacity:.35}
 .stack .fill{border-radius:0}
 .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--ink-2)}
 .legend span{display:inline-flex;align-items:center;gap:6px}

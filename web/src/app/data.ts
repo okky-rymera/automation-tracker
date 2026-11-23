@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   featureTotal, mutate, pct, reloadAll, useApi,
   type CypressScenario, type Feature, type FeatureCodeMap, type FeatureData, type FeatureItem, type FeatureLink, type ItemField,
-  type LineCounts, type PlaywrightTest, type ProjectSummary, type Scope,
+  type LineCounts, type PlaywrightTest, type ProjectSummary, type Scope, type TestDecision,
 } from '../api';
 
 /* ------------------------------------------------------------------ */
@@ -136,6 +136,8 @@ export interface Tracker {
   groupTitle: (id: number | null) => string;
   /** Test IDs that the last sync added. */
   newTests: Set<string>;
+  /** Tests with no link that the AI or a person decided not to link, with the reason. Other tests with no link wait for a decision. */
+  decided: Map<string, TestDecision>;
 }
 
 /**
@@ -189,11 +191,13 @@ export function useTracker(project: string): { t: Tracker | null; error: string 
   const pw = useApi<PlaywrightTest[]>(`/api/projects/${project}/playwright`);
   const cy = useApi<CypressScenario[]>(`/api/projects/${project}/cypress`);
   const code = useApi<FeatureCodeMap>(`/api/projects/${project}/feature-code`);
+  const dec = useApi<TestDecision[]>(`/api/projects/${project}/test-decisions`);
   const sync = useSync(project);
-  const error = summary.error ?? fd.error ?? pw.error ?? cy.error;
+  // Without the decisions, decided tests would show as "To decide": show the error, and wait for them before the first build.
+  const error = summary.error ?? fd.error ?? pw.error ?? cy.error ?? dec.error;
   const t = useMemo(
-    () => (summary.data && fd.data && pw.data && cy.data ? build(project, summary.data, fd.data, pw.data, cy.data, code.data, sync) : null),
-    [project, summary.data, fd.data, pw.data, cy.data, code.data, sync],
+    () => (summary.data && fd.data && pw.data && cy.data && dec.data ? build(project, summary.data, fd.data, pw.data, cy.data, code.data, sync, dec.data) : null),
+    [project, summary.data, fd.data, pw.data, cy.data, code.data, sync, dec.data],
   );
   return { t, error };
 }
@@ -268,7 +272,7 @@ export const PRI_LABEL: Record<string, string> = { high: 'High', medium: 'Medium
 const FIELD_LABEL: Record<string, string> = { title: 'Title', description: 'Description', priority: 'Priority', group: 'Group', roles: 'User roles' };
 
 function build(
-  project: string, summary: ProjectSummary, fd: FeatureData, pw: PlaywrightTest[], cy: CypressScenario[], codeMap: FeatureCodeMap | null, sync: SyncState | null,
+  project: string, summary: ProjectSummary, fd: FeatureData, pw: PlaywrightTest[], cy: CypressScenario[], codeMap: FeatureCodeMap | null, sync: SyncState | null, decisions: TestDecision[],
 ): Tracker {
   const tests: TestInfo[] = [
     ...pw.map<TestInfo>((t) => ({ id: t.id, fw: 'playwright', title: t.title, path: t.describes, file: t.file, line: t.line, tags: t.tags, skipped: t.skipped, result: testResult(t.run), pw: t })),
@@ -302,6 +306,8 @@ function build(
   });
   return {
     project, summary, fd, tests, testById, sync, codeMap, info, infoById: new Map(info.map((i) => [i.f.id, i])), linkedTo, groupTitle, newTests,
+    // A link made after the list loaded wins: a linked test is not "decided, not linked".
+    decided: new Map(decisions.filter((d) => !linkedTo.has(d.testId)).map((d) => [d.testId, d])),
   };
 }
 
