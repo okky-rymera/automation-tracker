@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { mutate, pct } from '../../api';
 import type { TestDecision } from '../../api';
-import { scopeToRemove, scopesToTest, testToRemove, type TestInfo, type Tracker } from '../data';
+import { scopeIdLabel, scopeToRemove, scopesToTest, testToRemove, variationsOf, type TestInfo, type Tracker } from '../data';
 import { link, setQuery, useSticky, withBack, type Route } from '../route';
 import { ILock, Picker, Seg, useAct, type PickRow } from '../ui';
 
@@ -83,9 +83,9 @@ export function TestLinks({ t, x, backLabel }: { t: Tracker; x: TestInfo; backLa
         }
         return l.scopeIds.map((sid) => (
           <div key={`${fid}/${sid}`}>
-            <a className="linkbtn mono" href={withBack(link(t.project, 'feature', fid, { scope: sid }), backLabel)}>F-{fid}/S-{sid}</a>{' '}
+            <a className="linkbtn mono" href={withBack(link(t.project, 'feature', fid, { scope: sid }), backLabel)}>F-{fid}/{f ? scopeIdLabel(f, sid) : `S-${sid}`}</a>{' '}
             <span className="faint" style={{ fontSize: 12 }}>{f?.scopes.find((s) => s.id === sid)?.title}</span>
-            {(f?.toRemove || f?.scopes.find((s) => s.id === sid)?.toRemove) && <span className="tag tag-remove" style={{ marginLeft: 6 }}>To remove</span>}
+            {f && (() => { const s = f.scopes.find((x) => x.id === sid); return s ? scopeToRemove(f, s) : f.toRemove; })() && <span className="tag tag-remove" style={{ marginLeft: 6 }}>To remove</span>}
             {l.source === 'ai' && !l.checked && <span className="tag tag-new" style={{ marginLeft: 6 }}>New</span>}
           </div>
         ));
@@ -102,14 +102,32 @@ export function LinkToScope({ t, x, onClose }: { t: Tracker; x: TestInfo; onClos
   const rows: (PickRow & { empty: boolean })[] = [];
   for (const i of t.info) {
     for (const s of i.f.scopes) {
-      const links = i.f.links.filter((l) => !l.missing && l.scopeIds.includes(s.id));
-      if (links.some((l) => l.testId === x.id)) continue;
       if (scopeToRemove(i.f, s)) continue; // a scope that must go takes no new test
-      if (q && !(s.title.toLowerCase().includes(q) || i.f.title.toLowerCase().includes(q) || `s-${s.id}` === q || `f-${i.f.id}/s-${s.id}` === q)) continue;
+      const code = scopeIdLabel(i.f, s.id);
+      const lc = code.toLowerCase();
+      if (q && !(s.title.toLowerCase().includes(q) || i.f.title.toLowerCase().includes(q) || lc === q || `f-${i.f.id}/${lc}` === q)) continue;
+      // A scope with variations takes no test itself. Its row links the test to each of its variations now.
+      const targets = s.columns ? variationsOf(i.f, s.id).filter((v) => !scopeToRemove(i.f, v)) : [s];
+      const open = targets.filter((v) => !i.f.links.some((l) => l.testId === x.id && l.scopeIds.includes(v.id)));
+      if (!open.length) continue;
+      const empty = open.some((v) => !i.f.links.some((l) => !l.missing && l.scopeIds.includes(v.id)));
       rows.push({
-        key: `${i.f.id}/${s.id}`, idLabel: `F-${i.f.id}/S-${s.id}`, title: s.title, sub: i.f.title, empty: !links.length,
-        tag: links.length ? undefined : 'No test yet', tagCls: 'tag-none',
-        pick: () => act(async () => (await mutate('POST', `/api/projects/${t.project}/links`, { testId: x.id, scopeId: s.id }), onClose()), `${x.id} linked to F-${i.f.id}/S-${s.id}`),
+        key: `${i.f.id}/${s.id}`, idLabel: `F-${i.f.id}/${code}`, sub: i.f.title, empty,
+        title: !s.columns ? s.title : open.length === targets.length ? `${s.title} · all ${open.length} variations` : `${s.title} · the ${open.length} variations it is not linked to yet`,
+        tag: empty ? 'No test yet' : undefined, tagCls: 'tag-none',
+        pick: () => act(async () => {
+          // One request for each variation. When one fails, the error names the variations that got the link.
+          const done: string[] = [];
+          for (const v of open) {
+            try {
+              await mutate('POST', `/api/projects/${t.project}/links`, { testId: x.id, scopeId: v.id });
+            } catch (e) {
+              throw new Error(`${(e as Error).message}${done.length ? ` Linked before the error: ${done.join(', ')}.` : ''}`);
+            }
+            done.push(scopeIdLabel(i.f, v.id));
+          }
+          onClose();
+        }, `${x.id} linked to F-${i.f.id}/${code}${s.columns ? `: ${open.map((v) => `SV-${v.id}`).join(', ')}` : ''}`),
       });
     }
   }

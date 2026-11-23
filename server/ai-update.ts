@@ -31,7 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { db, now, tx } from './db.ts';
 import { changeReport, type ChangeReport } from './changes.ts';
-import { ITEM_KINDS, featuresToRemove } from './features.ts';
+import { ITEM_KINDS, featuresToRemove, jsonList, variationTitle, variationValues } from './features.ts';
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, mapLoopRunning, processAlive, run, syncRunning, type Job } from './sync.ts';
 import { LIMIT_TEXT, notePlanUse, readPlanLine } from './plan-limit.ts';
@@ -368,7 +368,7 @@ export interface Proposal {
   where?: ItemOut[];
   questions?: ItemOut[];
   removeItems?: number[];
-  scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[] }[];
+  scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[]; variations?: Record<string, string>[] }[];
   links?: { testId: string; scopes?: string[] }[];
 }
 
@@ -407,6 +407,11 @@ export const SCHEMA = {
           group: { type: 'string', description: 'Group name of the scope, as in the feature data' },
           description: { type: 'string' },
           requirements: items,
+          variations: {
+            type: 'array',
+            description: 'New variations of the scope only: each one an object with the column names as keys, for example {"Page": "Checkout page"}',
+            items: { type: 'object', additionalProperties: { type: 'string' } },
+          },
         },
       },
     },
@@ -523,8 +528,8 @@ ${diff || '(no changes in these files)'}
   - List fields (requirements, notes, outOfScope, where, questions): a string adds an item. {"id", "text"} changes an AI draft item.
   - "removeItems": IDs of AI draft items that are now wrong. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope.
   - Text that a person wrote or checked (aiDraft false) cannot change. When it is now wrong, add a question that says what is wrong and what the code does now.
-  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. A scope that is now wrong cannot be deleted here: add a question for it.
-  - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks.
+  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. When an existing scope has "variations" (one check in several places, for example a row for each page) and the new behavior is that check in one more place, send that scope with its "id" and title and a "variations" list with the new variation only, an object with the column names as keys (for example [{"Page": "Checkout page"}]). Write only variations that the plugin really has, not all combinations. A variation has no description and no requirements: its scope has them. A scope that is now wrong cannot be deleted here: add a question for it.
+  - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks. For a scope with variations, give the SV-ids of the variations that the test checks, not the S-id of the scope. For a new variation of this answer, which has no SV-id yet, give its title: the scope title and the values in brackets, with commas, for example "Price shows (Checkout page)".
   - A scope with "toRemove": a person decided that it must go. Do not change it, link a test to it, or add the same behavior again as a new scope.
   - Do not add a scope for the page before this feature changes it (for example "Guest sees the price by default" on a feature that hides the price). The page then shows what WooCommerce or another feature makes. One scope "turn the setting on, then off: the result comes back" is allowed.
   - Behavior that needs another plugin (Premium, Lead Capture, Order Form, Payments, or a third-party plugin) belongs to a feature in an "Integration/<plugin>" group. If this feature is not in such a group, do not add such a scope here and do not link a test from an "Integration/" folder or with an "@integration:" tag. Add a question that names the behavior or the test instead.
@@ -710,14 +715,14 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
   const scopes = (pr.scopes ?? []).filter((s) => {
     if (!s.title?.trim()) return false;
     if (s.id === undefined) return true;
-    const n = Number(String(s.id).replace(/^S-/i, ''));
+    const n = Number(String(s.id).replace(/^SV?-/i, ''));
     if (!scopeIds.has(n)) {
       dropped.push(`scopes: no scope ${s.id} in F-${featureId}`);
       return false;
     }
     return true;
   }).map((s) => {
-    const sid = s.id === undefined ? undefined : Number(String(s.id).replace(/^S-/i, ''));
+    const sid = s.id === undefined ? undefined : Number(String(s.id).replace(/^SV?-/i, ''));
     const reqs = (s.requirements ?? []).filter((v) => {
       if (typeof v === 'string') return !!v.trim();
       if (removing.has(v.id)) return void dropped.push(`scope requirements: item #${v.id} is also in removeItems: it is removed, not changed`), false;
@@ -731,6 +736,7 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
       ...(s.group?.trim() ? { group: s.group } : {}),
       ...(s.description?.trim() ? { description: s.description } : {}),
       ...(reqs.length ? { requirements: reqs } : {}),
+      ...(Array.isArray(s.variations) && s.variations.length ? { variations: s.variations } : {}),
     };
   });
   if (scopes.length) f.scopes = scopes;
@@ -738,7 +744,7 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
   // and old titles or IDs of scopes that a person renamed, moved or deleted (apply skips those with a note).
   // The same rule as apply: "S-12" or "S12" is an ID, other text is a title.
   const norm = (k: string) => {
-    const m = /^S-?(\d+)$/i.exec(k.trim());
+    const m = /^SV?-?(\d+)$/i.exec(k.trim());
     return m ? `s-${Number(m[1])}` : k.trim().toLowerCase();
   };
   const known = new Set<string>(scopes.map((s) => norm(s.title)));
@@ -749,6 +755,36 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
   for (const x of db.prepare('SELECT scope_id, title_key FROM scope_titles_gone WHERE feature_id = ?').all(featureId) as any[]) {
     known.add(`s-${x.scope_id}`);
     known.add(String(x.title_key));
+  }
+  // A scope with variations takes no test itself: a link names its variations (SV-ids). Apply refuses the
+  // whole payload for such a link, so it is dropped here, with a note.
+  const varied = new Set<string>();
+  for (const s of scopes.filter((s) => s.variations?.length)) {
+    varied.add(norm(s.title));
+    if (s.id !== undefined) varied.add(`s-${s.id}`);
+  }
+  for (const x of db.prepare('SELECT id, title FROM scopes WHERE feature_id = ? AND columns IS NOT NULL').all(featureId) as any[]) {
+    varied.add(`s-${x.id}`);
+    varied.add(norm(String(x.title)));
+  }
+  for (const x of db.prepare('SELECT g.title_key FROM scope_titles_gone g JOIN scopes s ON s.id = g.scope_id WHERE g.feature_id = ? AND s.feature_id = g.feature_id AND s.columns IS NOT NULL').all(featureId) as any[])
+    varied.add(String(x.title_key));
+  // A new variation of this answer has no SV-id yet: a link can name it by its title, "<scope title> (<values>)".
+  // Apply uses the new title of the answer, or the old one when a person wrote it: both are known.
+  for (const s of scopes) {
+    const cur = s.id !== undefined ? (db.prepare('SELECT title, columns FROM scopes WHERE id = ?').get(s.id) as any) : undefined;
+    for (const v of (s.variations ?? []) as unknown[]) {
+      try {
+        const cols = cur?.columns ? jsonList(cur.columns) : [];
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          for (const k of Object.keys(v)) if (!cols.some((c) => c.toLowerCase() === k.replace(/\s+/g, ' ').trim().toLowerCase())) cols.push(k.replace(/\s+/g, ' ').trim());
+        }
+        const values = variationValues(cols, v);
+        for (const t of [s.title, cur?.title].filter(Boolean)) known.add(norm(variationTitle(String(t).trim(), values)));
+      } catch {
+        // Values that apply refuses: apply says why in its report.
+      }
+    }
   }
   const tests = db.prepare('SELECT file, tags FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL');
   // An integration test (in an "Integration/" folder, or with an "@integration:" tag) needs another plugin.
@@ -764,8 +800,9 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
       return void dropped.push(`links: ${l.testId} not linked, because it is an integration test and F-${featureId} is not in an "Integration/" group`), [];
     }
     const keys = (l.scopes ?? []).map((k) => String(k).trim()).filter(Boolean);
-    const good = keys.filter((k) => known.has(norm(k)));
-    for (const k of keys.filter((k) => !good.includes(k))) dropped.push(`links: ${l.testId} names the scope "${k}", which is not in F-${featureId}`);
+    const good = keys.filter((k) => known.has(norm(k)) && !varied.has(norm(k)));
+    for (const k of keys.filter((k) => !good.includes(k)))
+      dropped.push(varied.has(norm(k)) ? `links: ${l.testId} names the scope "${k}", which has variations. Name its variations (SV-ids) instead` : `links: ${l.testId} names the scope "${k}", which is not in F-${featureId}`);
     // A link whose scopes are all unknown would say only "about the feature": leave it to a person.
     if (keys.length && !good.length) return void dropped.push(`links: ${l.testId} not linked, because none of its scopes is in F-${featureId}`), [];
     return [{ testId: l.testId, ...(good.length ? { scopes: good } : {}) }];

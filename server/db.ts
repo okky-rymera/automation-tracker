@@ -697,6 +697,105 @@ const MIGRATIONS: string[] = [
   ALTER TABLE scopes ADD COLUMN remove_at TEXT;
   ALTER TABLE scopes ADD COLUMN remove_by TEXT;
   `,
+  // 34: scope sets. One check in several places (for example on 4 pages) is one sentence with a table
+  //     of values. Each row is a normal scope with its own S-id, test links and coverage. The set is
+  //     not a scope, so it never counts as a scope with no test.
+  //     scope_sets.title: the shared sentence. column_name: the name of the value column ("Page").
+  //     ai_made = 1: an AI skill made the set, and no person changed it.
+  //     scopes.set_value: the value of the row, for example "Cart page".
+  //     scopes.set_by_person = 1: a person put the scope in a set or took it out. The AI skills do not change it.
+  `
+  CREATE TABLE scope_sets (
+    id INTEGER PRIMARY KEY,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    column_name TEXT NOT NULL DEFAULT 'Page',
+    sort INTEGER NOT NULL DEFAULT 0,
+    ai_made INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX scope_sets_feature ON scope_sets(feature_id);
+  ALTER TABLE scopes ADD COLUMN set_id INTEGER REFERENCES scope_sets(id) ON DELETE SET NULL;
+  ALTER TABLE scopes ADD COLUMN set_value TEXT;
+  ALTER TABLE scopes ADD COLUMN set_by_person INTEGER NOT NULL DEFAULT 0;
+  `,
+  // 35: a scope set can have more than one column, with names that a person or the AI chooses.
+  //     scope_sets.columns: the column names, in order, as a JSON list.
+  //     scopes.set_values: the values of the row, one for each column, in column order, as a JSON list.
+  //     An empty value means that the column does not apply to the row.
+  `
+  ALTER TABLE scope_sets ADD COLUMN columns TEXT NOT NULL DEFAULT '["Page"]';
+  UPDATE scope_sets SET columns = json_array(column_name);
+  ALTER TABLE scope_sets DROP COLUMN column_name;
+  ALTER TABLE scopes ADD COLUMN set_values TEXT;
+  UPDATE scopes SET set_values = json_array(set_value) WHERE set_value IS NOT NULL;
+  ALTER TABLE scopes DROP COLUMN set_value;
+  `,
+  // 36: a scope set has the shared text of its rows: a description, and requirements that are true for
+  //     each row (feature_items rows with kind 'set_requirement' and set_id). A row has no description of
+  //     its own, and keeps only the requirements that the other rows do not have.
+  //     scope_sets.ai_fields: ["description"] when the AI wrote the description and no person checked it.
+  `
+  ALTER TABLE scope_sets ADD COLUMN description TEXT NOT NULL DEFAULT '';
+  ALTER TABLE scope_sets ADD COLUMN ai_fields TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE feature_items ADD COLUMN set_id INTEGER REFERENCES scope_sets(id) ON DELETE CASCADE;
+  CREATE INDEX feature_items_set ON feature_items(set_id);
+  `,
+  // 37: one kind of thing: a scope. A scope can have variations (one check in several places, for example
+  //     on 4 pages). The scope keeps the sentence, the description, the requirements and the group, and has
+  //     the column names (scopes.columns, a JSON list; NULL: no variations). Each variation is a scopes row
+  //     with parent_id and var_values (one value for each column). A variation has the test links,
+  //     screenshots, code and coverage. Its ID shows as SV-<id>.
+  //     Each scope set of step 34 becomes a scope with a new S-id, and its rows become its variations. The set
+  //     description, AI mark and requirements go to that scope, and also the requirements of each row. Each
+  //     variation gets the title "<scope title> (<values>)". The title of a variation comes from its scope, so
+  //     "Change back" has no old title, group or description for a variation.
+  //     scope_sets, scopes.set_id and feature_items.set_id are not used now. SQLite cannot drop them: a
+  //     foreign key points to scope_sets. They stay empty.
+  `
+  ALTER TABLE scopes ADD COLUMN columns TEXT;
+  ALTER TABLE scopes ADD COLUMN parent_id INTEGER REFERENCES scopes(id);
+  CREATE INDEX scopes_parent ON scopes(parent_id);
+  ALTER TABLE scopes RENAME COLUMN set_values TO var_values;
+  CREATE TEMP TABLE set_parent AS
+    SELECT ss.id AS set_id,
+      (SELECT MAX(COALESCE((SELECT MAX(id) FROM scopes), 0), COALESCE((SELECT MAX(scope_id) FROM scope_titles_gone), 0))) + ROW_NUMBER() OVER (ORDER BY ss.id) AS scope_id
+    FROM scope_sets ss;
+  INSERT INTO scopes (id, feature_id, title, description, group_id, group_by_person, sort, ai_fields, columns)
+    SELECT sp.scope_id, ss.feature_id, ss.title, ss.description,
+      (SELECT r.group_id FROM scopes r WHERE r.set_id = ss.id ORDER BY r.sort, r.id LIMIT 1),
+      COALESCE((SELECT MAX(r.group_by_person) FROM scopes r WHERE r.set_id = ss.id), 0),
+      COALESCE((SELECT MIN(r.sort) FROM scopes r WHERE r.set_id = ss.id), 0),
+      ss.ai_fields, ss.columns
+    FROM scope_sets ss JOIN set_parent sp ON sp.set_id = ss.id;
+  UPDATE scopes SET parent_id = (SELECT scope_id FROM set_parent WHERE set_id = scopes.set_id) WHERE set_id IS NOT NULL;
+  UPDATE scopes SET columns = NULL WHERE columns IS NOT NULL AND NOT EXISTS (SELECT 1 FROM scopes v WHERE v.parent_id = scopes.id);
+  UPDATE feature_items SET scope_id = (SELECT scope_id FROM set_parent WHERE set_id = feature_items.set_id), kind = 'requirement' WHERE set_id IS NOT NULL;
+  UPDATE feature_items SET set_id = NULL WHERE set_id IS NOT NULL;
+  -- A variation has no requirements: the requirements of a row go to its scope. The same text goes only one time.
+  DELETE FROM feature_items WHERE scope_id IN (SELECT id FROM scopes WHERE parent_id IS NOT NULL) AND EXISTS (
+    SELECT 1 FROM scopes v JOIN feature_items o ON o.kind = feature_items.kind AND lower(trim(o.text)) = lower(trim(feature_items.text))
+      AND (o.scope_id = v.parent_id OR (o.id < feature_items.id AND o.scope_id IN (SELECT id FROM scopes w WHERE w.parent_id = v.parent_id)))
+    WHERE v.id = feature_items.scope_id);
+  UPDATE feature_items SET scope_id = (SELECT parent_id FROM scopes WHERE id = feature_items.scope_id)
+    WHERE scope_id IN (SELECT id FROM scopes WHERE parent_id IS NOT NULL);
+  -- The title of an AI-made set is an AI draft on its scope.
+  UPDATE scopes SET ai_fields = (SELECT json_group_array(value) FROM (SELECT value FROM json_each(scopes.ai_fields) UNION SELECT 'title'))
+    WHERE id IN (SELECT sp.scope_id FROM set_parent sp JOIN scope_sets ss ON ss.id = sp.set_id WHERE ss.ai_made = 1);
+  -- A variation title is "<scope title> (<values>)". The old row title is remembered, as in a rename.
+  CREATE TEMP TABLE var_title AS
+    SELECT v.id, v.feature_id, v.title AS old, p.title || COALESCE(' (' || (SELECT group_concat(value, ', ') FROM json_each(COALESCE(v.var_values, '[]')) WHERE value <> '') || ')', '') AS new
+    FROM scopes v JOIN scopes p ON p.id = v.parent_id;
+  INSERT OR IGNORE INTO scope_titles_gone (feature_id, scope_id, title_key) SELECT feature_id, id, lower(trim(old)) FROM var_title WHERE lower(old) <> lower(new);
+  UPDATE scopes SET title = (SELECT new FROM var_title WHERE var_title.id = scopes.id) WHERE id IN (SELECT id FROM var_title);
+  DROP TABLE temp.var_title;
+  UPDATE scopes SET set_id = NULL WHERE set_id IS NOT NULL;
+  DELETE FROM scope_sets;
+  DROP INDEX feature_items_set;
+  ALTER TABLE scopes DROP COLUMN set_by_person;
+  DROP TABLE temp.set_parent;
+  UPDATE scopes SET ai_fields = COALESCE((SELECT json_group_array(value) FROM json_each(scopes.ai_fields) WHERE value <> 'group'), '[]') WHERE parent_id IS NOT NULL;
+  DELETE FROM ai_before WHERE kind = 'scope' AND field IN ('group', 'title', 'description') AND row_id IN (SELECT id FROM scopes WHERE parent_id IS NOT NULL);
+  `,
 ];
 
 function open(): DatabaseSync {

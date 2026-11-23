@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { mutate, useApi } from '../api';
 import './design.css';
-import { useTracker, when, short, partialText, type Tracker, type SyncState } from './data';
+import { countedScopes, useTracker, when, short, partialText, type Tracker, type SyncState } from './data';
 import { go, link, useRoute, type Route } from './route';
 import { Banner, IPrev, ISearch, Loading, ToastHost, useAct } from './ui';
 import { Projects } from './screens/Projects';
@@ -263,13 +263,13 @@ function Palette({ t, onClose }: { t: Tracker; onClose: () => void }) {
     const fs = t.info
       .filter((i) => !pl || (idm?.[1] && !idm[2] && String(i.f.id) === idm[1]) || i.f.title.toLowerCase().includes(pl))
       .slice(0, 6)
-      .map((i) => ({ key: `f${i.f.id}`, idLabel: `F-${i.f.id}`, title: i.f.title, sub: `${i.group} · ${i.f.scopes.length} scopes`, href: link(p, 'feature', i.f.id) }));
+      .map((i) => ({ key: `f${i.f.id}`, idLabel: `F-${i.f.id}`, title: i.f.title, sub: `${i.group} · ${countedScopes(i.f).length} scopes`, href: link(p, 'feature', i.f.id) }));
     if (fs.length) out.push({ title: 'Features', items: fs });
     if (pl) {
       const ss = t.info.flatMap((i) =>
         i.f.scopes
           .filter((s) => (idm?.[2] && String(s.id) === idm[2]) || s.title.toLowerCase().includes(pl) || s.requirements.some((r) => r.text.toLowerCase().includes(pl)))
-          .map((s) => ({ key: `s${s.id}`, idLabel: `F-${i.f.id}/S-${s.id}`, title: s.title, sub: i.f.title, href: link(p, 'feature', i.f.id, { scope: s.id }) })),
+          .map((s) => ({ key: `s${s.id}`, idLabel: `F-${i.f.id}/${s.parentId !== null ? 'SV' : 'S'}-${s.id}`, title: s.title, sub: i.f.title, href: link(p, 'feature', i.f.id, { scope: s.id }) })),
       );
       if (ss.length) out.push({ title: 'Scopes', items: ss.slice(0, 8) });
       if (img) {

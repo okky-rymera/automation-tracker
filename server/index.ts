@@ -115,7 +115,8 @@ function summary(id: string) {
 /** Features and how many scopes have a Playwright test, a Cypress scenario, both or none. */
 function featureSummary(id: string) {
   const d = featureData(id);
-  const scopes = d.features.flatMap((f: any) => f.scopes.map((s: any) => f.links.filter((l: any) => l.scopeIds.includes(s.id) && !l.missing)));
+  // A scope with variations does not count: each of its variations counts.
+  const scopes = d.features.flatMap((f: any) => f.scopes.filter((s: any) => !s.columns).map((s: any) => f.links.filter((l: any) => l.scopeIds.includes(s.id) && !l.missing)));
   const has = (ls: any[], fw: string) => ls.some((l) => l.framework === fw);
   return {
     features: d.features.length,
@@ -301,6 +302,10 @@ app.post('/api/projects/:id/features/:fid/scopes', edit((req) => edits.addScope(
 app.post('/api/projects/:id/features/:fid/scope-groups', edit((req) => edits.addScopeGroup(P(req), req.params.fid, req.body)));
 app.patch('/api/projects/:id/scope-groups/:gid', edit((req) => edits.updateScopeGroup(P(req), req.params.gid, req.body)));
 app.delete('/api/projects/:id/scope-groups/:gid', edit((req) => edits.deleteScopeGroup(P(req), req.params.gid)));
+app.post('/api/projects/:id/scopes/:sid/variations', edit((req) => edits.addVariation(P(req), req.params.sid, req.body)));
+app.delete('/api/projects/:id/scopes/:sid/variations', edit((req) => edits.removeVariations(P(req), req.params.sid)));
+app.post('/api/projects/:id/scopes/:sid/columns', edit((req) => edits.addColumn(P(req), req.params.sid, req.body)));
+app.delete('/api/projects/:id/scopes/:sid/columns/:index', edit((req) => edits.deleteColumn(P(req), req.params.sid, req.params.index)));
 app.patch('/api/projects/:id/scopes/:sid', edit((req) => edits.updateScope(P(req), req.params.sid, req.body)));
 app.post('/api/projects/:id/scopes/:sid/move', edit((req) => edits.moveScope(P(req), req.params.sid, req.body)));
 app.delete('/api/projects/:id/scopes/:sid', edit((req) => edits.deleteScope(P(req), req.params.sid)));

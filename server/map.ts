@@ -40,7 +40,7 @@ import { db, json, now, tx } from './db.ts';
 import { leftOutSpec, leftOutTest } from './cypress-rules.ts';
 import { getProject, hashFiles, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, idNumber, NEW_SCOPE_ID, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore } from './features.ts';
+import { EditError, edits, idNumber, NEW_SCOPE_ID, variationTitle, columnWord, columnList, variationValues, valuesKey, newVariation, resetVariations, moveEvidence, variationsOf, scopeRow, scopeLabel, jsonList, MAX_COLUMNS, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -387,10 +387,10 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: M
 }
 
 // "S-14", "S14", or a copied "F-3/S-14" (the feature part is only a help for people).
-const SCOPE_RE = /^(?:F-?\d+\/)?S-?(\d+)$/i;
+const SCOPE_RE = /^(?:F-?\d+\/)?SV?-?(\d+)$/i;
 const scopeNames = (linkId: number) =>
-  (db.prepare('SELECT s.id, s.title FROM link_scopes ls JOIN scopes s ON s.id = ls.scope_id WHERE ls.link_id = ? ORDER BY s.id').all(linkId) as any[]).map(
-    (s) => `S-${s.id} ${s.title}`,
+  (db.prepare('SELECT s.id, s.parent_id, s.title FROM link_scopes ls JOIN scopes s ON s.id = ls.scope_id WHERE ls.link_id = ? ORDER BY s.id').all(linkId) as any[]).map(
+    (s) => `${scopeLabel(s)} ${s.title}`,
   );
 const labelsOf = (fid: number, kind: string) =>
   (db.prepare('SELECT value FROM feature_labels WHERE feature_id = ? AND kind = ? ORDER BY value COLLATE NOCASE').all(fid, kind) as any[]).map((r) => r.value as string);
@@ -420,9 +420,14 @@ function features(p: ProjectConfig) {
       ...(f.remove_reason ? { toRemove: f.remove_reason } : {}),
       ...(f.description ? { description: f.description.length > 160 ? `${f.description.slice(0, 160)}… (cut: see "feature")` : f.description } : {}),
       roles: labelsOf(f.id, LABEL_KINDS.roles),
-      scopes: (db.prepare('SELECT id, title, remove_reason FROM scopes WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map(
-        (s) => `S-${s.id} ${s.title}${s.remove_reason ? ` [To remove: ${s.remove_reason}]` : ''}`,
-      ),
+      // A variation shows under its scope's ID, with its values: "SV-44 (Shop page)".
+      scopes: (db.prepare('SELECT id, parent_id, columns, title, var_values, remove_reason FROM scopes WHERE feature_id = ? AND parent_id IS NULL ORDER BY sort, id').all(f.id) as any[])
+        .flatMap((s) => [
+          `S-${s.id} ${s.title}${s.columns !== null ? ' [variations:]' : ''}${s.remove_reason ? ` [To remove: ${s.remove_reason}]` : ''}`,
+          ...(s.columns === null ? [] : (db.prepare('SELECT id, var_values, remove_reason FROM scopes WHERE parent_id = ? ORDER BY sort, id').all(s.id) as any[]).map(
+            (v) => `  SV-${v.id} (${jsonList(v.var_values).filter(Boolean).join(', ')})${v.remove_reason ? ` [To remove: ${v.remove_reason}]` : ''}`,
+          )),
+        ]),
       links: (db.prepare('SELECT COUNT(*) AS n FROM links WHERE feature_id = ? AND removed = 0').get(f.id) as any).n,
       screenshots: shotCount.get(f.id) ?? 0,
     })),
@@ -436,9 +441,9 @@ function features(p: ProjectConfig) {
 function screenshotsOf(fid: number) {
   const tags = new Map<number, string[]>();
   for (const r of db
-    .prepare('SELECT ss.screenshot_id AS shot, s.id, s.title FROM screenshot_scopes ss JOIN scopes s ON s.id = ss.scope_id WHERE s.feature_id = ? ORDER BY s.id')
+    .prepare('SELECT ss.screenshot_id AS shot, s.id, s.parent_id, s.title FROM screenshot_scopes ss JOIN scopes s ON s.id = ss.scope_id WHERE s.feature_id = ? ORDER BY s.id')
     .all(fid) as any[])
-    tags.set(r.shot, [...(tags.get(r.shot) ?? []), `S-${r.id} ${r.title}`]);
+    tags.set(r.shot, [...(tags.get(r.shot) ?? []), `${scopeLabel(r)} ${r.title}`]);
   return (db.prepare('SELECT id, caption, match_key, source, checked, removed FROM screenshots WHERE feature_id = ? ORDER BY sort, id').all(fid) as any[]).map((x) => ({
     caption: x.caption,
     ...(x.match_key !== null && x.match_key !== captionKey(x.caption) ? { firstCaption: x.match_key } : {}),
@@ -447,6 +452,11 @@ function screenshotsOf(fid: number) {
     removed: !!x.removed,
     scopes: tags.get(x.id) ?? [],
   }));
+}
+
+/** The values of a variation as { column name: value }. */
+function valuesObject(columns: string[], values: string[]) {
+  return Object.fromEntries(columns.map((c, i) => [c, values[i] ?? '']));
 }
 
 function feature(p: ProjectConfig, id: string | undefined, all = false) {
@@ -469,17 +479,27 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
     ...Object.fromEntries(Object.entries(LABEL_KINDS).map(([key, kind]) => [key, labelsOf(f.id, kind)])),
     ...Object.fromEntries(Object.entries(ITEM_KINDS).map(([key, kind]) => [key, itemsOf(f.id, kind)])),
     scopeGroups: (db.prepare('SELECT title FROM scope_groups WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((g) => g.title),
-    scopes: (db.prepare('SELECT s.id, s.title, s.description, g.title AS grp, s.ai_fields, s.remove_reason FROM scopes s LEFT JOIN scope_groups g ON g.id = s.group_id WHERE s.feature_id = ? ORDER BY s.sort, s.id').all(f.id) as any[]).map((s) => ({
-      id: `S-${s.id}`, title: s.title, group: s.grp ?? null, description: s.description, requirements: itemsOf(f.id, SCOPE_ITEM_KIND, s.id), aiFields: json(s.ai_fields),
-      ...(s.remove_reason ? { toRemove: s.remove_reason } : {}),
-    })),
+    // A scope with variations: its columns, and its variations (SV- IDs) with their values.
+    scopes: (db.prepare('SELECT s.id, s.title, s.description, g.title AS grp, s.columns, s.ai_fields, s.remove_reason FROM scopes s LEFT JOIN scope_groups g ON g.id = s.group_id WHERE s.feature_id = ? AND s.parent_id IS NULL ORDER BY s.sort, s.id').all(f.id) as any[]).map((s) => {
+      const columns = s.columns === null ? null : jsonList(s.columns);
+      return {
+        id: `S-${s.id}`, title: s.title, group: s.grp ?? null, description: s.description, requirements: itemsOf(f.id, SCOPE_ITEM_KIND, s.id), aiFields: json(s.ai_fields),
+        ...(s.remove_reason ? { toRemove: s.remove_reason } : {}),
+        ...(columns ? {
+          columns,
+          variations: (db.prepare('SELECT id, var_values, ai_fields, remove_reason FROM scopes WHERE parent_id = ? ORDER BY sort, id').all(s.id) as any[]).map((v) => ({
+            id: `SV-${v.id}`, values: valuesObject(columns, jsonList(v.var_values)), aiFields: json(v.ai_fields), ...(v.remove_reason ? { toRemove: v.remove_reason } : {}),
+          })),
+        } : {}),
+      };
+    }),
     links: links.slice(0, all ? undefined : 25).map((l) => ({
       testId: l.testId, title: l.title, framework: l.framework, source: l.source, removed: !!l.removed, scopes: scopeNames(l.id),
     })),
     linkCount: links.length,
     code: (db.prepare('SELECT id, file, function, source, removed FROM feature_code WHERE feature_id = ? ORDER BY file, function').all(f.id) as any[]).map((c) => ({
       file: c.file, function: c.function || null, source: c.source, removed: !!c.removed,
-      scopes: (db.prepare('SELECT s.id, s.title FROM code_scopes cs JOIN scopes s ON s.id = cs.scope_id WHERE cs.code_id = ? ORDER BY s.sort').all(c.id) as any[]).map((x) => `S-${x.id} ${x.title}`),
+      scopes: (db.prepare('SELECT s.id, s.parent_id, s.title FROM code_scopes cs JOIN scopes s ON s.id = cs.scope_id WHERE cs.code_id = ? ORDER BY s.sort').all(c.id) as any[]).map((x) => `${scopeLabel(x)} ${x.title}`),
     })),
     screenshots: screenshotsOf(f.id),
     ...(all || links.length <= 25 ? {} : { note: 'At most 25 links shown. Add --all to see every link.' }),
@@ -529,6 +549,15 @@ interface ScopeIn {
   group?: string;
   /** What must be true for this scope only, on top of the feature's requirements. */
   requirements?: ItemIn[];
+  /**
+   * Variations: one check in several places (pages, roles, product types). Each variation is an object with
+   * the column names as keys, for example { "Page": "Cart page", "Product type": "Variation" }. A new key adds
+   * a column. Variations are only added: the skill does not change or delete one. A link, screenshot or code
+   * entry names a variation by its SV- ID or its title "<scope title> (<value 1>, <value 2>)".
+   */
+  variations?: Record<string, string>[];
+  /** The column names, in order, when the scope gets its first variations. Default: the keys of the variations. */
+  columns?: string[];
 }
 interface ShotIn {
   file: string;
@@ -612,6 +641,10 @@ function apply(p: ProjectConfig, file: string | undefined) {
     for (const s of Array.isArray(inF?.scopes) ? inF.scopes : [])
       if ((s as any)?.rules !== undefined || (s as any)?.notes !== undefined) fail('A scope has only "requirements", no "rules" or "notes". Nothing was saved.');
     if (!answer && inF?.answeredQuestions !== undefined) fail('"answeredQuestions" works only with unit kind "answer". Nothing was saved.');
+    if ((inF as any)?.scopeSets !== undefined) fail('"scopeSets" is gone: a scope has "variations" now. Write the description and requirements on the scope. Nothing was saved.');
+    for (const s of Array.isArray(inF?.scopes) ? inF.scopes : [])
+      if ((s as any)?.set !== undefined || (s as any)?.values !== undefined || (s as any)?.value !== undefined)
+        fail('A scope has no "set", "values" or "value" now: write one scope with a list of "variations". Nothing was saved.');
   }
 
   const report: string[] = [];
@@ -648,7 +681,10 @@ function apply(p: ProjectConfig, file: string | undefined) {
           const sid = writeScope(fid, s, report);
           scopeIds.set(str(s.title).toLowerCase(), sid);
           if (s.id !== undefined) scopeIds.set(String(s.id).trim().toLowerCase(), sid);
-          if (sid !== null) writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
+          // A variation has no requirements: its scope has them.
+          const parent = sid === null ? null : scopeRow(sid).parentId;
+          if (parent !== null && list<ItemIn>(s.requirements, 'scope requirements').length) report.push(`SV-${sid}: a variation has no requirements. Write them on its scope S-${parent}.`);
+          else if (sid !== null) writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), scopeIds, report);
@@ -896,7 +932,7 @@ function goneScope(fid: number, key: { id?: number | null; title?: string }): { 
  * Adds or fills one scope. Returns its ID, or null when a person deleted the scope or moved it to
  * another feature: the skill does not make it again here (goneScope).
  */
-function writeScope(fid: number, s: { id?: number | string; title: string; description?: string | null; group?: string }, report: string[]): number | null {
+function writeScope(fid: number, s: ScopeIn, report: string[]): number | null {
   const title = str(s.title, 2000);
   if (!title) throw new EditError(`A scope of F-${fid} has no title`);
   const sid = s.id !== undefined ? Number(SCOPE_RE.exec(String(s.id))?.[1] ?? s.id) : null;
@@ -911,8 +947,10 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
     }
     if (gone) row = db.prepare('SELECT * FROM scopes WHERE id = ?').get(gone.id);
   }
-  if (row?.remove_reason) {
-    report.push(`F-${fid} scope S-${row.id} "${row.title}": marked "To remove" (${row.remove_reason}). Not changed. Its requirements, links and screenshots in this payload were skipped.`);
+  // A variation has the mark of its scope too.
+  const mark = row?.remove_reason || (row?.parent_id != null ? (db.prepare('SELECT remove_reason FROM scopes WHERE id = ?').get(row.parent_id) as any)?.remove_reason : null);
+  if (mark) {
+    report.push(`F-${fid} scope ${scopeLabel(row)} "${row.title}": marked "To remove" (${mark}). Not changed. Its requirements, links and screenshots in this payload were skipped.`);
     return null;
   }
   if (sid && !row) {
@@ -930,15 +968,25 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
       .prepare(`INSERT INTO scopes (id, feature_id, title, description, group_id, sort, ai_fields) VALUES (${NEW_SCOPE_ID}, ?, ?, ?, ?, ?, ?)`)
       .run(fid, title, desc, group, n, JSON.stringify(ai)).lastInsertRowid;
     report.push(`F-${fid}: new scope S-${id} "${title}".`);
+    writeVariations(fid, Number(id), s, `S-${id}`, report);
     return Number(id);
+  }
+  if (row.parent_id !== null) {
+    // A variation: its scope has the text and the group. The links of the payload can still name it.
+    if (str(s.description) || s.group || s.variations) report.push(`SV-${row.id}: a variation of S-${row.parent_id}. Its text was not changed: write the scope S-${row.parent_id} with "variations".`);
+    return row.id;
   }
   const label = `S-${row.id}`;
   const ai = new Set<string>(json(row.ai_fields));
-  setText('scopes', row, ai, 'title', 'title', title, label, report);
+  if (setText('scopes', row, ai, 'title', 'title', title, label, report) && row.columns !== null) {
+    // The titles of the variations come from the scope title.
+    resetVariations(scopeRow(row.id), title, (v) => v);
+  }
   if (s.description === null) clearScopeDescription(row, ai, label, report);
   else setText('scopes', row, ai, 'description', 'description', str(s.description), label, report);
   writeScopeGroup(fid, row, ai, s.group, label, report);
   saveAi('scopes', row, ai);
+  writeVariations(fid, row.id, s, label, report);
   return row.id;
 }
 
@@ -987,10 +1035,82 @@ function writeScopeGroup(fid: number, row: any, ai: Set<string>, title: unknown,
       : `${label}: put in group "${name(gid)}". It shows as AI draft until a person checks it.`,
   );
   keepBefore('scope', row.id, 'group', row.group_id, !ai.has('group'));
-  db.prepare('UPDATE scopes SET group_id = ? WHERE id = ?').run(gid, row.id);
+  db.prepare('UPDATE scopes SET group_id = ? WHERE id = ? OR parent_id = ?').run(gid, row.id, row.id);
   ai.add('group');
   const dropped = dropEmptyAiGroup(row.group_id);
   if (dropped) report.push(`F-${fid}: deleted the AI draft group "${dropped}". It has no scopes now.`);
+}
+
+/**
+ * Adds the variations that the AI skill sends for scope sid. A variation that the scope has (the same values)
+ * stays as it is. A variation that a person deleted is not added again. A new key adds a column. When the
+ * scope gets its first variations, its test links, screenshots and code go to the first variation: a scope
+ * with variations has none. A new variation shows as AI draft until a person checks it.
+ */
+function writeVariations(fid: number, sid: number, s: ScopeIn, label: string, report: string[]) {
+  const given = list<Record<string, unknown>>(s.variations, `variations of ${label}`);
+  if (!given.length) {
+    if (s.columns !== undefined) report.push(`${label}: "columns" without "variations". Nothing changed.`);
+    return;
+  }
+  // All or nothing: a failed variation undoes the columns and variations that this call made before it.
+  const lines: string[] = [];
+  db.exec('SAVEPOINT write_variations');
+  try {
+    for (const v of given) if (!v || typeof v !== 'object' || Array.isArray(v)) throw new EditError('each variation is an object { "<column>": "<value>" }');
+    const keys: string[] = [];
+    for (const v of given) for (const k of Object.keys(v)) {
+      const name = columnWord(k, 'Column name');
+      if (!keys.some((x) => x.toLowerCase() === name.toLowerCase())) keys.push(name);
+    }
+    let cur = scopeRow(sid);
+    let first = false;
+    if (cur.columns === null) {
+      const cols = columnList(s.columns ?? keys);
+      db.prepare('UPDATE scopes SET columns = ? WHERE id = ?').run(JSON.stringify(cols), sid);
+      cur = { ...cur, columns: cols };
+      first = true;
+      lines.push(`${label}: has variations now, with the columns ${cols.map((c) => `"${c}"`).join(', ')}.`);
+    }
+    const extra = keys.filter((k) => !cur.columns!.some((c) => c.toLowerCase() === k.toLowerCase()));
+    if (extra.length) {
+      if (cur.columns!.length + extra.length > MAX_COLUMNS) throw new EditError(`the scope would have more than ${MAX_COLUMNS} columns`);
+      resetVariations(cur, cur.title, (vals) => [...vals, ...extra.map(() => '')]);
+      cur = { ...cur, columns: [...cur.columns!, ...extra] };
+      db.prepare('UPDATE scopes SET columns = ? WHERE id = ?').run(JSON.stringify(cur.columns), sid);
+      lines.push(`${label}: new column(s) ${extra.map((c) => `"${c}"`).join(', ')}. The other variations have no value there.`);
+    }
+    for (const v of given) {
+      const values = variationValues(cur.columns!, v);
+      const shown = values.filter(Boolean).join(', ');
+      if (variationsOf(sid).some((x) => valuesKey(x.values) === valuesKey(values))) continue;
+      const gone = goneScope(fid, { title: variationTitle(cur.title, values) });
+      if (gone && 'skip' in gone) {
+        lines.push(`${label} variation (${shown}): ${gone.skip.replace('scope S-', 'variation SV-')}. Not added again.`);
+        continue;
+      }
+      if (gone) continue; // an old title of a variation that is still here, with other values now
+      const vid = newVariation(cur, values, ['title']);
+      lines.push(`${label}: new variation SV-${vid} (${shown}). It shows as AI draft until a person checks it.`);
+      if (first) {
+        moveEvidence(sid, vid);
+        first = false;
+      }
+    }
+    db.exec('RELEASE write_variations');
+    report.push(...lines);
+  } catch (e) {
+    db.exec('ROLLBACK TO write_variations');
+    db.exec('RELEASE write_variations');
+    if (!(e instanceof EditError)) throw e;
+    report.push(`${label}: variations not saved, nothing changed: ${e.message}`);
+  } finally {
+    // No variation was made (a person deleted each one, or the values clash): the scope stays a normal scope.
+    if (!variationsOf(sid).length && (db.prepare('SELECT columns FROM scopes WHERE id = ?').get(sid) as any)?.columns != null) {
+      db.prepare('UPDATE scopes SET columns = NULL WHERE id = ?').run(sid);
+      report.push(`${label}: no variation was added, so the scope has no variations.`);
+    }
+  }
 }
 
 /** "description": null in the payload deletes an AI draft description. A person's description stays. */
@@ -1006,7 +1126,7 @@ function clearScopeDescription(row: any, ai: Set<string>, label: string, report:
   report.push(`${label}: deleted the AI draft description.`);
 }
 
-const names = (ids: number[]) => ids.map((s) => `S-${s}`).join(', ');
+const names = (ids: number[]) => ids.map((s) => scopeLabel({ id: s, parentId: (db.prepare('SELECT parent_id FROM scopes WHERE id = ?').get(s) as any)?.parent_id ?? null })).join(', ');
 /** Adds scope tags to a link or a screenshot. Tags that are there stay. */
 function addScopeTags(table: 'link_scopes' | 'screenshot_scopes' | 'code_scopes', id: number, scopeIds: number[]) {
   const col = table === 'link_scopes' ? 'link_id' : table === 'code_scopes' ? 'code_id' : 'screenshot_id';
@@ -1018,23 +1138,37 @@ function addScopeTags(table: 'link_scopes' | 'screenshot_scopes' | 'code_scopes'
  * Scope IDs of feature fid from titles (of this payload or the feature) or S-ids.
  * A scope that a person deleted or moved away is left out, with a line in the report.
  */
+/** A scope with its columns, and the "To remove" mark of its scope when it is a variation. */
+const PICK = 'SELECT s.id, s.remove_reason, s.columns, p.remove_reason AS parent_mark FROM scopes s LEFT JOIN scopes p ON p.id = s.parent_id';
 function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<string, number | null>, what: string, report: string[], marked?: { n: number }): number[] {
   const ids = keys
     .map((k) => String(k).trim())
     .filter(Boolean)
     .map((key) => {
-      if (scopeIds.has(key.toLowerCase())) return scopeIds.get(key.toLowerCase())!;
+      if (scopeIds.has(key.toLowerCase())) {
+        const id = scopeIds.get(key.toLowerCase())!;
+        if (id === null) return null;
+        const r = db.prepare(`${PICK} WHERE s.id = ?`).get(id) as any;
+        // A scope of this payload can have variations: then it takes no test, screenshot or code itself.
+        if (r?.columns != null) throw new EditError(`${what}: S-${id} has variations. Name a variation: ${variationsOf(id).map((v) => `SV-${v.id}`).join(', ')}`);
+        if (r?.remove_reason || r?.parent_mark) return marked && marked.n++, report.push(`${what}: scope "${key}" left out: it is marked "To remove".`), null;
+        return id;
+      }
       const byId = SCOPE_RE.exec(key);
       const row = byId
-        ? (db.prepare('SELECT id, remove_reason FROM scopes WHERE id = ? AND feature_id = ?').get(Number(byId[1]), fid) as any)
-        : (db.prepare('SELECT id, remove_reason FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any);
+        ? (db.prepare(`${PICK} WHERE s.id = ? AND s.feature_id = ?`).get(Number(byId[1]), fid) as any)
+        : (db.prepare(`${PICK} WHERE s.feature_id = ? AND lower(s.title) = lower(?)`).get(fid, key) as any);
       const leaveMarked = () => (marked && marked.n++, report.push(`${what}: scope "${key}" left out: it is marked "To remove".`), null);
-      if (row?.remove_reason) return leaveMarked();
+      // A test, screenshot or code entry goes on a variation, not on a scope with variations.
+      if (row?.columns != null) throw new EditError(`${what}: S-${row.id} has variations. Name a variation: ${variationsOf(row.id).map((v) => `SV-${v.id}`).join(', ')}`);
+      if (row?.remove_reason || row?.parent_mark) return leaveMarked();
       if (row) return row.id as number;
       const gone = goneScope(fid, byId ? { id: Number(byId[1]) } : { title: key });
       if (gone && 'id' in gone) {
         // An old title of a scope that a person renamed: the mark counts too.
-        if ((db.prepare('SELECT remove_reason FROM scopes WHERE id = ?').get(gone.id) as any)?.remove_reason) return leaveMarked();
+        const g = db.prepare(`${PICK} WHERE s.id = ?`).get(gone.id) as any;
+        if (g?.columns != null) throw new EditError(`${what}: S-${g.id} has variations. Name a variation: ${variationsOf(g.id).map((v) => `SV-${v.id}`).join(', ')}`);
+        if (g?.remove_reason || g?.parent_mark) return leaveMarked();
         return gone.id;
       }
       if (gone) return void report.push(`${what}: scope "${key}" left out: ${gone.skip}.`), null;

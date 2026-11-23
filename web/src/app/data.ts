@@ -225,8 +225,15 @@ export function scopeStatus(f: Feature, scopeId: number, byId: Map<string, TestI
   return 'none';
 }
 
-/** The scope has the "To remove" mark, or its feature has it. */
-export const scopeToRemove = (f: Feature, s: Scope) => !!(f.toRemove || s.toRemove);
+/** The scope has the "To remove" mark, or its feature has it, or (a variation) its scope has it. */
+export const scopeToRemove = (f: Feature, s: Scope) =>
+  !!(f.toRemove || s.toRemove || (s.parentId !== null && f.scopes.find((x) => x.id === s.parentId)?.toRemove));
+/** The ID as people see it: S-12 for a scope, SV-40 for a variation. */
+export const scopeIdLabel = (f: Feature, id: number) => `${f.scopes.find((s) => s.id === id)?.parentId != null ? 'SV' : 'S'}-${id}`;
+/** The variations of scope id, in order. */
+export const variationsOf = (f: Feature, id: number) => f.scopes.filter((s) => s.parentId === id);
+/** The scopes that count: scopes with no variations, and variations. A scope with variations does not count. */
+export const countedScopes = (f: Feature) => f.scopes.filter((s) => s.columns === null);
 
 /**
  * The test is linked only to items marked "To remove": each active link is to a marked feature, or only to
@@ -238,13 +245,16 @@ export function testToRemove(t: Pick<Tracker, 'linkedTo' | 'infoById'>, testId: 
     const f = t.infoById.get(fid)?.f;
     if (!f) return false;
     if (f.toRemove) return true;
-    return l.scopeIds.length > 0 && l.scopeIds.every((sid) => !!f.scopes.find((s) => s.id === sid)?.toRemove);
+    return l.scopeIds.length > 0 && l.scopeIds.every((sid) => {
+      const s = f.scopes.find((x) => x.id === sid);
+      return !!s && scopeToRemove(f, s);
+    });
   });
 }
 
 export function metrics(f: Feature, byId: Map<string, TestInfo>): Metrics {
   const m: Metrics = { total: 0, ok: 0, fail: 0, skip: 0, cy: 0, none: 0, remove: 0 };
-  for (const s of f.scopes) {
+  for (const s of countedScopes(f)) {
     if (scopeToRemove(f, s)) {
       m.remove++;
       continue;
@@ -362,11 +372,11 @@ function changesOf(
     const backFields = s.aiFields.filter((k) => k in b && !(k === 'title' && !b[k]));
     out.push({
       key: `s:${s.id}`, sec: 'Scopes', kind: isNew ? 'new' : 'changed', text: s.title, before: 'title' in b ? (b.title ?? '') : null,
-      ctx: `S-${s.id} · ${isNew ? 'The AI added this scope.' : `The AI changed: ${s.aiFields.map((k) => (FIELD_LABEL[k] ?? k).toLowerCase()).join(', ')}.`}`,
+      ctx: `${scopeIdLabel(f, s.id)} · ${isNew ? (s.parentId !== null ? 'The AI added this variation.' : 'The AI added this scope.') : `The AI changed: ${s.aiFields.map((k) => (FIELD_LABEL[k] ?? k).toLowerCase()).join(', ')}.`}`,
       tab: 'scopes', scopeId: s.id, keepLbl: 'Keep',
       keep: () => mutate('PATCH', `${base}/scopes/${s.id}`, { check: true }, quiet),
       ...(isNew
-        ? { removeLbl: 'Remove scope', confirm: `Delete scope S-${s.id} “${s.title}” and its requirements? The AI will not add it again.`, remove: () => mutate('DELETE', `${base}/scopes/${s.id}`, {}, quiet) }
+        ? { removeLbl: s.parentId !== null ? 'Remove variation' : 'Remove scope', confirm: `Delete ${s.parentId !== null ? 'variation' : 'scope'} ${scopeIdLabel(f, s.id)} “${s.title}”${s.columns ? ', all its variations,' : ''} and its requirements? The AI will not add it again.`, remove: () => mutate('DELETE', `${base}/scopes/${s.id}`, {}, quiet) }
         : backFields.length
           ? { removeLbl: 'Change back', remove: revert('scope', s.id, ...backFields) }
           : {}),
@@ -388,7 +398,7 @@ function changesOf(
   const syncNewer = !!syncAt && (!f.reviewedAt || syncAt > f.reviewedAt);
   for (const l of f.links) {
     const t = byId.get(l.testId);
-    const where = l.scopeIds.length ? l.scopeIds.map((x) => `S-${x}`).join(', ') : 'the whole feature';
+    const where = l.scopeIds.length ? l.scopeIds.map((x) => scopeIdLabel(f, x)).join(', ') : 'the whole feature';
     const sid = l.scopeIds[0];
     if (l.missing) {
       const to = renames.get(l.testId);

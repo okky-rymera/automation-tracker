@@ -71,6 +71,7 @@ back all data and settings that you change.
 | The answer is… | Write it as |
 |---|---|
 | A behavior that a test can check | A scope, with its own requirements if needed |
+| A behavior of a scope with variations in one more place or case | That scope with its `id`, its title and `variations` with the new variation only, for example `[{ "Page": "Checkout page" }]`. A variation has no description or requirements: put them on the scope |
 | A fact that no test can check (a reason, a limit) | A note |
 | "The feature does not do this" | An out-of-scope item, and name the feature that does it, if one does |
 | Already in the feature | Nothing new. Name the scope or note in the report |

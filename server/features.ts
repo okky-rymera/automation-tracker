@@ -164,7 +164,7 @@ export function featureData(projectId: string) {
     .all(projectId) as any[];
   const scopes = db
     .prepare(
-      'SELECT s.id, s.feature_id, s.title, s.description, s.group_id AS groupId, s.sort, s.ai_fields, s.remove_reason, s.remove_at, s.remove_by FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ? ORDER BY s.sort, s.id',
+      'SELECT s.id, s.feature_id, s.title, s.description, s.group_id AS groupId, s.parent_id AS parentId, s.columns, s.var_values, s.sort, s.ai_fields, s.remove_reason, s.remove_at, s.remove_by FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ? ORDER BY s.sort, s.id',
     )
     .all(projectId) as any[];
   const scopeGroups = db
@@ -246,11 +246,12 @@ export function featureData(projectId: string) {
     const toItem = (i: any) => ({ id: i.id, text: i.text, aiDraft: !!i.aiDraft });
     for (const [key, kind] of Object.entries(ITEM_KINDS)) f[key] = myItems.filter((i) => i.kind === kind && i.scope_id === null).map(toItem);
     f.scopeGroups = (scopeGroupsBy.get(f.id) ?? []).map(({ feature_id, ...g }) => g);
-    f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, remove_reason, remove_at, remove_by, ...s }) => {
+    // A scope with variations has columns. A variation has parentId and values (one for each column).
+    f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, remove_reason, remove_at, remove_by, columns, var_values, ...s }) => {
       const aiFields = json(ai_fields) as string[];
       const requirements = myItems.filter((i) => i.scope_id === s.id).map(toItem);
       const toRemove = toRemoveRow({ remove_reason, remove_at, remove_by });
-      return { ...s, requirements, aiFields, aiDraft: aiFields.length > 0, before: beforeOf('scope', s.id, aiFields), toRemove };
+      return { ...s, columns: columns === null ? null : jsonList(columns), values: s.parentId === null ? null : jsonList(var_values), requirements, aiFields, aiDraft: aiFields.length > 0, before: beforeOf('scope', s.id, aiFields), toRemove };
     });
     f.links = (linksBy.get(f.id) ?? []).map(({ feature_id, checked, ...l }) => ({
       ...l,
@@ -415,6 +416,161 @@ function groupOf(projectId: string, fid: number, v: unknown): number | null {
   return g.id;
 }
 /**
+ * Scope variations: one check in several places (for example on 4 pages). The scope keeps the sentence (its
+ * title), the description, the requirements and the group, and has the column names (scopes.columns, a JSON
+ * list; NULL: no variations). Each variation is a row of the scopes table with parent_id and var_values (one
+ * value for each column, in column order). A person or the AI types each variation: the app does not make
+ * combinations. A variation has the test links, screenshots, code and coverage. A scope with variations has
+ * none of them, so a test always says which variation it checks.
+ * A variation's ID shows as SV-<id>. S- and SV- IDs share one number series, so a number names one row only.
+ * The title of a variation is the sentence with the values in brackets (variationTitle), so the AI skills and
+ * the Tests page see a full sentence. An empty value is left out of the title.
+ */
+export const variationTitle = (sentence: string, values: string[]) => {
+  const v = values.filter(Boolean);
+  return v.length ? `${sentence} (${v.join(', ')})` : sentence;
+};
+export const MAX_COLUMNS = 6;
+export function jsonList(v: string | null | undefined): string[] {
+  try {
+    const a = JSON.parse(v ?? '[]');
+    return Array.isArray(a) ? a.map((x) => String(x ?? '')) : [];
+  } catch {
+    return [];
+  }
+}
+/** A column name: trimmed, one space between words, not empty, at most 100 characters. */
+export function columnWord(v: unknown, what: string): string {
+  const t = need(typeof v === 'string' ? v.replace(/\s+/g, ' ') : v, what);
+  if (t.length > 100) throw new EditError(`${what} is too long`);
+  return t;
+}
+/** Column names from a request: 1 to MAX_COLUMNS names, each one only one time. */
+export function columnList(v: unknown): string[] {
+  if (!Array.isArray(v) || !v.length) throw new EditError('columns must be a list with at least one name');
+  if (v.length > MAX_COLUMNS) throw new EditError(`A scope can have at most ${MAX_COLUMNS} columns`);
+  const names = v.map((x) => columnWord(x, 'Column name'));
+  const dup = names.find((n, i) => names.findIndex((m) => m.toLowerCase() === n.toLowerCase()) !== i);
+  if (dup) throw new EditError(`The column "${dup}" is in the list two times`);
+  return names;
+}
+/**
+ * The values of a variation, one for each column, in column order. The request gives a list (in column
+ * order), an object with the column names as keys, or one string for one column. A missing value is empty.
+ * A variation needs at least one value.
+ */
+export function variationValues(columns: string[], v: unknown): string[] {
+  let vals: unknown[];
+  if (typeof v === 'string') vals = [v];
+  else if (Array.isArray(v)) vals = v;
+  else if (v && typeof v === 'object') {
+    const o = new Map(Object.entries(v).map(([k, x]) => [k.replace(/\s+/g, ' ').trim().toLowerCase(), x]));
+    const unknown = [...o.keys()].find((k) => !columns.some((c) => c.toLowerCase() === k));
+    if (unknown !== undefined) throw new EditError(`The scope has no column "${unknown}". Its columns: ${columns.join(', ')}`);
+    vals = columns.map((c) => o.get(c.toLowerCase()));
+  } else throw new EditError('The values are missing');
+  if (vals.length > columns.length) throw new EditError(`The scope has ${columns.length} column(s), but the variation has ${vals.length} values`);
+  const out = columns.map((c, i) => {
+    const x = vals[i];
+    if (x === undefined || x === null) return '';
+    const t = String(x).trim().replace(/\s+/g, ' ');
+    if (t.length > 100) throw new EditError(`The value of column "${c}" is too long`);
+    return t;
+  });
+  if (out.every((x) => !x)) throw new EditError('A variation needs at least one value');
+  return out;
+}
+export const valuesKey = (vals: string[]) => JSON.stringify(vals.map((v) => v.toLowerCase()));
+
+/** A scope row: parentId is set for a variation, columns for a scope with variations. */
+export interface ScopeRow { id: number; featureId: number; title: string; groupId: number | null; parentId: number | null; columns: string[] | null; values: string[] | null }
+export function scopeRow(id: number): ScopeRow {
+  const r = db.prepare('SELECT id, feature_id, title, group_id, parent_id, columns, var_values FROM scopes WHERE id = ?').get(id) as any;
+  if (!r) throw new EditError('Scope not found');
+  return {
+    id: r.id, featureId: r.feature_id, title: r.title, groupId: r.group_id, parentId: r.parent_id,
+    columns: r.columns === null ? null : jsonList(r.columns), values: r.parent_id === null ? null : jsonList(r.var_values),
+  };
+}
+/** The ID as people see it: S-12 for a scope, SV-40 for a variation. */
+export const scopeLabel = (r: { id: number; parentId?: number | null; parent_id?: number | null }) => `${(r.parentId ?? r.parent_id) != null ? 'SV' : 'S'}-${r.id}`;
+/** The variations of scope id, in order. */
+export const variationsOf = (id: number) =>
+  (db.prepare('SELECT id, title, var_values FROM scopes WHERE parent_id = ? ORDER BY sort, id').all(id) as any[]).map((r) => ({ id: r.id as number, title: r.title as string, values: jsonList(r.var_values) }));
+/** A scope of the project that has variations. */
+function ownParent(projectId: string, id: unknown): ScopeRow {
+  const r = scopeRow(ownScope(projectId, id).id);
+  if (r.parentId !== null) throw new EditError(`${scopeLabel(r)} is a variation. Use its scope S-${r.parentId}`);
+  if (r.columns === null) throw new EditError(`S-${r.id} has no variations`);
+  return r;
+}
+/**
+ * The title of a variation of parent with these values. Refused: a second variation with the same values,
+ * or a title that another scope of the feature has. self: the variation that changes.
+ */
+function variationTitleFor(parent: ScopeRow, sentence: string, values: string[], self: number | null): string {
+  const key = valuesKey(values);
+  const same = variationsOf(parent.id).find((v) => v.id !== self && valuesKey(v.values) === key);
+  if (same) throw new EditError(`The scope has a variation with these values already (SV-${same.id})`);
+  const title = variationTitle(sentence, values);
+  if (db.prepare('SELECT 1 FROM scopes WHERE feature_id = ? AND lower(title) = lower(?) AND id IS NOT ?').get(parent.featureId, title, self))
+    throw new EditError(`Another scope of this feature has the title "${title}" already`);
+  return title;
+}
+/** Adds a variation to scope parent (columns set). It is in the group of its scope. Returns its ID. */
+export function newVariation(parent: ScopeRow, values: string[], aiFields: string[] = []): number {
+  const title = variationTitleFor(parent, parent.title, values, null);
+  return Number(
+    db
+      .prepare(`INSERT INTO scopes (id, feature_id, title, description, group_id, parent_id, var_values, sort, ai_fields) VALUES (${NEW_SCOPE_ID}, ?, ?, '', ?, ?, ?, ?, ?)`)
+      .run(parent.featureId, title, parent.groupId, parent.id, JSON.stringify(values), nextSort('scopes', 'parent_id = ?', parent.id), JSON.stringify(aiFields)).lastInsertRowid,
+  );
+}
+/**
+ * Gives each variation of parent new values (change) and the title from sentence and the new values (after a
+ * new sentence, or a new or deleted column). The old titles are remembered for the AI skills.
+ */
+export function resetVariations(parent: ScopeRow, sentence: string, change: (vals: string[]) => string[]) {
+  const vars = variationsOf(parent.id);
+  const keys = new Map<string, number>();
+  const titles = new Map<string, number>();
+  for (const v of vars) {
+    const vals = change(v.values);
+    if (vals.every((x) => !x)) throw new EditError(`Variation SV-${v.id} would have no value`);
+    const k = valuesKey(vals);
+    if (keys.has(k)) throw new EditError(`Variations SV-${keys.get(k)} and SV-${v.id} would have the same values`);
+    keys.set(k, v.id);
+    // An empty value is left out of the title, so other values can still give the same title.
+    const t = variationTitle(sentence, vals).toLowerCase();
+    if (titles.has(t)) throw new EditError(`Variations SV-${titles.get(t)} and SV-${v.id} would have the same title "${variationTitle(sentence, vals)}"`);
+    titles.set(t, v.id);
+  }
+  for (const v of vars) {
+    const vals = change(v.values);
+    const title = variationTitle(sentence, vals);
+    if (db.prepare('SELECT 1 FROM scopes WHERE feature_id = ? AND lower(title) = lower(?) AND id <> ? AND parent_id IS NOT ?').get(parent.featureId, title, v.id, parent.id))
+      throw new EditError(`Another scope of this feature has the title "${title}" already`);
+    if (title.toLowerCase() !== v.title.toLowerCase()) buryScope(parent.featureId, v.id, v.title);
+    db.prepare('UPDATE scopes SET title = ?, var_values = ? WHERE id = ?').run(title, JSON.stringify(vals), v.id);
+  }
+}
+/** Moves the test links, screenshot tags and code tags of scope from to scope to. */
+export function moveEvidence(from: number, to: number) {
+  for (const [table, col] of [['link_scopes', 'link_id'], ['screenshot_scopes', 'screenshot_id'], ['code_scopes', 'code_id']]) {
+    db.prepare(`INSERT OR IGNORE INTO ${table} (${col}, scope_id) SELECT ${col}, ? FROM ${table} WHERE scope_id = ?`).run(to, from);
+    db.prepare(`DELETE FROM ${table} WHERE scope_id = ?`).run(from);
+  }
+}
+/** Refuses a scope with variations as the scope of a test link, screenshot or code entry. */
+export function evidenceScope(id: number): number {
+  const r = db.prepare('SELECT columns FROM scopes WHERE id = ?').get(id) as any;
+  if (r && r.columns !== null) {
+    const v = variationsOf(id).map((x) => `SV-${x.id}`);
+    throw new EditError(`S-${id} has variations. Use a variation: ${v.join(', ')}`);
+  }
+  return id;
+}
+/**
  * Remembers an old title of a scope on a feature: a person deleted the scope, moved it away, or
  * renamed it. The AI skill finds scopes by title, so without this it makes the scope again (map.ts goneScope).
  */
@@ -467,7 +623,7 @@ function ownScreenshot(projectId: string, id: unknown): { id: number; featureId:
 function scopeList(projectId: string, featureId: number, v: unknown): number[] {
   if (v === undefined) return [];
   if (!Array.isArray(v)) throw new EditError('scopeIds must be a list');
-  return [...new Set(v.map((s) => scopeOf(projectId, featureId, s)))];
+  return [...new Set(v.map((s) => evidenceScope(scopeOf(projectId, featureId, s))))];
 }
 
 /** Largest image the app accepts, after base64 decoding. */
@@ -650,7 +806,8 @@ export const edits = {
       // A "To remove" mark of the source feature stays on each of its scopes that has no mark of its own.
       db.prepare(
         `UPDATE scopes SET remove_reason = f.remove_reason, remove_at = f.remove_at, remove_by = f.remove_by
-         FROM features f WHERE f.id = scopes.feature_id AND scopes.feature_id = ? AND f.remove_reason IS NOT NULL AND scopes.remove_reason IS NULL`,
+         FROM features f WHERE f.id = scopes.feature_id AND scopes.feature_id = ? AND f.remove_reason IS NOT NULL AND scopes.remove_reason IS NULL
+           AND scopes.parent_id IS NULL`, // a variation has the mark of its scope
       ).run(from);
       db.prepare('UPDATE scopes SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, scopeBase, from);
       // Scope groups: a group with the title of a target group joins it. The others move after the target's groups.
@@ -766,6 +923,8 @@ export const edits = {
     const f = own('features', p, id);
     const kind = itemKind(b.kind);
     const scope = b.scopeId ? scopeOf(p, f, b.scopeId) : null;
+    const parent = scope === null ? null : scopeRow(scope).parentId;
+    if (parent !== null) throw new EditError(`A variation has no requirements. Add it to its scope S-${parent}: it applies to each variation`);
     if (scope !== null && kind !== SCOPE_ITEM_KIND) throw new EditError('A scope has only requirements');
     const t = need(b.text, 'Text');
     // The same text two times (a double click, Enter then blur) keeps one item.
@@ -807,27 +966,127 @@ export const edits = {
     );
     return { id: Number(r.lastInsertRowid) };
   },
+  /**
+   * Body { title?, description?, groupId?, sort?, toRemove?, check?, columns?, values? }.
+   * - A scope with variations: a new title gives each variation a new title (the old titles are remembered).
+   *   columns: new names for the columns, in the same order and number. groupId moves its variations too.
+   * - A variation: only values, sort, toRemove and check. Its title comes from the scope title and its values.
+   *   It has no description, requirements or group of its own: its scope has them.
+   */
   updateScope(p: string, id: string, b: any) {
     const sc = ownScope(p, id);
     const s = sc.id;
+    const row = scopeRow(s);
+    if (row.parentId !== null) {
+      if ('title' in b) throw new EditError(`The title of a variation comes from its scope S-${row.parentId} and its values. Change those instead`);
+      if ('description' in b) throw new EditError(`A variation has no description. Write it on its scope S-${row.parentId}`);
+      if ('groupId' in b) throw new EditError(`A variation is in the group of its scope S-${row.parentId}`);
+      if ('columns' in b) throw new EditError(`Change the columns on the scope S-${row.parentId}`);
+    } else if ('values' in b) throw new EditError('Only a variation has values');
+    if ('columns' in b && row.columns === null) throw new EditError(`S-${s} has no variations`);
     const title = 'title' in b ? need(b.title, 'Title') : null;
     if ('toRemove' in b) toRemoveOf(b.toRemove);
     tx(() => {
       if ('toRemove' in b) setToRemove('scopes', s, b.toRemove);
       if (title !== null) {
-        const before = (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s) as any).title as string;
-        if (before.trim().toLowerCase() !== title.toLowerCase()) buryScope(sc.featureId, s, before);
+        if (row.title.trim().toLowerCase() !== title.toLowerCase()) buryScope(sc.featureId, s, row.title);
         db.prepare('UPDATE scopes SET title = ? WHERE id = ?').run(title, s);
+        if (row.columns !== null) resetVariations({ ...row, title }, title, (v) => v);
       }
       if ('description' in b) db.prepare('UPDATE scopes SET description = ? WHERE id = ?').run(text(b.description), s);
-      if ('groupId' in b) db.prepare('UPDATE scopes SET group_id = ?, group_by_person = 1 WHERE id = ?').run(groupOf(p, sc.featureId, b.groupId), s);
+      if ('columns' in b) {
+        const columns = columnList(b.columns);
+        if (columns.length !== row.columns!.length) throw new EditError('Send a new name for each column, in the same order. To add or delete a column, use its own route');
+        db.prepare('UPDATE scopes SET columns = ? WHERE id = ?').run(JSON.stringify(columns), s);
+      }
+      if ('values' in b) {
+        const parent = scopeRow(row.parentId!);
+        const values = variationValues(parent.columns!, b.values);
+        const t = variationTitleFor(parent, parent.title, values, s);
+        if (t.toLowerCase() !== row.title.toLowerCase()) buryScope(sc.featureId, s, row.title);
+        db.prepare('UPDATE scopes SET title = ?, var_values = ? WHERE id = ?').run(t, JSON.stringify(values), s);
+      }
+      // A scope and its variations are in one group.
+      if ('groupId' in b) {
+        const gid = groupOf(p, sc.featureId, b.groupId);
+        db.prepare('UPDATE scopes SET group_id = ?, group_by_person = 1 WHERE id = ? OR parent_id = ?').run(gid, s, s);
+      }
       if ('sort' in b) db.prepare('UPDATE scopes SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s);
       // b.check = true: the person checked the scope without a change. Its requirements are checked too.
-      clearAi('scopes', s, b.check ? [...SCOPE_AI_FIELDS] : SCOPE_AI_FIELDS.filter((k) => (k === 'group' ? 'groupId' : k) in b));
+      clearAi('scopes', s, b.check ? [...SCOPE_AI_FIELDS] : SCOPE_AI_FIELDS.filter((k) => (k === 'group' ? 'groupId' : k) in b || (k === 'title' && 'values' in b)));
       // A check accepts the group of the scope, or no group. The AI skills do not change it then.
       if (b.check) db.prepare('UPDATE scopes SET group_by_person = 1 WHERE id = ?').run(s);
       if (b.check) db.prepare('UPDATE feature_items SET ai_draft = 0 WHERE scope_id = ?').run(s);
       if (b.check) db.prepare("DELETE FROM ai_before WHERE kind = 'item' AND row_id IN (SELECT id FROM feature_items WHERE scope_id = ?)").run(s);
+    });
+  },
+  /**
+   * Body { values, columns? }: adds a variation to a scope. values: a list in column order, an object with the
+   * column names as keys, or one string for one column.
+   * A scope with no variations gets them now: columns (default: the keys of values, or ["Page"]). Its test
+   * links, screenshots and code go to this first variation, because a scope with variations has none.
+   */
+  addVariation(p: string, id: string, b: any) {
+    const row = scopeRow(ownScope(p, id).id);
+    if (row.parentId !== null) throw new EditError(`SV-${row.id} is a variation. Add the variation to its scope S-${row.parentId}`);
+    if (row.columns !== null) {
+      if (b.columns !== undefined) throw new EditError('The scope has its columns already. Add a column with its own route');
+      const values = variationValues(row.columns, b.values);
+      return { id: tx(() => newVariation(row, values)) };
+    }
+    const keys = b.values && typeof b.values === 'object' && !Array.isArray(b.values) ? Object.keys(b.values) : null;
+    const columns = columnList(b.columns ?? keys ?? ['Page']);
+    const values = variationValues(columns, b.values);
+    return tx(() => {
+      db.prepare('UPDATE scopes SET columns = ? WHERE id = ?').run(JSON.stringify(columns), row.id);
+      const vid = newVariation({ ...row, columns }, values);
+      moveEvidence(row.id, vid);
+      return { id: vid };
+    });
+  },
+  /**
+   * Ends the variations of a scope when it has one variation (or none) left. The test links, screenshots and
+   * code of that variation go back to the scope, and the variation is deleted.
+   */
+  removeVariations(p: string, id: string) {
+    const row = ownParent(p, id);
+    const vars = variationsOf(row.id);
+    if (vars.length > 1) throw new EditError(`S-${row.id} has ${vars.length} variations. Delete all but one first: only the last one can go back into the scope`);
+    tx(() => {
+      for (const v of vars) {
+        moveEvidence(v.id, row.id);
+        // The "To remove" mark of the variation goes to the scope, when the scope has no mark of its own.
+        db.prepare(
+          `UPDATE scopes SET remove_reason = v.remove_reason, remove_at = v.remove_at, remove_by = v.remove_by
+           FROM scopes v WHERE v.id = ? AND scopes.id = ? AND v.remove_reason IS NOT NULL AND scopes.remove_reason IS NULL`,
+        ).run(v.id, row.id);
+        buryScope(row.featureId, v.id, v.title);
+        db.prepare('DELETE FROM scopes WHERE id = ?').run(v.id);
+      }
+      db.prepare('UPDATE scopes SET columns = NULL WHERE id = ?').run(row.id);
+      sweepBefore();
+    });
+  },
+  /** Body { name, value? }: adds a column at the end. Each variation gets value (default empty) in it. */
+  addColumn(p: string, id: string, b: any) {
+    const row = ownParent(p, id);
+    const columns = columnList([...row.columns!, b.name]);
+    const value = b.value === undefined || b.value === null ? '' : String(b.value).trim().replace(/\s+/g, ' ');
+    if (value.length > 100) throw new EditError('The value is too long');
+    tx(() => {
+      db.prepare('UPDATE scopes SET columns = ? WHERE id = ?').run(JSON.stringify(columns), row.id);
+      resetVariations(row, row.title, (v) => [...v, value]);
+    });
+  },
+  /** Deletes column number index (0 is the first). A scope with variations keeps at least one column. */
+  deleteColumn(p: string, id: string, index: string) {
+    const row = ownParent(p, id);
+    const i = Number(index);
+    if (!Number.isInteger(i) || i < 0 || i >= row.columns!.length) throw new EditError('No such column');
+    if (row.columns!.length === 1) throw new EditError('A scope with variations needs at least one column. To end the variations, delete all but one, then use "Remove variations"');
+    tx(() => {
+      db.prepare('UPDATE scopes SET columns = ? WHERE id = ?').run(JSON.stringify(row.columns!.filter((_, k) => k !== i)), row.id);
+      resetVariations(row, row.title, (v) => v.filter((_, k) => k !== i));
     });
   },
   /**
@@ -847,29 +1106,42 @@ export const edits = {
     const from = s.featureId;
     const to = own('features', p, b.featureId);
     if (to === from) throw new EditError('The scope is in this feature already');
-    const title = (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s.id) as any).title as string;
+    const row = scopeRow(s.id);
+    if (row.parentId !== null) throw new EditError(`A variation moves with its scope. Move S-${row.parentId}`);
+    // A scope with variations moves with all of them.
+    const moving = [{ id: s.id, title: row.title }, ...variationsOf(s.id)];
     // Two scopes with one title: the AI skill finds scopes by title, so it could write to the wrong one.
-    if (db.prepare('SELECT 1 FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(to, title))
-      throw new EditError('The target feature has a scope with this title already. Rename one of them first');
+    for (const m of moving)
+      if (db.prepare('SELECT 1 FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(to, m.title))
+        throw new EditError(`The target feature has a scope with the title "${m.title}" already. Rename one of them first`);
     tx(() => {
-      buryScope(from, s.id, title);
       // The scope goes to the target's group with the same title, or to the group that a person renamed
       // from that title. The target gets that group if it does not know the title. When a person deleted
       // a group with that title from the target, the scope has no group there.
       const oldGroup = db.prepare('SELECT g.id, g.title, g.ai_made FROM scopes s JOIN scope_groups g ON g.id = s.group_id WHERE s.id = ?').get(s.id) as any;
       const newGroup = scopeGroupId(to, oldGroup?.title, oldGroup?.ai_made === 1);
-      db.prepare('UPDATE scopes SET feature_id = ?, group_id = ?, sort = ? WHERE id = ?').run(to, newGroup, nextSort('scopes', 'feature_id = ?', to), s.id);
+      for (const m of moving) {
+        buryScope(from, m.id, m.title);
+        db.prepare('UPDATE scopes SET feature_id = ?, group_id = ?, sort = ? WHERE id = ?').run(to, newGroup, nextSort('scopes', 'feature_id = ?', to), m.id);
+        carry(m.id);
+      }
       dropEmptyAiGroup(oldGroup?.id ?? null);
-      db.prepare('UPDATE feature_items SET feature_id = ? WHERE scope_id = ?').run(to, s.id);
+      sweepBefore();
+    });
+    return { featureId: to };
+
+    /** Moves the requirements, test links, screenshots and code of scope sid from feature from to feature to. */
+    function carry(sid: number) {
+      db.prepare('UPDATE feature_items SET feature_id = ? WHERE scope_id = ?').run(to, sid);
       // A scope requirement that the target has as a feature requirement goes. A person's check on it stays.
       const same = `SELECT 1 FROM feature_items o WHERE o.feature_id = ? AND o.kind = ? AND o.scope_id = ?
         AND lower(o.text) = lower(feature_items.text)`;
       db.prepare(`UPDATE feature_items SET ai_draft = 0 WHERE feature_id = ? AND kind = ? AND scope_id IS NULL AND ai_draft = 1
-        AND EXISTS (${same} AND o.ai_draft = 0)`).run(to, SCOPE_ITEM_KIND, to, SCOPE_ITEM_KIND, s.id);
+        AND EXISTS (${same} AND o.ai_draft = 0)`).run(to, SCOPE_ITEM_KIND, to, SCOPE_ITEM_KIND, sid);
       db.prepare(
         `DELETE FROM feature_items WHERE scope_id = ? AND kind = ? AND EXISTS (SELECT 1 FROM feature_items o
            WHERE o.feature_id = ? AND o.kind = feature_items.kind AND o.scope_id IS NULL AND lower(o.text) = lower(feature_items.text))`,
-      ).run(s.id, SCOPE_ITEM_KIND, to);
+      ).run(sid, SCOPE_ITEM_KIND, to);
 
       // Test links. A person's work (a manual link, a check) wins over an AI link to the same test.
       const upsertLink = db.prepare(
@@ -885,11 +1157,11 @@ export const edits = {
       const removeLink = db.prepare('UPDATE links SET removed = 1 WHERE id = ?');
       const old = db
         .prepare('SELECT l.* FROM links l JOIN link_scopes ls ON ls.link_id = l.id WHERE ls.scope_id = ? AND l.feature_id = ? AND l.removed = 0')
-        .all(s.id, from) as any[];
+        .all(sid, from) as any[];
       for (const l of old) {
         const keep = upsertLink.get(p, l.test_id, to, l.source, l.checked) as any;
-        untag.run(l.id, s.id);
-        tag.run(keep.id, s.id);
+        untag.run(l.id, sid);
+        tag.run(keep.id, sid);
         if (!hasScope.get(l.id)) removeLink.run(l.id); // marker: the skill does not link the test to the old feature again
       }
 
@@ -900,7 +1172,7 @@ export const edits = {
            FROM screenshots sh JOIN screenshot_scopes ss ON ss.screenshot_id = sh.id
            WHERE ss.scope_id = ? AND sh.feature_id = ? AND sh.removed = 0`,
         )
-        .all(s.id, from) as any[];
+        .all(sid, from) as any[];
       const findKey = db.prepare('SELECT id, removed FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1');
       const otherWithKey = db.prepare('SELECT 1 FROM screenshots WHERE feature_id = ? AND match_key = ? AND id <> ?');
       const marker = db.prepare(
@@ -914,7 +1186,7 @@ export const edits = {
       let sort = nextSort('screenshots', 'feature_id = ?', to);
       for (const sh of shots) {
         if (sh.n > 1) {
-          untagShot.run(sh.id, s.id);
+          untagShot.run(sh.id, sid);
           continue;
         }
         const key: string | null = sh.match_key;
@@ -923,7 +1195,7 @@ export const edits = {
         const dup = key ? (findKey.get(to, key) as any) : null;
         if (dup && !dup.removed) {
           // The target has the same AI screenshot: keep that one, with this scope's tag and the "checked" mark.
-          tagShot.run(dup.id, s.id);
+          tagShot.run(dup.id, sid);
           addCheck.run(sh.checked, dup.id);
           dropShot.run(sh.id);
           continue;
@@ -940,10 +1212,10 @@ export const edits = {
            FROM feature_code c JOIN code_scopes cs ON cs.code_id = c.id
            WHERE cs.scope_id = ? AND c.feature_id = ? AND c.removed = 0`,
         )
-        .all(s.id, from) as any[];
+        .all(sid, from) as any[];
       for (const c of codeRows) {
         if (c.n > 1) {
-          db.prepare('DELETE FROM code_scopes WHERE code_id = ? AND scope_id = ?').run(c.id, s.id);
+          db.prepare('DELETE FROM code_scopes WHERE code_id = ? AND scope_id = ?').run(c.id, sid);
           continue;
         }
         const there = db.prepare('SELECT id, removed FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(to, c.file, c.function) as any;
@@ -958,15 +1230,13 @@ export const edits = {
             db.prepare('INSERT INTO feature_code (project_id, feature_id, file, function, source, checked) VALUES (?, ?, ?, ?, ?, ?)').run(p, to, c.file, c.function, c.source, c.checked).lastInsertRowid,
           );
         }
-        db.prepare('INSERT OR IGNORE INTO code_scopes (code_id, scope_id) VALUES (?, ?)').run(keep, s.id);
+        db.prepare('INSERT OR IGNORE INTO code_scopes (code_id, scope_id) VALUES (?, ?)').run(keep, sid);
         db.prepare('DELETE FROM code_scopes WHERE code_id = ?').run(c.id);
         db.prepare('UPDATE feature_code SET removed = 1 WHERE id = ?').run(c.id);
       }
       // The group from before the AI change is a group of the old feature: it cannot come back here.
-      dropBefore('scope', s.id, ['group']);
-      sweepBefore();
-    });
-    return { featureId: to };
+      dropBefore('scope', sid, ['group']);
+    }
   },
   // Scope groups: a feature's scopes show under their group, like the describe blocks of tests.
   addScopeGroup(p: string, id: string, b: any) {
@@ -1005,11 +1275,21 @@ export const edits = {
       db.prepare('INSERT OR REPLACE INTO scope_group_titles_gone (feature_id, title_key, group_id) VALUES (?, lower(trim(?)), NULL)').run(g.featureId, title);
     });
   },
+  /**
+   * Deletes a scope. A scope with variations goes with all of them. When the last variation of a scope goes,
+   * the scope has no variations: it is a normal scope again, with no tests. Its tests stay linked to the feature.
+   */
   deleteScope(p: string, id: string) {
     const s = ownScope(p, id);
     tx(() => {
-      buryScope(s.featureId, s.id, (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s.id) as any).title);
-      db.prepare('DELETE FROM scopes WHERE id = ?').run(s.id); // its tests stay linked to the feature
+      const row = scopeRow(s.id);
+      for (const v of row.columns !== null ? variationsOf(s.id) : []) {
+        buryScope(s.featureId, v.id, v.title);
+        db.prepare('DELETE FROM scopes WHERE id = ?').run(v.id);
+      }
+      buryScope(s.featureId, s.id, row.title);
+      db.prepare('DELETE FROM scopes WHERE id = ?').run(s.id);
+      if (row.parentId !== null && !variationsOf(row.parentId).length) db.prepare('UPDATE scopes SET columns = NULL WHERE id = ?').run(row.parentId);
       sweepBefore();
     });
   },
@@ -1023,7 +1303,7 @@ export const edits = {
     const testId = need(b.testId, 'Test ID');
     if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ?').get(p, testId)) throw new EditError(`Unknown test ${testId}`);
     const f = b.featureId ? own('features', p, b.featureId) : b.scopeId ? ownScope(p, b.scopeId).featureId : own('features', p, null);
-    const scopeId = b.scopeId ? scopeOf(p, f, b.scopeId) : null;
+    const scopeId = b.scopeId ? evidenceScope(scopeOf(p, f, b.scopeId)) : null;
     tx(() => {
       db.prepare(`INSERT INTO links (project_id, test_id, feature_id, source) VALUES (?, ?, ?, 'manual')
         ON CONFLICT (project_id, test_id, feature_id) DO UPDATE SET removed = 0, source = 'manual'`).run(p, testId, f);
@@ -1082,7 +1362,7 @@ export const edits = {
     const l = ownLink(p, id);
     if (b.check && !('scopeIds' in b)) return void db.prepare('UPDATE links SET checked = 1 WHERE id = ?').run(l.id);
     if (!Array.isArray(b.scopeIds)) throw new EditError('scopeIds must be a list');
-    const ids: number[] = [...new Set<number>(b.scopeIds.map((s: unknown) => scopeOf(p, l.feature_id, s)))];
+    const ids: number[] = [...new Set<number>(b.scopeIds.map((s: unknown) => evidenceScope(scopeOf(p, l.feature_id, s))))];
     tx(() => {
       if (b.check) db.prepare('UPDATE links SET checked = 1 WHERE id = ?').run(l.id);
       db.prepare('DELETE FROM link_scopes WHERE link_id = ?').run(l.id);
@@ -1200,7 +1480,7 @@ export const edits = {
     if (!r) throw new EditError('Unknown code entry');
     if (b.check !== true && !('scopeIds' in b)) throw new EditError('Send { "check": true } or { "scopeIds": [] }');
     if ('scopeIds' in b && !Array.isArray(b.scopeIds)) throw new EditError('scopeIds must be a list');
-    const ids: number[] = 'scopeIds' in b ? [...new Set<number>(b.scopeIds.map((s: unknown) => scopeOf(p, r.feature_id, s)))] : [];
+    const ids: number[] = 'scopeIds' in b ? [...new Set<number>(b.scopeIds.map((s: unknown) => evidenceScope(scopeOf(p, r.feature_id, s))))] : [];
     tx(() => {
       if (b.check === true) db.prepare('UPDATE feature_code SET checked = 1 WHERE id = ?').run(r.id);
       if ('scopeIds' in b) {

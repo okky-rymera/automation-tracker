@@ -43,7 +43,7 @@ export function FeatureList({ t }: { t: Tracker }) {
         `f-${i.f.id}` === ql ||
         i.f.title.toLowerCase().includes(ql) ||
         i.f.roles.some((r) => r.toLowerCase().includes(ql)) ||
-        i.f.scopes.some((s) => s.title.toLowerCase().includes(ql) || `s-${s.id}` === ql)),
+        i.f.scopes.some((s) => s.title.toLowerCase().includes(ql) || `s-${s.id}` === ql || `sv-${s.id}` === ql)),
   );
   all.sort((a, b) =>
     sort === 'gaps' ? gaps(b) - gaps(a) || a.f.id - b.f.id

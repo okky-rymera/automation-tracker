@@ -209,6 +209,36 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   already there in groups too. Send each one with its `id`, its `title` and
   the `group`. Example: F-3 has the groups "Settings page", "Cart page" and
   "Checkout page".
+- When one check applies in several places or cases (pages, roles, product
+  types), write one scope with `variations`: the scope has the sentence, the
+  description and the requirements. Each variation is an object with the
+  column names as keys, for example
+  `{ "Page": "Cart page", "Product type": "Variation" }`. F-5 has 3 such
+  scopes (S-733, S-734, S-735).
+  - A variation has an SV- ID (for example SV-44) and the title
+    "<scope title> (<values, in column order, with commas>)". It has no
+    description, no requirements and no group of its own.
+  - Link each test, screenshot and code entry to the variation that it
+    checks: its SV- ID or its title. A scope with variations takes no link,
+    screenshot or code itself: the tool refuses the payload.
+  - Write each variation that the plugin really has. Do not make all
+    combinations of the values.
+  - A fact about one variation only goes in the scope description, and names
+    the variation. Also write "which part no test checks" there.
+  - Use the column names that the scope has (see `columns` in
+    `feature <id>`). A new key adds a column: the other variations have no
+    value there. A scope has at most 6 columns.
+  - The tool only adds variations. It does not change or delete one, and it
+    does not add again a variation that a person deleted.
+  - When a scope that has tests gets its first variation, its tests,
+    screenshots and code go to that first variation.
+  - Do not join scopes that are there already into one scope with
+    variations. Write a new scope with variations only for new checks, or
+    ask the person.
+  - Use variations only when the sentence means the same in each place. A
+    scope that checks more, or for other users, is a separate scope.
+  - Use the values "Shop page", "Product page", "Cart page" and "Checkout
+    page" for pages.
 
 Choose the feature scope by behavior, not by test file. If the code you read
 does the same thing for several screens or REST routes, look in the sibling
@@ -255,7 +285,7 @@ Points to know:
 - **One test ID can be several runs.** A `Scenario Outline` with an Examples
   table, or a Playwright test made in a loop (its title shows `${…}`), has one
   ID. Write the scope so it matches all the rows or runs, or link the test to
-  one scope for each row.
+  each variation that it runs.
 - **A code unit** has no tests of its own. Link the candidate tests from the
   `code` output, or send no links if no test checks the area.
 - **Links only**: to add links to a feature without new text, send just

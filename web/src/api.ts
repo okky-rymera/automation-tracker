@@ -92,7 +92,16 @@ export interface Scope {
   description: string;
   /** The scope group it is in, or null. */
   groupId: number | null;
-  /** What must be true for this scope only, on top of the feature's requirements. */
+  /**
+   * A scope with variations (one check in several places): the column names, for example ["Page"]. It has
+   * no tests, screenshots or code: its variations have them, and only they count. Null: no variations.
+   */
+  columns: string[] | null;
+  /** A variation (ID SV-<id>): the scope it belongs to. Its title is "<scope title> (<values>)". */
+  parentId: number | null;
+  /** A variation: one value for each column of its scope. Empty: the column does not apply. */
+  values: string[] | null;
+  /** What must be true for this scope only, on top of the feature's requirements. A variation has none. */
   requirements: FeatureItem[];
   sort: number;
   /** Fields the skill wrote that no person checked yet. */

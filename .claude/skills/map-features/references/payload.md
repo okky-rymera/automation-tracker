@@ -26,7 +26,8 @@
       "removeItems": [15],
       "scopes": [
         { "title": "…", "group": "…topic, for example Hide column setting…", "description": "…", "requirements": ["…true for this scope only…"] },
-        { "id": "S-14", "title": "…", "requirements": [{ "id": 21, "text": "…corrected AI draft requirement…" }] }
+        { "id": "S-14", "title": "…", "requirements": [{ "id": 21, "text": "…corrected AI draft requirement…" }] },
+        { "title": "…sentence that is the same in each place…", "description": "…", "requirements": ["…"], "variations": [{ "Page": "Shop page" }, { "Page": "Cart page", "Product type": "Variation" }] }
       ],
       "links": [
         { "testId": "CY-1a2b3c4d", "scopes": ["…title of a scope above…", "S-14"] },
@@ -100,9 +101,15 @@
   feature requirement with the same text as a scope item is not added. A
   correction to such a text is not done. The report says so. A scope has no
   `rules` or `notes`.
+- Scope `variations`: one check in several places. Each item is an object
+  with the column names as keys. The tool adds the variations that the scope
+  does not have, and a column for a new key. `columns` (optional) gives the
+  column order when the scope gets its first variations.
 - Link `scopes`: scope titles from this payload or the feature, or IDs like
   `S-14` (scope IDs are the same across all features; the ID must be in this
-  feature). Leave it out only when the test checks the feature in general.
+  feature). For a scope with variations, name the variations: `SV-44`, or the
+  title "<scope title> (<values>)". Leave it out only when the test checks the
+  feature in general.
 - To add only links, send a feature with just `id` and `links`.
 - `leftOut` (top level, test units only): each test of the file that fits no
   feature, with a reason. Each test of the file needs a link or a `leftOut`
