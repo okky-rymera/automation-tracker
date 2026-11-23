@@ -44,6 +44,8 @@ export interface TestRef {
   title: string;
   /** Active links of this test (removed links do not count). */
   links: number;
+  /** The test's tags (a Cypress scenario has the feature, rule and scenario tags). Reports saved before this field have none. */
+  tags?: string[];
 }
 
 export interface LikelyRename {
@@ -238,6 +240,7 @@ interface ParsedTest {
   framework: 'playwright' | 'cypress';
   file: string;
   title: string;
+  tags: string[];
   /** Changes when the test code changes. */
   body: string;
   /** Changes when the title, the describes or the skip state change (they do not all change the ID). */
@@ -256,14 +259,14 @@ function testsAt(p: ProjectConfig, commit: string): { tests: ParsedTest[]; error
     const tests: ParsedTest[] = [];
     for (const t of pw?.tests ?? []) {
       tests.push({
-        id: t.id, framework: 'playwright', file: t.file, title: [...t.describes, t.title].join(' > '),
+        id: t.id, framework: 'playwright', file: t.file, title: [...t.describes, t.title].join(' > '), tags: [...t.tags],
         body: t.bodyHash ?? '', head: JSON.stringify([t.describes, t.title, t.skipped, [...t.tags].sort()]),
       });
     }
     for (const s of cy ?? []) {
       if (s.parseError) continue;
       tests.push({
-        id: s.id, framework: 'cypress', file: s.file, title: [s.feature, s.rule, s.title].filter(Boolean).join(' > '),
+        id: s.id, framework: 'cypress', file: s.file, title: [s.feature, s.rule, s.title].filter(Boolean).join(' > '), tags: [...s.tags],
         body: JSON.stringify([s.steps.map((x) => [x.keyword, x.text, x.background]), s.examples]),
         head: JSON.stringify([s.title, [...s.tags].sort()]),
       });
@@ -299,7 +302,7 @@ export function changeReport(p: ProjectConfig, fromRef: string, toRef: string): 
   const linkCount = new Map(
     (db.prepare('SELECT test_id, COUNT(*) AS n FROM links WHERE project_id = ? AND removed = 0 GROUP BY test_id').all(p.id) as any[]).map((r) => [r.test_id, r.n]),
   );
-  const ref = (t: ParsedTest): TestRef => ({ id: t.id, framework: t.framework, file: t.file, title: t.title, links: linkCount.get(t.id) ?? 0 });
+  const ref = (t: ParsedTest): TestRef => ({ id: t.id, framework: t.framework, file: t.file, title: t.title, links: linkCount.get(t.id) ?? 0, tags: t.tags });
   const oldById = new Map(oldT.tests.map((t) => [t.id, t]));
   const newById = new Map(newT.tests.map((t) => [t.id, t]));
   const added = newT.tests.filter((t) => !oldById.has(t.id));

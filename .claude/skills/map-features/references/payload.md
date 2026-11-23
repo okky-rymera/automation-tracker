@@ -241,7 +241,32 @@ feature is gone", and readers misread it. So in all text:
 - Do not write "the setting is on" or "off".
 - Name the setting by its label, and say "checked" or "unchecked".
 - Or say what the setting does: "the hide setting removes the column".
-- The default case needs no words about the setting: "Shows the column".
+- Do not make a scope for the default case, when the feature is not in use
+  (see the next rule). Example: no scope "Shows the column" for a feature that
+  hides the column.
+
+**No scope for the page before the feature changes it.** A scope must show a
+result that this feature makes. When the feature is not in use, the page shows
+what WooCommerce or another feature makes. That is not a scope of this feature.
+
+- Do not make a scope like "Guest sees the price by default" for a feature that
+  hides the price. The feature that shows the price owns that result.
+- Make one scope for "turn the setting on, then off": the result comes back.
+  This checks that the feature undoes its own change. Example: "Guest sees the
+  price again on the shop page after the owner turns the setting on and then off".
+  One such scope for each feature is enough.
+- Keep a scope for the default value of the feature's own setting when its label
+  can confuse a reader. Example: "The hide checkbox is unchecked by default".
+- Keep the scopes that show who the feature does not change. They check that the
+  feature stays inside its limits. Example: "Logged-in customer still sees the price".
+- Keep the scopes where "default" names a value that this feature makes or uses.
+  Examples: the default label text that the feature shows, or the "default
+  wholesale role" setting.
+
+A test that checks only the page before the feature changes it has no scope
+here. Do not link it. Put it in `leftOut` with the reason "Checks only the page
+before <feature> changes it. A person can remove this test." Also name it in the
+report. The "feature on" test can check that page as its first step instead.
 
 Include scopes that no test checks yet. Gaps are the point of the list.
 Negative and edge cases are scopes too ("Wholesale price higher than the

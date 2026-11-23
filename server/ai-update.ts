@@ -509,7 +509,7 @@ ${JSON.stringify(feature, null, 2)}
 ${fns.length ? fns.map((f) => { const sc = scopesOf(f.file, f.name); return `- ${f.change}: ${f.file} ${f.name}${sc.length ? ` (code of ${sc.join(', ')})` : ''}`; }).join('\n') : '- none'}
 ${gone.length ? `\n## Code of this feature that is not in the code now\n${gone.map((g) => `- ${g.file} ${g.function ?? '(whole file)'}: ${g.reason}${g.movedTo ? ' -> ' + g.movedTo : ''}`).join('\n')}\n` : ''}${renames.length ? `\n## Linked tests that were likely renamed (a person moves the links in the app)\n${renames.map((x) => `- ${x.from.id} "${x.from.title}" -> ${x.to.id} "${x.to.title}"`).join('\n')}\n` : ''}
 ## New tests that no feature links yet
-${unlinked.length ? unlinked.map((t) => `- ${t.id} (${t.framework}, ${t.file}): ${t.title}`).join('\n') : '- none'}
+${unlinked.length ? unlinked.map((t) => `- ${t.id} (${t.framework}, ${t.file}${t.tags?.length ? `, tags: ${t.tags.join(' ')}` : ''}): ${t.title}`).join('\n') : '- none'}
 
 ## Diff ${r.from.slice(0, 12)}..${r.to.slice(0, 12)} of the feature's code and test files${cut ? ` (cut at ${MAX_DIFF} characters: read the files for the rest)` : ''}
 \`\`\`diff
@@ -526,6 +526,8 @@ ${diff || '(no changes in these files)'}
   - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. A scope that is now wrong cannot be deleted here: add a question for it.
   - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks.
   - A scope with "toRemove": a person decided that it must go. Do not change it, link a test to it, or add the same behavior again as a new scope.
+  - Do not add a scope for the page before this feature changes it (for example "Guest sees the price by default" on a feature that hides the price). The page then shows what WooCommerce or another feature makes. One scope "turn the setting on, then off: the result comes back" is allowed.
+  - Behavior that needs another plugin (Premium, Lead Capture, Order Form, Payments, or a third-party plugin) belongs to a feature in an "Integration/<plugin>" group. If this feature is not in such a group, do not add such a scope here and do not link a test from an "Integration/" folder or with an "@integration:" tag. Add a question that names the behavior or the test instead.
 - "summary": 1–3 plain sentences for the person who checks your work: what changed in the code, and what you changed in the feature.
 
 ## Writing style
@@ -748,9 +750,19 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
     known.add(`s-${x.scope_id}`);
     known.add(String(x.title_key));
   }
-  const tests = db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL');
+  const tests = db.prepare('SELECT file, tags FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL');
+  // An integration test (in an "Integration/" folder, or with an "@integration:" tag) needs another plugin.
+  // It links only to a feature in an "Integration/<plugin>" group. The prompt says this too, but the model can ignore it.
+  const group = db.prepare('SELECT g.title FROM features f LEFT JOIN feature_groups g ON g.id = f.group_id WHERE f.id = ?').get(featureId) as { title: string | null } | undefined;
+  const integrationFeature = !!group?.title?.startsWith('Integration/');
   const links = (pr.links ?? []).flatMap((l) => {
-    if (!tests.get(p.id, l.testId)) return void dropped.push(`links: no test ${l.testId} in the last scan`), [];
+    const row = tests.get(p.id, l.testId) as { file: string; tags: string } | undefined;
+    if (!row) return void dropped.push(`links: no test ${l.testId} in the last scan`), [];
+    const tags = JSON.parse(row.tags || '[]') as string[];
+    const integrationTest = row.file.startsWith('Integration/') || tags.some((t) => t === '@integration' || t.startsWith('@integration:'));
+    if (integrationTest && !integrationFeature) {
+      return void dropped.push(`links: ${l.testId} not linked, because it is an integration test and F-${featureId} is not in an "Integration/" group`), [];
+    }
     const keys = (l.scopes ?? []).map((k) => String(k).trim()).filter(Boolean);
     const good = keys.filter((k) => known.has(norm(k)));
     for (const k of keys.filter((k) => !good.includes(k))) dropped.push(`links: ${l.testId} names the scope "${k}", which is not in F-${featureId}`);

@@ -130,6 +130,16 @@ Write the payload to the session scratchpad folder, then run `apply`.
   fails, nothing changes and the questions stay.
 - Link a test to the new scope only when you ran it, or read it, and it really
   checks the scope.
+- Do not write to a feature or a scope marked "To remove" (`toRemove`). A person
+  decided that it must go. Set or clear the mark only when a person asks.
+- When the feature has the mark, do not answer its questions and do not send a
+  payload. The tool skips all changes to such a feature, also the notes and
+  `answeredQuestions`. List its open questions in the report as skipped.
+- When only a scope has the mark, put the answer on a scope that stays, or in a
+  note of the feature.
+- Do not add a scope for the page before the feature changes it. Follow the rule
+  "No scope for the page before the feature changes it" in the map-features
+  `references/payload.md`.
 
 ## 5. Report
 

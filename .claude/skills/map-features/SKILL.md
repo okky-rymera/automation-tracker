@@ -244,6 +244,9 @@ Link every test in the unit that checks a feature, **to the scopes it checks**.
 A link with no scope says only "this test is about the feature", which tells a
 reader little. So make the scopes first, then link each test to its scopes.
 Leave out the scopes only for a test that checks the feature in general.
+Do not link a test that checks only the page before the feature changes it.
+Put it in `leftOut` (see "No scope for the page before the feature changes it"
+in `references/payload.md`).
 Points to know:
 
 - **A test can check several scopes.** Give all of them in `scopes` (a list).
@@ -418,6 +421,32 @@ feature does, not by where it is set or tested:
 - If an existing feature is in a screen-type group or another wrong group,
   do not move it. In the report, name the feature, its group and the group
   you suggest. A person moves it in the app, or tells you to move it.
+
+### Integration groups
+
+Some behavior works only when another plugin is active. This can be a
+third-party plugin (WooCommerce Product Bundles) or another plugin of the
+same company (Premium, Lead Capture, Order Form, Payments). A person must
+install that plugin to test it, so it must not hide inside a core feature.
+
+- Put such a feature in the group "Integration/<plugin name>", for example
+  "Integration/Wholesale Prices Premium". Use the existing Integration group
+  for the plugin when there is one.
+- Do not add "With Premium …" scopes to a core feature. Make or use a
+  separate feature in the Integration group, for example "Wholesale price
+  for each Premium wholesale role" next to the core "Per-product wholesale
+  price".
+- Some scopes show the locked field or the upsell when the other plugin is
+  not active. Put these scopes in the same Integration feature. Example:
+  "Without Lead Capture, the Register Text field is locked".
+- Link a test from an `Integration/<plugin>/` folder, or with an
+  `@integration:<plugin>` tag, only to Integration features. Do not link it
+  to a core scope, also when it checks the core behavior on the way.
+- If a core feature already has integration scopes, do not move them and do
+  not add to them or link tests to them. In the report, name each scope and
+  the Integration feature you suggest. A person moves it, or tells you to.
+- Make the feature and its scopes make sense as product behavior. Do not
+  copy the layout of the test files.
 
 ## Writing style
 
