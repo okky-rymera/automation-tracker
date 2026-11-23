@@ -686,6 +686,17 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (project_id, kind, ref)
   );
   `,
+  // 33: "To remove" mark on a feature or a scope: it must go, with its tests, but its links stay until then.
+  //     remove_reason NULL = no mark. remove_by = person | ai (an AI that a person asked to set the mark).
+  //     A marked item is not in the coverage counts, and the AI skills do not add links or code to it.
+  `
+  ALTER TABLE features ADD COLUMN remove_reason TEXT;
+  ALTER TABLE features ADD COLUMN remove_at TEXT;
+  ALTER TABLE features ADD COLUMN remove_by TEXT;
+  ALTER TABLE scopes ADD COLUMN remove_reason TEXT;
+  ALTER TABLE scopes ADD COLUMN remove_at TEXT;
+  ALTER TABLE scopes ADD COLUMN remove_by TEXT;
+  `,
 ];
 
 function open(): DatabaseSync {

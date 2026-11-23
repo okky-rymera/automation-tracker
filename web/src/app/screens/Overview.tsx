@@ -63,6 +63,12 @@ export function Overview({ t }: { t: Tracker }) {
             <span><i className="sw sw-none" />{sum('none')} No test</span>
           </div>
           <div><a className="linkbtn" href={link(p, 'flist', null, { status: 'gaps', sort: 'gaps' })}>Show the features with scopes to cover</a></div>
+          {sum('remove') > 0 && (
+            <div className="q-sub">
+              {sum('remove')} more {sum('remove') === 1 ? 'scope is' : 'scopes are'} marked “To remove” and {sum('remove') === 1 ? 'does' : 'do'} not count.{' '}
+              <a className="linkbtn" href={link(p, 'flist', null, { status: 'remove' })}>Show them</a>
+            </div>
+          )}
         </Card>
         <Card className="q-card">
           <div className="q-q">Plugin code run by Playwright tests</div>

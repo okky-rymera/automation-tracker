@@ -22,6 +22,9 @@
  * When a person removes a link, the row stays with removed = 1, so the AI skill
  * does not add it again. checked = 1: a person checked an AI link.
  *
+ * "To remove" mark (remove_reason on features and scopes): the item must go, with its tests. Its links
+ * stay until then. The app leaves it out of the coverage counts, and the AI skills do not write to it (map.ts).
+ *
  * AI marks: features.ai_fields and scopes.ai_fields list the fields that the AI
  * skill wrote and no person checked yet. A person who changes a field removes it
  * from the list. "Mark as checked" clears the lists, the item marks and the links.
@@ -112,6 +115,34 @@ export function sweepReviewed(projectId: string) {
   ).run(now(), projectId);
 }
 
+/**
+ * "To remove" mark of a feature or a scope (db step 33). Body value: a reason, { reason, by }, or null to clear it.
+ * by: "person" (default) or "ai" (an AI that a person asked to set the mark).
+ * at: optional ISO time, for an undo that puts back a mark with its first date.
+ */
+export interface ToRemove { reason: string; at: string; by: 'person' | 'ai' }
+function toRemoveOf(v: unknown): { reason: string; by: string; at: string | null } | null {
+  if (v === null) return null;
+  const o = typeof v === 'string' ? { reason: v } : (v as any);
+  const reason = typeof o?.reason === 'string' ? o.reason.trim() : '';
+  if (!reason) throw new EditError('toRemove needs a reason, or null to clear the mark');
+  if (reason.length > 1000) throw new EditError('The reason is too long (1000 characters or less)');
+  const by = o.by === undefined ? 'person' : o.by;
+  if (by !== 'person' && by !== 'ai') throw new EditError('toRemove.by must be "person" or "ai"');
+  const at = o.at === undefined || o.at === null ? null : String(o.at);
+  if (at !== null && Number.isNaN(Date.parse(at))) throw new EditError('toRemove.at must be a date and time (ISO)');
+  return { reason, by, at };
+}
+function setToRemove(table: 'features' | 'scopes', id: number, v: unknown) {
+  const m = toRemoveOf(v);
+  db.prepare(`UPDATE ${table} SET remove_reason = ?, remove_at = ?, remove_by = ? WHERE id = ?`).run(m?.reason ?? null, m ? (m.at ?? now()) : null, m?.by ?? null, id);
+}
+const toRemoveRow = (r: any): ToRemove | null => (r.remove_reason ? { reason: r.remove_reason, at: r.remove_at, by: r.remove_by === 'ai' ? 'ai' : 'person' } : null);
+/** IDs of the features of a project that have the "To remove" mark. */
+export function featuresToRemove(projectId: string): Set<number> {
+  return new Set((db.prepare('SELECT id FROM features WHERE project_id = ? AND remove_reason IS NOT NULL').all(projectId) as any[]).map((r) => r.id as number));
+}
+
 /** Groups rows by a key, in one pass. */
 function byKey<T>(rows: T[], key: (r: T) => number) {
   const m = new Map<number, T[]>();
@@ -129,11 +160,11 @@ const LABEL_KIND_VALUES: string[] = Object.values(LABEL_KINDS);
 export function featureData(projectId: string) {
   const groups = db.prepare('SELECT id, title, description, sort FROM feature_groups WHERE project_id = ? ORDER BY sort, id').all(projectId);
   const features = db
-    .prepare('SELECT id, group_id AS groupId, title, description, priority, sort, ai_fields, reviewed_at AS reviewedAt, review_wanted AS reviewWanted, ai_changed_at AS aiChangedAt FROM features WHERE project_id = ? ORDER BY sort, id')
+    .prepare('SELECT id, group_id AS groupId, title, description, priority, sort, ai_fields, reviewed_at AS reviewedAt, review_wanted AS reviewWanted, ai_changed_at AS aiChangedAt, remove_reason, remove_at, remove_by FROM features WHERE project_id = ? ORDER BY sort, id')
     .all(projectId) as any[];
   const scopes = db
     .prepare(
-      'SELECT s.id, s.feature_id, s.title, s.description, s.group_id AS groupId, s.sort, s.ai_fields FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ? ORDER BY s.sort, s.id',
+      'SELECT s.id, s.feature_id, s.title, s.description, s.group_id AS groupId, s.sort, s.ai_fields, s.remove_reason, s.remove_at, s.remove_by FROM scopes s JOIN features f ON f.id = s.feature_id WHERE f.project_id = ? ORDER BY s.sort, s.id',
     )
     .all(projectId) as any[];
   const scopeGroups = db
@@ -204,17 +235,22 @@ export function featureData(projectId: string) {
     f.aiDraft = f.aiFields.length > 0;
     f.reviewWanted = !!f.reviewWanted;
     f.before = beforeOf('feature', f.id, f.aiFields);
+    f.toRemove = toRemoveRow(f);
     delete f.ai_fields;
+    delete f.remove_reason;
+    delete f.remove_at;
+    delete f.remove_by;
     const myLabels = labelsBy.get(f.id) ?? [];
     for (const [key, kind] of Object.entries(LABEL_KINDS)) f[key] = myLabels.filter((l) => l.kind === kind).map((l) => l.value);
     const myItems = itemsBy.get(f.id) ?? [];
     const toItem = (i: any) => ({ id: i.id, text: i.text, aiDraft: !!i.aiDraft });
     for (const [key, kind] of Object.entries(ITEM_KINDS)) f[key] = myItems.filter((i) => i.kind === kind && i.scope_id === null).map(toItem);
     f.scopeGroups = (scopeGroupsBy.get(f.id) ?? []).map(({ feature_id, ...g }) => g);
-    f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, ...s }) => {
+    f.scopes = (scopesBy.get(f.id) ?? []).map(({ feature_id, ai_fields, remove_reason, remove_at, remove_by, ...s }) => {
       const aiFields = json(ai_fields) as string[];
       const requirements = myItems.filter((i) => i.scope_id === s.id).map(toItem);
-      return { ...s, requirements, aiFields, aiDraft: aiFields.length > 0, before: beforeOf('scope', s.id, aiFields) };
+      const toRemove = toRemoveRow({ remove_reason, remove_at, remove_by });
+      return { ...s, requirements, aiFields, aiDraft: aiFields.length > 0, before: beforeOf('scope', s.id, aiFields), toRemove };
     });
     f.links = (linksBy.get(f.id) ?? []).map(({ feature_id, checked, ...l }) => ({
       ...l,
@@ -534,7 +570,9 @@ export const edits = {
     if ('priority' in b && !PRIORITIES.includes(text(b.priority))) throw new EditError('Priority must be high, medium, low or empty');
     const groupId = 'groupId' in b ? (b.groupId ? own('feature_groups', p, b.groupId) : null) : undefined;
     if ('check' in b && (!Array.isArray(b.check) || b.check.some((k: unknown) => typeof k !== 'string'))) throw new EditError('check must be a list of field names');
+    if ('toRemove' in b) toRemoveOf(b.toRemove);
     tx(() => {
+      if ('toRemove' in b) setToRemove('features', f, b.toRemove);
       if ('title' in b) db.prepare('UPDATE features SET title = ? WHERE id = ?').run(String(b.title).trim(), f);
       if ('description' in b) db.prepare('UPDATE features SET description = ? WHERE id = ?').run(text(b.description), f);
       if ('priority' in b) db.prepare('UPDATE features SET priority = ? WHERE id = ?').run(text(b.priority), f);
@@ -609,6 +647,11 @@ export const edits = {
            WHERE o.feature_id = feature_items.feature_id AND o.kind = feature_items.kind AND o.scope_id IS NULL AND lower(o.text) = lower(feature_items.text))`,
       ).run(into, SCOPE_ITEM_KIND);
       const scopeBase = nextSort('scopes', 'feature_id = ?', into);
+      // A "To remove" mark of the source feature stays on each of its scopes that has no mark of its own.
+      db.prepare(
+        `UPDATE scopes SET remove_reason = f.remove_reason, remove_at = f.remove_at, remove_by = f.remove_by
+         FROM features f WHERE f.id = scopes.feature_id AND scopes.feature_id = ? AND f.remove_reason IS NOT NULL AND scopes.remove_reason IS NULL`,
+      ).run(from);
       db.prepare('UPDATE scopes SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, scopeBase, from);
       // Scope groups: a group with the title of a target group joins it. The others move after the target's groups.
       const groupBase = nextSort('scope_groups', 'feature_id = ?', into);
@@ -768,7 +811,9 @@ export const edits = {
     const sc = ownScope(p, id);
     const s = sc.id;
     const title = 'title' in b ? need(b.title, 'Title') : null;
+    if ('toRemove' in b) toRemoveOf(b.toRemove);
     tx(() => {
+      if ('toRemove' in b) setToRemove('scopes', s, b.toRemove);
       if (title !== null) {
         const before = (db.prepare('SELECT title FROM scopes WHERE id = ?').get(s) as any).title as string;
         if (before.trim().toLowerCase() !== title.toLowerCase()) buryScope(sc.featureId, s, before);

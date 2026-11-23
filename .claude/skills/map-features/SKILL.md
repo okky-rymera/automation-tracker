@@ -54,6 +54,10 @@ calls). The tool keeps the rules that protect people's work:
   The report says so, and the tool skips the requirements, links and screenshots of that scope in the payload.
   Do not send the scope again. If the moved scope belongs in this unit, send it under its new feature.
 - A scope that a person renamed is still found by its old title, so the tool does not make a copy.
+- It does not write to a feature or a scope marked "To remove" (`toRemove` in `features` and `feature`).
+  A person decided that it must go, with its tests. The report says so, and the tool skips the text, scopes,
+  links, code and screenshots for it. Do not link a new test to it: link the test to a scope that stays,
+  or put it in `leftOut`. Set or clear the mark only when a person asks (see CLAUDE.md).
 - It marks what it writes as "AI draft" and its links as "linked by AI", so the app shows them for review.
 
 Links come only from people and from this skill. `@feature:` tags in the tests

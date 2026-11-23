@@ -36,7 +36,7 @@ export function FeatureList({ t }: { t: Tracker }) {
   const codeOf = (i: FeatureInfo) => (i.code ? i.code.t / i.code.n : 1);
   const all = t.info.filter(
     (i) =>
-      (flt === 'all' || (flt === 'review' && i.toReview) || (flt === 'gaps' && gaps(i) > 0)) &&
+      (flt === 'all' || (flt === 'review' && i.toReview) || (flt === 'gaps' && gaps(i) > 0) || (flt === 'remove' && (i.m.remove > 0 || !!i.f.toRemove))) &&
       (grp === 'all' || String(i.f.groupId ?? 'none') === grp) &&
       (pri === 'all' || i.f.priority === (pri === 'none' ? '' : pri)) &&
       (!ql ||
@@ -90,7 +90,7 @@ export function FeatureList({ t }: { t: Tracker }) {
         </select>
         <label className="sr" htmlFor="fst">Status</label>
         <select id="fst" className="input sel" value={flt} onChange={(e) => (setFlt(e.target.value), setPage(1))}>
-          <option value="all">Any status</option><option value="review">To review</option><option value="gaps">Has scopes to cover</option>
+          <option value="all">Any status</option><option value="review">To review</option><option value="gaps">Has scopes to cover</option><option value="remove">Has scopes “To remove”</option>
         </select>
         {has && <button className="btn btn-ghost btn-sm" onClick={clear}>Clear filters</button>}
       </div>
@@ -107,7 +107,9 @@ export function FeatureList({ t }: { t: Tracker }) {
             </div>
             {rows.map((i) => (
               <div className="gr cols-fl fl-row" role="row" key={i.f.id}>
-                <div role="cell"><a className="rowbtn" href={link(p, 'feature', i.f.id)} style={{ textDecoration: 'none' }}><span className="mono faint">F-{i.f.id}</span> {i.f.title}</a></div>
+                <div role="cell"><a className="rowbtn" href={link(p, 'feature', i.f.id)} style={{ textDecoration: 'none' }}><span className="mono faint">F-{i.f.id}</span> {i.f.title}</a>
+                  {(i.m.remove > 0 || i.f.toRemove) && <span className="tag tag-remove" style={{ marginLeft: 6 }} title="Scopes marked “To remove”. They do not count in the coverage.">{i.f.toRemove ? 'To remove' : `${i.m.remove} to remove`}</span>}
+                </div>
                 <div role="cell" style={{ fontSize: 13 }}>{i.group}</div>
                 <div role="cell" style={{ fontSize: 13 }}>{i.f.priority ? PRI_LABEL[i.f.priority] : '–'}</div>
                 <div role="cell" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

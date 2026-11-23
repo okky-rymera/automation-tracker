@@ -31,7 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { db, now, tx } from './db.ts';
 import { changeReport, type ChangeReport } from './changes.ts';
-import { ITEM_KINDS } from './features.ts';
+import { ITEM_KINDS, featuresToRemove } from './features.ts';
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, mapLoopRunning, processAlive, run, syncRunning, type Job } from './sync.ts';
 import { LIMIT_TEXT, notePlanUse, readPlanLine } from './plan-limit.ts';
@@ -259,6 +259,8 @@ export function queueReview(p: ProjectConfig): string {
     return `No change report for ${from.slice(0, 8)}..${to.slice(0, 8)} (${(e as Error).message}). The next AI review tries again.`;
   }
   const add = db.prepare('INSERT INTO ai_review_pending (project_id, feature_id, from_commit) VALUES (?, ?, ?) ON CONFLICT (project_id, feature_id) DO NOTHING');
+  // A feature marked "To remove" goes in the list too. runReview skips it while it has the mark, so a
+  // cleared mark does not lose the review of these changes.
   tx(() => {
     for (const x of r.review) add.run(p.id, x.featureId, from);
     setCommit();
@@ -301,7 +303,11 @@ export async function runReview(p: ProjectConfig, o: ReviewOptions = {}): Promis
   const say = o.onLine ?? (() => {});
   say(`AI review: ${queueReview(p)}`);
   const to = copyHead(p);
-  const pending = pendingReviews(p.id).filter((x) => !x.parked);
+  // A feature marked "To remove" waits in the list: the AI does not change it while it has the mark.
+  const marked = featuresToRemove(p.id);
+  const waiting = pendingReviews(p.id).filter((x) => marked.has(x.featureId)).length;
+  if (waiting) say(`${waiting} features marked "To remove" wait. They are reviewed when the mark is cleared.`);
+  const pending = pendingReviews(p.id).filter((x) => !x.parked && !marked.has(x.featureId));
   if (!to || !pending.length) return { checked: 0, stoppedBy: null };
   const groups = new Map<string, number[]>();
   for (const x of pending) groups.set(x.fromCommit, [...(groups.get(x.fromCommit) ?? []), x.featureId]);
@@ -519,6 +525,7 @@ ${diff || '(no changes in these files)'}
   - Text that a person wrote or checked (aiDraft false) cannot change. When it is now wrong, add a question that says what is wrong and what the code does now.
   - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. A scope that is now wrong cannot be deleted here: add a question for it.
   - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks.
+  - A scope with "toRemove": a person decided that it must go. Do not change it, link a test to it, or add the same behavior again as a new scope.
 - "summary": 1–3 plain sentences for the person who checks your work: what changed in the code, and what you changed in the feature.
 
 ## Writing style
@@ -791,7 +798,12 @@ export async function aiUpdate(p: ProjectConfig, o: AiUpdateOptions): Promise<Ai
     // Let the caller (an HTTP request) answer first: the steps below can take some seconds.
     await new Promise((res) => setImmediate(res));
     r = o.report ?? changeReport(p, o.from, o.to);
-    ids.push(...(o.features?.length ? o.features : r.review.map((x) => x.featureId)));
+    // Never a feature marked "To remove": apply would save nothing for it, so the model run is a waste.
+    const marked = featuresToRemove(p.id);
+    const asked = o.features?.length ? o.features : r.review.map((x) => x.featureId);
+    const skip = asked.filter((id) => marked.has(id));
+    if (skip.length) say(`Skipped, marked "To remove": ${skip.map((id) => `F-${id}`).join(', ')}`);
+    ids.push(...asked.filter((id) => !marked.has(id)));
     say(`${r.from.slice(0, 8)}..${r.to.slice(0, 8)}: ${ids.length} features to check with ${model}, at most $${budgetUsd} each`);
     const insert = db.prepare(
       "INSERT INTO ai_updates (project_id, feature_id, sync_id, from_commit, to_commit, model, started_at, status, owner_pid) VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', ?)",

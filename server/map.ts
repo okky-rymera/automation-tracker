@@ -363,7 +363,13 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: M
       if (bad.length) throw new EditError(`code: ${file} has no function ${bad.map((b) => `"${b}"`).join(', ')} in the coverage run. Use the names that "code" lists`);
     }
     const keys = list<string | number>(e.scopes, `scopes of code ${file}`);
-    const want = keys.length ? resolveScopes(fid, keys, scopeIds, `Code ${file}`, report) : [];
+    const marked = { n: 0 };
+    const want = keys.length ? resolveScopes(fid, keys, scopeIds, `Code ${file}`, report, marked) : [];
+    // Code of marked scopes only is not added. Code of deleted or moved scopes only is still saved for the whole feature.
+    if (keys.length && !want.length && marked.n) {
+      report.push(`F-${fid} code ${file}: not added or changed, because its scopes are marked "To remove".`);
+      continue;
+    }
     for (const fn of fns.length ? fns : ['']) {
       const cur = db.prepare('SELECT id, removed, source FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
       const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
@@ -422,9 +428,12 @@ function features(p: ProjectConfig) {
       title: f.title,
       group: groups.find((g) => g.id === f.group_id)?.title ?? null,
       aiFields: json(f.ai_fields),
+      ...(f.remove_reason ? { toRemove: f.remove_reason } : {}),
       ...(f.description ? { description: f.description.length > 160 ? `${f.description.slice(0, 160)}… (cut: see "feature")` : f.description } : {}),
       roles: labelsOf(f.id, LABEL_KINDS.roles),
-      scopes: (db.prepare('SELECT id, title FROM scopes WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((s) => `S-${s.id} ${s.title}`),
+      scopes: (db.prepare('SELECT id, title, remove_reason FROM scopes WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map(
+        (s) => `S-${s.id} ${s.title}${s.remove_reason ? ` [To remove: ${s.remove_reason}]` : ''}`,
+      ),
       links: (db.prepare('SELECT COUNT(*) AS n FROM links WHERE feature_id = ? AND removed = 0').get(f.id) as any).n,
       screenshots: shotCount.get(f.id) ?? 0,
     })),
@@ -467,11 +476,13 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
     description: f.description,
     priority: f.priority,
     aiFields: json(f.ai_fields),
+    toRemove: f.remove_reason ? { reason: f.remove_reason, by: f.remove_by, at: f.remove_at } : null,
     ...Object.fromEntries(Object.entries(LABEL_KINDS).map(([key, kind]) => [key, labelsOf(f.id, kind)])),
     ...Object.fromEntries(Object.entries(ITEM_KINDS).map(([key, kind]) => [key, itemsOf(f.id, kind)])),
     scopeGroups: (db.prepare('SELECT title FROM scope_groups WHERE feature_id = ? ORDER BY sort, id').all(f.id) as any[]).map((g) => g.title),
-    scopes: (db.prepare('SELECT s.id, s.title, s.description, g.title AS grp, s.ai_fields FROM scopes s LEFT JOIN scope_groups g ON g.id = s.group_id WHERE s.feature_id = ? ORDER BY s.sort, s.id').all(f.id) as any[]).map((s) => ({
+    scopes: (db.prepare('SELECT s.id, s.title, s.description, g.title AS grp, s.ai_fields, s.remove_reason FROM scopes s LEFT JOIN scope_groups g ON g.id = s.group_id WHERE s.feature_id = ? ORDER BY s.sort, s.id').all(f.id) as any[]).map((s) => ({
       id: `S-${s.id}`, title: s.title, group: s.grp ?? null, description: s.description, requirements: itemsOf(f.id, SCOPE_ITEM_KIND, s.id), aiFields: json(s.ai_fields),
+      ...(s.remove_reason ? { toRemove: s.remove_reason } : {}),
     })),
     links: links.slice(0, all ? undefined : 25).map((l) => ({
       testId: l.testId, title: l.title, framework: l.framework, source: l.source, removed: !!l.removed, scopes: scopeNames(l.id),
@@ -626,6 +637,13 @@ function apply(p: ProjectConfig, file: string | undefined) {
       // Before the loop: the change count of each feature must not see it.
       sweepBefore();
       for (const inF of body.features) {
+        // A person marked the feature "To remove": the AI skills do not change it or add to it.
+        const marked = inF?.id ? (db.prepare('SELECT remove_reason FROM features WHERE id = ? AND project_id = ?').get(Number(inF.id), p.id) as any)?.remove_reason : null;
+        if (marked) {
+          report.push(`F-${inF.id}: marked "To remove" (${marked}). Nothing written to it: no text, scope, link, code or screenshot.`);
+          touched.push(Number(inF.id));
+          continue;
+        }
         const before = totalChanges();
         const fid = writeFeature(p, inF, report);
         touched.push(fid);
@@ -904,6 +922,10 @@ function writeScope(fid: number, s: { id?: number | string; title: string; descr
     }
     if (gone) row = db.prepare('SELECT * FROM scopes WHERE id = ?').get(gone.id);
   }
+  if (row?.remove_reason) {
+    report.push(`F-${fid} scope S-${row.id} "${row.title}": marked "To remove" (${row.remove_reason}). Not changed. Its requirements, links and screenshots in this payload were skipped.`);
+    return null;
+  }
   if (sid && !row) {
     const now = db.prepare('SELECT feature_id FROM scopes WHERE id = ?').get(sid) as any;
     throw new EditError(
@@ -1007,19 +1029,25 @@ function addScopeTags(table: 'link_scopes' | 'screenshot_scopes' | 'code_scopes'
  * Scope IDs of feature fid from titles (of this payload or the feature) or S-ids.
  * A scope that a person deleted or moved away is left out, with a line in the report.
  */
-function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<string, number | null>, what: string, report: string[]): number[] {
+function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<string, number | null>, what: string, report: string[], marked?: { n: number }): number[] {
   const ids = keys
     .map((k) => String(k).trim())
     .filter(Boolean)
     .map((key) => {
       if (scopeIds.has(key.toLowerCase())) return scopeIds.get(key.toLowerCase())!;
       const byId = SCOPE_RE.exec(key);
-      const found = byId
-        ? (db.prepare('SELECT id FROM scopes WHERE id = ? AND feature_id = ?').get(Number(byId[1]), fid) as any)?.id
-        : (db.prepare('SELECT id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any)?.id;
-      if (found) return found as number;
+      const row = byId
+        ? (db.prepare('SELECT id, remove_reason FROM scopes WHERE id = ? AND feature_id = ?').get(Number(byId[1]), fid) as any)
+        : (db.prepare('SELECT id, remove_reason FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key) as any);
+      const leaveMarked = () => (marked && marked.n++, report.push(`${what}: scope "${key}" left out: it is marked "To remove".`), null);
+      if (row?.remove_reason) return leaveMarked();
+      if (row) return row.id as number;
       const gone = goneScope(fid, byId ? { id: Number(byId[1]) } : { title: key });
-      if (gone && 'id' in gone) return gone.id;
+      if (gone && 'id' in gone) {
+        // An old title of a scope that a person renamed: the mark counts too.
+        if ((db.prepare('SELECT remove_reason FROM scopes WHERE id = ?').get(gone.id) as any)?.remove_reason) return leaveMarked();
+        return gone.id;
+      }
       if (gone) return void report.push(`${what}: scope "${key}" left out: ${gone.skip}.`), null;
       throw new EditError(`${what}: scope "${key}" is not in F-${fid}`);
     });
@@ -1038,7 +1066,7 @@ function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map
   const key = captionKey(caption);
   const keys = list<string | number>(x.scopes, `scopes of screenshot "${caption}"`);
   const want = resolveScopes(fid, keys, scopeIds, `Screenshot "${caption}"`, report);
-  if (keys.length && !want.length) return void report.push(`F-${fid} screenshot "${caption}": not added, because a person deleted or moved all its scopes.`);
+  if (keys.length && !want.length) return void report.push(`F-${fid} screenshot "${caption}": not added, because a person deleted, moved or marked "To remove" all its scopes.`);
   const label = `F-${fid} screenshot "${caption}"`;
 
   const cur = db.prepare('SELECT * FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1').get(fid, key) as any;
@@ -1084,7 +1112,7 @@ function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<strin
   const keys = [...list<string | number>(l.scopes, `scopes of ${testId}`), ...(l.scope !== undefined && l.scope !== null ? [l.scope] : [])];
   const want = resolveScopes(fid, keys, scopeIds, `Link ${testId}`, report);
   if (keys.length && !want.length) {
-    report.push(`${testId} -> F-${fid}: link not added or changed, because a person deleted or moved all its scopes. Link it by hand if it still belongs here.`);
+    report.push(`${testId} -> F-${fid}: link not added or changed, because a person deleted, moved or marked "To remove" all its scopes. Link it by hand if it still belongs here.`);
     return;
   }
   const addScopes = (linkId: number, ids: number[]) => addScopeTags('link_scopes', linkId, ids);

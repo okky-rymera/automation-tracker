@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { featureTotal, mutate, pct, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot } from '../../api';
-import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, scopeLinks, scopeStatus, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
+import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, scopeLinks, scopeStatus, scopeToRemove, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
 import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
@@ -53,7 +53,8 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
     (m.fail ? ` ${m.fail} have only failing tests.` : '') +
     (m.cy ? ` ${m.cy} have only Cypress tests.` : '') +
     (m.skip ? ` ${m.skip} have only skipped tests.` : '') +
-    (m.none ? ` ${m.none} have no test.` : '');
+    (m.none ? ` ${m.none} have no test.` : '') +
+    (m.remove ? ` ${m.remove} ${m.remove === 1 ? 'is' : 'are'} marked "To remove" and ${m.remove === 1 ? 'does' : 'do'} not count.` : '');
   const reviewTxt = i.nChanges
     ? `${i.nChanges} ${i.nChanges === 1 ? 'change waits' : 'changes wait'} for your review. They are marked below.`
     : f.reviewWanted
@@ -61,7 +62,7 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
       : f.reviewedAt
         ? `Reviewed on ${new Date(f.reviewedAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}. No change since.`
         : 'No change waits for a review.';
-  const tabs: [Tab, string][] = [['scopes', `Scopes ${m.total}`], ['details', 'Details'], ['code', 'Code'], ['shots', `Screenshots ${f.screenshots.length}`]];
+  const tabs: [Tab, string][] = [['scopes', `Scopes ${f.scopes.length}`], ['details', 'Details'], ['code', 'Code'], ['shots', `Screenshots ${f.screenshots.length}`]];
   const groupSel = async (v: string) => {
     if (v === '__new') {
       const title = prompt('Name of the new group');
@@ -93,6 +94,7 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
             <IdBtn label={`F-${f.id}`} className="btn btn-ghost btn-sm mono" />
             {i.toReview && <span className="tag tag-changed">To review</span>}
+            {f.toRemove && <span className="tag tag-remove">To remove</span>}
             {f.aiFields.length > 0 && <span className="tag tag-ai" title="The AI wrote these fields and no person checked them yet.">AI draft: {f.aiFields.join(', ')}</span>}
             <span className="muted" style={{ fontSize: 13 }}>{reviewTxt}</span>
             <span style={{ flex: 1 }} />
@@ -102,6 +104,14 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
               label="More actions"
               items={[
                 { label: 'Mark as not reviewed', hidden: i.toReview, run: () => act(() => mutate('POST', `${url}/uncheck`, {}), `F-${f.id} marked as not reviewed`) },
+                {
+                  label: 'Mark as “To remove”…', hidden: !!f.toRemove,
+                  run: () => {
+                    const reason = askRemoveReason(`F-${f.id} “${f.title}”`);
+                    if (reason) patch({ toRemove: reason }, `F-${f.id} marked “To remove”`, { toRemove: null });
+                  },
+                },
+                { label: 'Clear the “To remove” mark', hidden: !f.toRemove, run: () => patch({ toRemove: null }, `F-${f.id}: “To remove” mark cleared`, f.toRemove ? { toRemove: f.toRemove } : undefined) },
                 { label: 'Merge another feature into this one…', run: () => (setMq(''), setMerge(true)) },
                 {
                   label: 'Delete feature', danger: true,
@@ -111,6 +121,12 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
               ]}
             />
           </div>
+          {f.toRemove && (
+            <div className="remove-box">
+              <strong>To remove:</strong> <span>{f.toRemove.reason}</span>
+              <span className="faint">{removeWho(f.toRemove)}. Its scopes do not count in the coverage, and the AI does not add to it. Delete the feature or move its scopes when its tests are gone.</span>
+            </div>
+          )}
           <div ref={titleBox}>
             <InlineText id="ftitle" label="Feature title" className="ie-title" value={f.title} placeholder="Feature title" required="A feature needs a title. The old title is back." onSave={(title) => patch({ title }, 'Title saved', { title: f.title })} />
           </div>
@@ -196,12 +212,18 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
   const p = t.project;
   const base = `/api/projects/${p}`;
   const act = useAct();
-  const [flt, setFlt] = useState<'all' | 'gaps' | 'review'>('all');
+  const [flt, setFlt] = useState<'all' | 'gaps' | 'review' | 'remove'>('all');
   const [openAll, setOpenAll] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addingGroup, setAddingGroup] = useState(false);
   const status = (id: number) => scopeStatus(f, id, t.testById);
-  const shown = (s: ScopeX) => flt === 'all' || (flt === 'gaps' && status(s.id) !== 'ok') || (flt === 'review' && scopeChanged(f, s));
+  const marked = (s: ScopeX) => scopeToRemove(f, s);
+  // The "To remove" button goes when the last mark goes: show all scopes again.
+  useEffect(() => {
+    if (flt === 'remove' && !i.m.remove) setFlt('all');
+  }, [flt, i.m.remove]);
+  const shown = (s: ScopeX) =>
+    flt === 'all' || (flt === 'gaps' && !marked(s) && status(s.id) !== 'ok') || (flt === 'review' && scopeChanged(f, s)) || (flt === 'remove' && marked(s));
   const groups: { id: number | null; title: string }[] = [...f.scopeGroups.map((g) => ({ id: g.id as number | null, title: g.title })), { id: null, title: f.scopeGroups.length ? 'No group' : 'Scopes' }];
   const featureLinks = f.links.filter((l) => !l.scopeIds.length);
 
@@ -217,9 +239,10 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
         <Seg
           label="Show scopes" value={flt} onChange={setFlt}
           items={[
-            { key: 'all', label: 'All', n: i.m.total },
+            { key: 'all', label: 'All', n: f.scopes.length },
             { key: 'gaps', label: 'Not covered', n: i.m.total - i.m.ok },
             { key: 'review', label: 'To review', n: f.scopes.filter((s) => scopeChanged(f, s)).length },
+            ...(i.m.remove ? [{ key: 'remove' as const, label: 'To remove', n: i.m.remove }] : []),
           ]}
         />
         <span style={{ flex: 1 }} />
@@ -237,9 +260,11 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
       {groups.map((g) => {
         const all = f.scopes.filter((s) => s.groupId === g.id) as ScopeX[];
         if (g.id === null && !all.length) return null;
-        const list = all.filter(shown);
+        // Scopes marked "To remove" go to the end of their group, in their own order.
+        const list = [...all.filter((s) => shown(s) && !marked(s)), ...all.filter((s) => shown(s) && marked(s))];
         if (!list.length && (flt !== 'all' || g.id === null)) return null;
-        const ok = all.filter((s) => status(s.id) === 'ok').length;
+        const counted = all.filter((s) => !marked(s));
+        const ok = counted.filter((s) => status(s.id) === 'ok').length;
         return (
           <div key={g.id ?? 'none'} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="grp-title">
@@ -248,7 +273,7 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
               ) : (
                 <InlineText label="Scope group name" className="h3" value={g.title} required="A group needs a name. The old name is back." onSave={(title) => act(() => mutate('PATCH', `${base}/scope-groups/${g.id}`, { title }), 'Group renamed')} />
               )}
-              <span className="faint" style={{ fontSize: 12 }}>{all.length ? `${ok} of ${all.length} covered` : 'No scope yet'}</span>
+              <span className="faint" style={{ fontSize: 12 }}>{counted.length ? `${ok} of ${counted.length} covered` : all.length ? 'All marked “To remove”' : 'No scope yet'}</span>
               {g.id !== null && (
                 <button
                   className="icon-btn icon-danger" aria-label={`Delete group ${g.title}`} title="Delete group (its scopes stay, with no group)"
@@ -294,6 +319,7 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
   const url = `${base}/scopes/${s.id}`;
   const act = useAct();
   const st = scopeStatus(f, s.id, t.testById);
+  const marked = scopeToRemove(f, s);
   const changed = scopeChanged(f, s);
   const chgLabel = s.aiFields.length ? (s.aiFields.includes('title') && !(s.before && 'title' in s.before) ? 'New' : 'Changed') : 'Has changes';
   const links = f.links.filter((l) => l.scopeIds.includes(s.id));
@@ -307,14 +333,18 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
   const tags = (
     <>
       {changed && <span className="tag tag-changed">{chgLabel}</span>}
-      <span className={`tag ${ST_TAG[st]}`}>{ST_LABEL[st]}</span>
-      {codeNoTest && <span className="tag tag-skip" title="The AI put plugin code on this scope, but no test is linked to it. Write a test for it.">Code, no test</span>}
+      {marked ? (
+        <span className="tag tag-remove" title={(s.toRemove ?? f.toRemove)?.reason}>To remove</span>
+      ) : (
+        <span className={`tag ${ST_TAG[st]}`}>{ST_LABEL[st]}</span>
+      )}
+      {codeNoTest && !marked && <span className="tag tag-skip" title="The AI put plugin code on this scope, but no test is linked to it. Write a test for it.">Code, no test</span>}
     </>
   );
   const q = mq.trim().toLowerCase();
   const have = new Set(links.map((l) => l.testId));
   return (
-    <div className="scope" id={`scope-${s.id}`}>
+    <div className={`scope${marked ? ' scope-marked' : ''}`} id={`scope-${s.id}`}>
       {!open ? (
         <div className="scope-head-wrap">
           <IdBtn label={`S-${s.id}`} text={`F-${f.id}/S-${s.id}`} />
@@ -336,6 +366,15 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
             <button className="icon-btn" onClick={toggle} aria-expanded aria-label="Close scope" title="Close"><span style={{ display: 'inline-flex', transform: 'rotate(90deg)' }}><INext s={14} /></span></button>
           </div>
           <div className="scope-body">
+            {s.toRemove ? (
+              <div className="remove-box">
+                <strong>To remove:</strong> <span>{s.toRemove.reason}</span>
+                <span className="faint">{removeWho(s.toRemove)}. Remove or move its tests, then delete or move the scope.</span>
+                <button className="btn btn-sm" onClick={() => act(() => mutate('PATCH', url, { toRemove: null }), `S-${s.id}: “To remove” mark cleared`, () => mutate('PATCH', url, { toRemove: s.toRemove }, { quiet: true }))}>Clear mark</button>
+              </div>
+            ) : f.toRemove ? (
+              <div className="remove-box"><strong>To remove:</strong> <span>the whole feature has the mark.</span></div>
+            ) : null}
             {s.before && 'title' in s.before && s.before.title && (
               <div className="was-box"><strong>Title before the AI change:</strong> <span className="was-old">{s.before.title}</span></div>
             )}
@@ -399,6 +438,15 @@ function ScopeCard({ t, f, s, open, toggle }: { t: Tracker; f: FeatureX; s: Scop
                   {f.scopeGroups.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}
                 </select>
               </label>
+              {!s.toRemove && (
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    const reason = askRemoveReason(`S-${s.id} “${s.title}”`);
+                    if (reason) act(() => mutate('PATCH', url, { toRemove: reason }), `S-${s.id} marked “To remove”`, () => mutate('PATCH', url, { toRemove: null }, { quiet: true }));
+                  }}
+                >Mark “To remove”…</button>
+              )}
               <button className="btn btn-sm" onClick={() => (setMq(''), setModal('move'))}>Move to feature…</button>
               <button
                 className="btn btn-sm btn-danger"
@@ -714,4 +762,16 @@ function ScopeTags({ f, title, sub, ids, url, onClose }: { f: FeatureX; title: s
       ))}
     </Dialog>
   );
+}
+
+/** Asks for the reason of a "To remove" mark. Null: the person cancelled or typed nothing. */
+function askRemoveReason(what: string): string | null {
+  const r = prompt(`Why must ${what} go? Its tests stay linked until you remove them. It leaves the coverage counts, and the AI does not add to it.`);
+  return r?.trim() || null;
+}
+
+/** Who set the mark, and when. */
+function removeWho(m: { at: string; by: 'person' | 'ai' }) {
+  const day = new Date(m.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  return `${m.by === 'ai' ? 'Set by the AI for a person' : 'Set by a person'} on ${day}`;
 }

@@ -86,7 +86,8 @@ export type ScopeStatus = 'ok' | 'fail' | 'cy' | 'skipped' | 'none';
 export const ST_LABEL: Record<ScopeStatus, string> = { ok: 'Covered', fail: 'Failing', skipped: 'Skipped', cy: 'Cypress only', none: 'No test' };
 export const ST_TAG: Record<ScopeStatus, string> = { ok: 'tag-ok', fail: 'tag-fail', skipped: 'tag-skip', cy: 'tag-cy', none: 'tag-none' };
 
-export interface Metrics { total: number; ok: number; fail: number; skip: number; cy: number; none: number }
+/** Scope counts of a feature. total and the states leave out the scopes marked "To remove"; remove counts them. */
+export interface Metrics { total: number; ok: number; fail: number; skip: number; cy: number; none: number; remove: number }
 
 /** One change to review: an AI draft mark, a link to a test that is gone, or a linked test that the last sync changed. */
 export interface Change {
@@ -147,7 +148,7 @@ export function scopesToTest(t: Tracker): { fid: number; feature: string; sid: n
   const out: { fid: number; feature: string; sid: number; scope: string; code: number }[] = [];
   for (const f of t.fd.features) {
     const tested = new Set(f.links.flatMap((l) => l.scopeIds));
-    for (const s of f.scopes) if (code.has(s.id) && !tested.has(s.id)) out.push({ fid: f.id, feature: f.title, sid: s.id, scope: s.title, code: code.get(s.id)! });
+    for (const s of f.scopes) if (code.has(s.id) && !tested.has(s.id) && !scopeToRemove(f, s)) out.push({ fid: f.id, feature: f.title, sid: s.id, scope: s.title, code: code.get(s.id)! });
   }
   return out.sort((a, b) => b.code - a.code || a.fid - b.fid);
 }
@@ -220,9 +221,31 @@ export function scopeStatus(f: Feature, scopeId: number, byId: Map<string, TestI
   return 'none';
 }
 
+/** The scope has the "To remove" mark, or its feature has it. */
+export const scopeToRemove = (f: Feature, s: Scope) => !!(f.toRemove || s.toRemove);
+
+/**
+ * The test is linked only to items marked "To remove": each active link is to a marked feature, or only to
+ * marked scopes. Then the test must go too (a Cypress test: do not convert it). False for a test with no link.
+ */
+export function testToRemove(t: Pick<Tracker, 'linkedTo' | 'infoById'>, testId: string): boolean {
+  const ls = t.linkedTo.get(testId) ?? [];
+  return ls.length > 0 && ls.every(({ fid, link: l }) => {
+    const f = t.infoById.get(fid)?.f;
+    if (!f) return false;
+    if (f.toRemove) return true;
+    return l.scopeIds.length > 0 && l.scopeIds.every((sid) => !!f.scopes.find((s) => s.id === sid)?.toRemove);
+  });
+}
+
 export function metrics(f: Feature, byId: Map<string, TestInfo>): Metrics {
-  const m: Metrics = { total: f.scopes.length, ok: 0, fail: 0, skip: 0, cy: 0, none: 0 };
+  const m: Metrics = { total: 0, ok: 0, fail: 0, skip: 0, cy: 0, none: 0, remove: 0 };
   for (const s of f.scopes) {
+    if (scopeToRemove(f, s)) {
+      m.remove++;
+      continue;
+    }
+    m.total++;
     const st = scopeStatus(f, s.id, byId);
     if (st === 'ok') m.ok++;
     else if (st === 'fail') m.fail++;

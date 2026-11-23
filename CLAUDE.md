@@ -39,6 +39,7 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Add a scope group to a feature | `POST .../features/:fid/scope-groups` with `{ "title" }` |
 | Rename or delete a scope group | `PATCH .../scope-groups/:gid` with `{ "title" }`, or `DELETE`. A delete keeps the scopes, with no group |
 | Move a scope to another feature | `POST .../scopes/:sid/move` with `{ "featureId": <id> }` |
+| Mark a feature or scope "To remove" | `PATCH .../features/:fid` or `.../scopes/:sid` with `{ "toRemove": { "reason": "<why>", "by": "ai" } }`. `{ "toRemove": null }` clears it |
 | Add a requirement or list item | `POST .../features/:fid/items` with `{ "kind", "text", "scopeId"? }` |
 | Link a test | `POST .../links` with `{ "testId", "scopeId" }` or `{ "testId", "featureId" }` |
 | Set the scopes of a link | `PATCH .../links/:lid` with `{ "scopeIds": [] }` |
@@ -52,6 +53,18 @@ The command line and the request bodies accept a copied ID (`F-12/S-40` is scope
 
 The command line can move a scope too. It does not need the server:
 `npm run -s map -- move-scope <project> <scope id> <feature id>`.
+
+### What the "To remove" mark does
+
+Use it when the user wants a feature or scope to go, but its tests are still there.
+Set the mark only when the user asks. Send `"by": "ai"`, so the app shows who set it.
+
+- The links, code and screenshots stay.
+- The item does not count in the coverage counts. A marked feature counts all its scopes as marked.
+- The Tests page shows "To remove" on a test that has links only to marked items. A Cypress test then shows "do not convert".
+- The AI skills do not write to a marked item. The AI review skips a marked feature.
+- A moved scope keeps its own mark. A scope that has only the mark of its feature loses it when it moves out.
+- When the tests are gone, delete the scope or the feature.
 
 ### What a move does
 

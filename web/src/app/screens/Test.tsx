@@ -3,7 +3,7 @@ import { useApi } from '../../api';
 import type { Tracker } from '../data';
 import { go, link, type Route } from '../route';
 import { IdBtn, INext, IPlus, IPrev, Seg, copyText, useSay } from '../ui';
-import { LinkToScope, TestLinks, testOrder, testTag } from './Tests';
+import { LinkToScope, RemoveTag, TestLinks, testOrder, testTag } from './Tests';
 
 interface TestSource { id: string; framework: 'playwright' | 'cypress'; file: string; repoPath: string; source: string; start: number; end: number }
 
@@ -84,6 +84,7 @@ export function TestPage({ t, route }: { t: Tracker; route: Route }) {
           <span className={`tag ${isCy ? 'tag-cy' : 'tag-ro'}`}>{isCy ? 'Cypress' : 'Playwright'}</span>
           <span className={`tag ${stCls}`}>{stLabel}</span>
           {x.tags.map((g) => <span key={g} className="tag tag-ro mono">{g}</span>)}
+          <RemoveTag t={t} x={x} />
           <IdBtn label={x.id} />
         </div>
         <h1 className="h1">{x.title}</h1>

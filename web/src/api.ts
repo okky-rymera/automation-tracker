@@ -98,6 +98,15 @@ export interface Scope {
   /** Fields the skill wrote that no person checked yet. */
   aiFields: string[];
   aiDraft: boolean;
+  /** "To remove" mark: the scope must go, with its tests. Null: no mark. */
+  toRemove: ToRemove | null;
+}
+
+/** "To remove" mark of a feature or a scope. by "ai": an AI that a person asked to set it. */
+export interface ToRemove {
+  reason: string;
+  at: string;
+  by: 'person' | 'ai';
 }
 
 /** An image of the feature. The image loads from screenshotUrl(). */
@@ -150,6 +159,8 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   reviewWanted: boolean;
   /** When an AI skill last saved something in the feature. */
   aiChangedAt: string | null;
+  /** "To remove" mark: the feature must go, with its tests. Its scopes count as marked too. Null: no mark. */
+  toRemove: ToRemove | null;
 }
 
 /** One piece of a feature's code: a whole file (function ''), or the functions with one name in a file. */

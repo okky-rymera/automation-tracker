@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { mutate, pct } from '../../api';
-import { scopesToTest, type TestInfo, type Tracker } from '../data';
+import { scopeToRemove, scopesToTest, testToRemove, type TestInfo, type Tracker } from '../data';
 import { link, setQuery, useSticky, withBack, type Route } from '../route';
 import { ILock, Picker, Seg, useAct, type PickRow } from '../ui';
 
-type Show = 'none' | 'all' | 'skipped' | 'failed' | 'new';
+type Show = 'none' | 'all' | 'skipped' | 'failed' | 'new' | 'remove';
 
 export function testTag(x: TestInfo | undefined): [string, string] {
   if (!x) return ['Gone', 'tag-fail'];
@@ -29,6 +29,16 @@ function codeShare(tests: TestInfo[]) {
 /** Test order of the list as it shows now: the test page uses it for "Previous" and "Next". */
 export let testOrder: string[] = [];
 
+/** "To remove" badge of a test that is linked only to marked items. A Cypress test must not be converted. */
+export function RemoveTag({ t, x }: { t: Tracker; x: TestInfo }) {
+  if (!testToRemove(t, x.id)) return null;
+  return (
+    <span className="tag tag-remove" title="All its links are to scopes or features marked “To remove”. Delete the test, or link it to a scope that stays.">
+      {x.fw === 'cypress' ? 'To remove, do not convert' : 'To remove'}
+    </span>
+  );
+}
+
 /** Links of a test, as "F-3/S-16 title" lines. */
 export function TestLinks({ t, x, backLabel }: { t: Tracker; x: TestInfo; backLabel: string }) {
   const ls = t.linkedTo.get(x.id) ?? [];
@@ -42,6 +52,7 @@ export function TestLinks({ t, x, backLabel }: { t: Tracker; x: TestInfo; backLa
             <div key={`${fid}`}>
               <a className="linkbtn mono" href={withBack(link(t.project, 'feature', fid), backLabel)}>F-{fid}</a>{' '}
               <span className="faint" style={{ fontSize: 12 }}>{ftitle} (the whole feature)</span>
+              {f?.toRemove && <span className="tag tag-remove" style={{ marginLeft: 6 }}>To remove</span>}
             </div>,
           ];
         }
@@ -49,6 +60,7 @@ export function TestLinks({ t, x, backLabel }: { t: Tracker; x: TestInfo; backLa
           <div key={`${fid}/${sid}`}>
             <a className="linkbtn mono" href={withBack(link(t.project, 'feature', fid, { scope: sid }), backLabel)}>F-{fid}/S-{sid}</a>{' '}
             <span className="faint" style={{ fontSize: 12 }}>{f?.scopes.find((s) => s.id === sid)?.title}</span>
+            {(f?.toRemove || f?.scopes.find((s) => s.id === sid)?.toRemove) && <span className="tag tag-remove" style={{ marginLeft: 6 }}>To remove</span>}
             {l.source === 'ai' && !l.checked && <span className="tag tag-new" style={{ marginLeft: 6 }}>New</span>}
           </div>
         ));
@@ -67,6 +79,7 @@ export function LinkToScope({ t, x, onClose }: { t: Tracker; x: TestInfo; onClos
     for (const s of i.f.scopes) {
       const links = i.f.links.filter((l) => !l.missing && l.scopeIds.includes(s.id));
       if (links.some((l) => l.testId === x.id)) continue;
+      if (scopeToRemove(i.f, s)) continue; // a scope that must go takes no new test
       if (q && !(s.title.toLowerCase().includes(q) || i.f.title.toLowerCase().includes(q) || `s-${s.id}` === q || `f-${i.f.id}/s-${s.id}` === q)) continue;
       rows.push({
         key: `${i.f.id}/${s.id}`, idLabel: `F-${i.f.id}/S-${s.id}`, title: s.title, sub: i.f.title, empty: !links.length,
@@ -80,12 +93,14 @@ export function LinkToScope({ t, x, onClose }: { t: Tracker; x: TestInfo; onClos
 }
 
 export function Tests({ t, route }: { t: Tracker; route: Route }) {
-  const show = (route.q.get('show') as Show) || 'none';
+  const asked = (route.q.get('show') as Show) || 'none';
+  // The "To remove" button goes when no test is left in it: show the default list again.
+  const show: Show = asked === 'remove' && !t.tests.some((x) => testToRemove(t, x.id)) ? 'none' : asked;
   const [tq, setTq] = useSticky('tests.q', '');
   const [pick, setPick] = useState<TestInfo | null>(null);
   const ql = tq.trim().toLowerCase();
   const is = (k: Show, x: TestInfo) =>
-    k === 'all' || (k === 'none' && !t.linkedTo.has(x.id)) || (k === 'skipped' && x.skipped) || (k === 'failed' && x.result === 'failed' && !x.skipped) || (k === 'new' && t.newTests.has(x.id));
+    k === 'all' || (k === 'none' && !t.linkedTo.has(x.id)) || (k === 'skipped' && x.skipped) || (k === 'failed' && x.result === 'failed' && !x.skipped) || (k === 'new' && t.newTests.has(x.id)) || (k === 'remove' && testToRemove(t, x.id));
   const rows = t.tests.filter((x) => is(show, x) && (!ql || x.id.toLowerCase().includes(ql) || x.title.toLowerCase().includes(ql) || x.file.toLowerCase().includes(ql)));
   testOrder = rows.map((x) => x.id);
   const n = (k: Show) => t.tests.filter((x) => is(k, x)).length;
@@ -95,6 +110,7 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
     { key: 'skipped', label: 'Skipped', n: n('skipped') },
     ...(n('failed') ? [{ key: 'failed' as Show, label: 'Failing', n: n('failed') }] : []),
     ...(t.newTests.size ? [{ key: 'new' as Show, label: 'New in last sync', n: n('new') }] : []),
+    ...(n('remove') ? [{ key: 'remove' as Show, label: 'To remove', n: n('remove') }] : []),
   ];
   const pw = t.tests.filter((x) => x.fw === 'playwright').length;
   const cards = (['playwright', 'cypress'] as const).map((fw) => ({ fw, ...codeShare(t.tests.filter((x) => x.fw === fw)) }));
@@ -152,7 +168,8 @@ export function Tests({ t, route }: { t: Tracker; route: Route }) {
                 <div role="cell" style={{ minWidth: 0 }}>
                   <div>
                     <a className="rowbtn" href={link(t.project, 'test', x.id)} style={{ display: 'inline', textDecoration: 'none' }}>{x.title}</a>{' '}
-                    {x.fw === 'cypress' && <span className="tag tag-cy">Cypress</span>} {t.newTests.has(x.id) && <span className="tag tag-new">New</span>}
+                    {x.fw === 'cypress' && <span className="tag tag-cy">Cypress</span>} {t.newTests.has(x.id) && <span className="tag tag-new">New</span>}{' '}
+                    <RemoveTag t={t} x={x} />
                   </div>
                   <div className="mono faint" style={{ overflowWrap: 'anywhere' }}>{x.id} · {x.file}</div>
                 </div>
