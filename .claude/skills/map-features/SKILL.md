@@ -340,10 +340,25 @@ shows it faster than text.
   for each scope is not necessary.
 - **How:** use `playwright-cli` on the test site, as `references/running-tests.md`
   says. Its safety rules apply. Set the window to 1280×800
-  (`playwright-cli resize 1280 800`). Take a screenshot of the part that
-  matters (`playwright-cli screenshot e12 --filename=<path>.png`), or of the
-  window. Do not take a full page of a long screen. Save the PNG files in the
+  (`playwright-cli resize 1280 800`). Scroll so that the part that matters is
+  in view, and take a screenshot of the window
+  (`playwright-cli screenshot --filename=<path>.png`). Do not take a full page
+  of a long screen. Save the PNG files in the
   session scratchpad folder, and give their full paths in the payload.
+- **One scope at a time:** turn on only the settings that the scope needs.
+  Keep the other settings at their default values. A test can change many
+  settings in one scenario. Do not copy all of them into the picture. If the
+  site has other settings on before you start, set them to their defaults
+  first, and set them back after the screenshot.
+  Outside the mapping loop, change site settings only when no loop runs. A
+  loop test on the same site can need those settings. To check, run
+  `curl -s localhost:5174/api/projects/<project>/map-loop`. If it shows
+  `"running":true`, wait or ask the user.
+- **Show where it is:** do not crop to the setting. Take the window, so that
+  the admin menu, the tab and the setting show together. If they do not fit
+  in 1280×800, make the window taller (for example `resize 1280 1080`).
+- **Own browser:** the mapping loop can use the default browser at the same
+  time. Outside the loop, use a named session (`playwright-cli -s=<name>`).
 - **Data:** do not show passwords, license keys, API keys or real customer
   data in the image. If a setting must change to show a result, set it back
   after the screenshot.
