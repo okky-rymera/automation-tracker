@@ -22,9 +22,11 @@ export function Overview({ t }: { t: Tracker }) {
   const gaps = total - ok;
   const chg = t.info.reduce((n, i) => n + i.nChanges, 0);
   const chgF = t.info.filter((i) => i.toReview).length;
-  const pw = t.summary.linesBy.playwright as LC | null;
-  const c = pw ? codeNums(pw) : null;
-  const run = t.summary.runs.playwright;
+  // One row for each framework: the share of the feature lines that its coverage run ran, plus the lines marked covered by hand.
+  const codeRows = (['playwright', 'cypress'] as const).map((fw) => {
+    const l = t.summary.linesBy[fw] as LC | null;
+    return { fw, name: fw === 'playwright' ? 'Playwright' : 'Cypress', c: l ? codeNums(l) : null, run: t.summary.runs[fw] };
+  });
   const rows = t.info
     .filter((i) => i.toReview || i.m.total - i.m.ok > 0)
     .sort((a, b) => b.changes.length - a.changes.length || b.m.total - b.m.ok - (a.m.total - a.m.ok) || a.f.id - b.f.id)
@@ -74,19 +76,28 @@ export function Overview({ t }: { t: Tracker }) {
           )}
         </Card>
         <Card className="q-card">
-          <div className="q-q">Plugin code run by Playwright tests</div>
-          {c ? (
-            <>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}><span className="q-big">{c.pct}%</span><span className="q-sub">{fmt(c.run + c.mcov)} of {fmt(c.feat)} feature lines</span></div>
-              <Bar total={c.feat} parts={[[c.run, 'c-good'], [c.mcov, 'c-mcov']]} />
-              <div className="q-sub">
-                From the run “{run?.label}”.{' '}
-                {t.summary.runs.cypress ? `The Cypress run is on the Code page.` : 'There is no Cypress coverage run.'}
+          <div className="q-q">Plugin code run by tests</div>
+          {codeRows.map((r) => (
+            <div key={r.fw} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                <span style={{ fontWeight: 600 }}>{r.name}</span>
+                {r.c ? (
+                  <span className="q-sub">{r.c.pct}%, {fmt(r.c.run + r.c.mcov)} of {fmt(r.c.feat)} feature lines</span>
+                ) : (
+                  <span className="q-sub">No coverage run yet</span>
+                )}
               </div>
-            </>
-          ) : (
-            <div className="q-sub">There is no Playwright coverage run yet. Sync with the tests on to make one.</div>
-          )}
+              {r.c && (
+                <Bar
+                  total={r.c.feat}
+                  label={`${r.name} tests run ${fmt(r.c.run)} feature lines. ${fmt(r.c.mcov)} more are marked covered by hand`}
+                  parts={[[r.c.run, 'c-good'], [r.c.mcov, 'c-mcov']]}
+                />
+              )}
+              {r.run?.label && <div className="q-sub">From the run “{r.run.label}”.</div>}
+            </div>
+          ))}
+          {!codeRows.some((r) => r.c) && <div className="q-sub">Sync with the tests on to make a coverage run.</div>}
           <div><a className="linkbtn" href={link(p, 'code')}>Find code no test runs</a></div>
         </Card>
         <Card className="q-card">
