@@ -2,13 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { mutate } from '../../api';
 import { KIND_LABEL, KIND_TAG, runAll, type Change, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
-import { useAct, useSay } from '../ui';
+import { useAct } from '../ui';
 
 /** The features with changes to review, and the changes of one feature. Only the changed parts show, not the whole feature. */
 export function Changes({ t, route }: { t: Tracker; route: Route }) {
   const p = t.project;
   const act = useAct();
-  const say = useSay();
   const queue = t.info.filter((i) => i.toReview);
   const asked = Number(route.q.get('f'));
   const cur = queue.find((i) => i.f.id === asked) ?? queue[0];
@@ -46,11 +45,8 @@ export function Changes({ t, route }: { t: Tracker; route: Route }) {
     if (k === 'j' || e.key === 'ArrowDown') (e.preventDefault(), setFocus(Math.min(fx + 1, dl.length - 1)));
     else if (k === 'k' || e.key === 'ArrowUp') (e.preventDefault(), setFocus(Math.max(fx - 1, 0)));
     else if (e.key === 'Enter' && x) (e.preventDefault(), openIn(x, fx));
-    else if (k === 'a' && x) {
-      e.preventDefault();
-      if (x.keep) run(x.keep, `${x.keepLbl}: done`);
-      else say('This change has no Keep. Open it, or mark the feature as reviewed.');
-    } else if (k === 'x' && x?.remove) (e.preventDefault(), run(x.remove, `${x.removeLbl}: done`, x.confirm));
+    else if (k === 'a' && x?.fix) (e.preventDefault(), run(x.fix, `${x.fixLbl}: done`));
+    else if (k === 'x' && x?.remove) (e.preventDefault(), run(x.remove, `${x.removeLbl}: done`, x.confirm));
     else if (k === 'r') (e.preventDefault(), markNext());
   };
 
@@ -85,24 +81,20 @@ export function Changes({ t, route }: { t: Tracker; route: Route }) {
               <button className="btn btn-primary" onClick={markNext}>Mark as reviewed</button>
             </div>
             <div className="muted" style={{ fontSize: 13 }}>
-              {dl.length} {dl.length === 1 ? 'change' : 'changes'} to review. Only the changed items show here, not the whole feature. “Mark as reviewed” keeps all of them.
+              {dl.length} {dl.length === 1 ? 'change' : 'changes'} to review. Only the changed items show here, not the whole feature. “Mark as reviewed” accepts all of them.
             </div>
             <div className="kbdrow">
-              <span>Keys:</span><span><kbd>J</kbd> <kbd>K</kbd> next and back</span><span><kbd>A</kbd> keep</span><span><kbd>X</kbd> undo the change</span>
+              <span>Keys:</span><span><kbd>J</kbd> <kbd>K</kbd> next and back</span><span><kbd>A</kbd> fix (move a renamed test)</span><span><kbd>X</kbd> undo the change</span>
               <span><kbd>Enter</kbd> open in the feature</span><span><kbd>R</kbd> mark the feature as reviewed</span>
             </div>
           </div>
-          <div ref={list} className="rv-list" tabIndex={0} onKeyDown={keys} aria-label="Changes. J and K move, A keeps, X undoes, Enter opens, R marks the feature as reviewed." style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div ref={list} className="rv-list" tabIndex={0} onKeyDown={keys} aria-label="Changes. J and K move, A fixes, X undoes, Enter opens, R marks the feature as reviewed." style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {secs.map((sec) => {
               const items = dl.map((x, idx) => ({ x, idx })).filter((y) => y.x.sec === sec);
-              const keeps = items.map((y) => y.x.keep).filter(Boolean) as (() => Promise<unknown>)[];
               return (
                 <div className="card" key={sec}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
                     <h2 className="h2" style={{ flex: 1 }}>{sec} <span className="faint" style={{ fontWeight: 400 }}>{items.length}</span></h2>
-                    {keeps.length > 1 && items.every((y) => y.x.keepLbl === 'Keep' || !y.x.keep) && (
-                      <button className="btn btn-sm btn-ghost" onClick={() => act(() => runAll(keeps), `${sec}: all kept`)}>Keep all</button>
-                    )}
                   </div>
                   <div>
                     {items.map(({ x, idx }) => (
@@ -114,7 +106,7 @@ export function Changes({ t, route }: { t: Tracker; route: Route }) {
                           {x.ctx && <span className="faint" style={{ fontSize: 12 }}>{x.ctx}</span>}
                         </div>
                         <span className="acts" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                          {x.keep && <button className="btn btn-sm btn-ok" onClick={(e) => (e.stopPropagation(), run(x.keep, `${x.keepLbl}: done`))}>{x.keepLbl}</button>}
+                          {x.fix && <button className="btn btn-sm btn-ok" onClick={(e) => (e.stopPropagation(), run(x.fix, `${x.fixLbl}: done`))}>{x.fixLbl}</button>}
                           {x.remove && <button className="btn btn-sm btn-danger" onClick={(e) => (e.stopPropagation(), run(x.remove, `${x.removeLbl}: done`, x.confirm))}>{x.removeLbl}</button>}
                           <button className="btn btn-sm btn-ghost" onClick={(e) => (e.stopPropagation(), openIn(x, idx))}>Open</button>
                         </span>

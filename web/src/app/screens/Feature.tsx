@@ -95,7 +95,7 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
             <IdBtn label={`F-${f.id}`} className="btn btn-ghost btn-sm mono" />
             {i.toReview && <span className="tag tag-changed">To review</span>}
             {f.toRemove && <span className="tag tag-remove">To remove</span>}
-            {f.aiFields.length > 0 && <span className="tag tag-ai" title="The AI wrote these fields and no person checked them yet.">AI draft: {f.aiFields.join(', ')}</span>}
+            {f.aiFields.length > 0 && <span className="tag tag-changed" title="These fields changed since the last review.">Changed: {f.aiFields.join(', ')}</span>}
             <span className="muted" style={{ fontSize: 13 }}>{reviewTxt}</span>
             <span style={{ flex: 1 }} />
             {i.changes.length > 0 && <a className="btn btn-sm" style={{ color: 'var(--ink)', textDecoration: 'none' }} href={link(p, 'changes', null, { f: f.id })}>List the changes</a>}
@@ -412,13 +412,7 @@ function ScopeCard({ t, f, s, open, openAll, openRow, setOpen, setRow }: {
               <div className="remove-box"><strong>To remove:</strong> <span>the whole feature has the mark.</span></div>
             ) : null}
             {s.before && 'title' in s.before && s.before.title && (
-              <div className="was-box"><strong>Title before the AI change:</strong> <span className="was-old">{s.before.title}</span></div>
-            )}
-            {s.aiFields.length > 0 && (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 13 }}>
-                <span className="tag tag-ai">AI draft: {s.aiFields.join(', ')}</span>
-                <button className="btn btn-sm btn-ok" onClick={() => act(() => mutate('PATCH', url, { check: true }), `S-${s.id} checked`)}>Keep</button>
-              </div>
+              <div className="was-box"><strong>Title before the change:</strong> <span className="was-old">{s.before.title}</span></div>
             )}
             <InlineText
               label="Scope description" className="ie-sdesc" multi value={s.description} placeholder={s.columns ? 'Add a description for all variations: the steps, or what the user sees.' : 'Add a description: the steps, or what the user sees.'}
@@ -678,12 +672,6 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
       ) : s.toRemove || f.toRemove ? (
         <div className="remove-box"><strong>To remove:</strong> <span>{s.toRemove ? `its scope S-${s.id} has the mark.` : 'the whole feature has the mark.'}</span></div>
       ) : null}
-      {v.aiFields.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 13 }}>
-          <span className="tag tag-ai">{v.aiFields.includes('title') ? 'The AI added this variation' : `AI draft: ${v.aiFields.join(', ')}`}</span>
-          <button className="btn btn-sm btn-ok" onClick={() => act(() => mutate('PATCH', url, { check: true }), `SV-${v.id} checked`)}>Keep</button>
-        </div>
-      )}
       <div className="set-values">
         {columns.map((c, i) => (
           <label key={`${i}-${c}`} className="set-value">
@@ -844,10 +832,9 @@ function TestRow({ t, f, l, scopeId }: { t: Tracker; f: FeatureX; l: FeatureLink
       {l.missing ? (
         <span className="tag tag-fail" title="The test is not in the repo now. It was deleted or renamed.">{KIND_LABEL.gone}</span>
       ) : l.source === 'ai' && !l.checked ? (
-        <span className="tag tag-new" title="The AI linked this test. No person checked it yet.">New</span>
+        <span className="tag tag-new" title="Linked since the last review.">New</span>
       ) : null}
       <span className="row-acts">
-        {l.source === 'ai' && !l.checked && !l.missing && <button className="btn btn-ghost btn-sm btn-ok" onClick={() => act(() => mutate('PATCH', `${base}/links/${l.id}`, { check: true }), 'Link kept')}>Keep</button>}
         {scopeId === null && <button className="btn btn-ghost btn-sm" onClick={() => (setMq(''), setPick(true))}>Put on a scope</button>}
         <button className="btn btn-ghost btn-sm" onClick={unlink}>Unlink</button>
       </span>
@@ -856,7 +843,7 @@ function TestRow({ t, f, l, scopeId }: { t: Tracker; f: FeatureX; l: FeatureLink
   );
 }
 
-/** A list item or scope requirement: edit in place, keep an AI draft, remove. */
+/** A list item or scope requirement: edit in place, remove. "New" shows until the feature is reviewed. */
 function ItemRow({ t, item, bullet }: { t: Tracker; item: FeatureItem; bullet?: boolean }) {
   const base = `/api/projects/${t.project}`;
   const act = useAct();
@@ -872,9 +859,8 @@ function ItemRow({ t, item, bullet }: { t: Tracker; item: FeatureItem; bullet?: 
           }
         />
       </div>
-      {item.aiDraft && <span className="tag tag-ai" title="The AI wrote this. No person checked it yet.">AI draft</span>}
+      {item.aiDraft && <span className="tag tag-new" title="Added by the AI since the last review.">New</span>}
       <span className="row-acts">
-        {item.aiDraft && <button className="btn btn-ghost btn-sm btn-ok" onClick={() => act(() => mutate('PATCH', `${base}/items/${item.id}`, { check: true }), 'Kept')}>Keep</button>}
         <button className="icon-btn icon-danger" onClick={() => act(() => mutate('DELETE', `${base}/items/${item.id}`), 'Removed')} aria-label="Remove" title="Remove"><IX s={16} /></button>
       </span>
     </div>
@@ -963,7 +949,6 @@ function CodeTab({ t, f }: { t: Tracker; f: FeatureX }) {
                     <span className="faint" style={{ fontSize: 13 }}>–</span>
                   )}
                   <span className="row-acts">
-                    {e.source === 'ai' && !e.checked && <button className="btn btn-ghost btn-sm btn-ok" onClick={() => act(() => mutate('PATCH', `/api/projects/${p}/feature-code/${e.id}`, { check: true }), 'Code kept')}>Keep</button>}
                     <button className="icon-btn icon-danger" aria-label="Remove from the feature" title="Remove from the feature" onClick={() => act(() => mutate('DELETE', `/api/projects/${p}/feature-code/${e.id}`), 'Code removed. The AI will not add it again.')}><IX s={16} /></button>
                   </span>
                 </div>
@@ -1021,12 +1006,7 @@ function ShotsTab({ t, f }: { t: Tracker; f: FeatureX }) {
           <figcaption className="shot-cap">
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4, flexWrap: 'wrap' }}>
               <IdBtn label={`IMG-${sh.id}`} text={`F-${f.id}/IMG-${sh.id}`} />
-              {sh.aiDraft && (
-                <>
-                  <span className="tag tag-new">New</span>
-                  <button className="btn btn-ghost btn-sm btn-ok" onClick={() => act(() => mutate('PATCH', `${base}/screenshots/${sh.id}`, { check: true }), 'Screenshot kept')}>Keep</button>
-                </>
-              )}
+              {sh.aiDraft && <span className="tag tag-new">New</span>}
             </div>
             <InlineText label="Caption" className="ie-item" multi value={sh.caption} placeholder="Add a caption: what the image shows." onSave={(caption) => act(() => mutate('PATCH', `${base}/screenshots/${sh.id}`, { caption }), 'Caption saved')} />
           </figcaption>

@@ -89,7 +89,7 @@ export const ST_TAG: Record<ScopeStatus, string> = { ok: 'tag-ok', fail: 'tag-fa
 /** Scope counts of a feature. total and the states leave out the scopes marked "To remove"; remove counts them. */
 export interface Metrics { total: number; ok: number; fail: number; skip: number; cy: number; none: number; remove: number }
 
-/** One change to review: an AI draft mark, a link to a test that is gone, or a linked test that the last sync changed. */
+/** One change to review: a change since the last review, a link to a test that is gone, or a linked test that the last sync changed. */
 export interface Change {
   key: string;
   sec: string;
@@ -100,8 +100,9 @@ export interface Change {
   /** Where "Open" goes in the feature. */
   tab: 'scopes' | 'details' | 'code' | 'shots';
   scopeId?: number;
-  keepLbl: string;
-  keep?: () => Promise<unknown>;
+  /** A fix for the change, for example "Move to PW-…" for a renamed test. There is no "keep": "Mark as reviewed" accepts all changes of the feature. */
+  fixLbl?: string;
+  fix?: () => Promise<unknown>;
   removeLbl?: string;
   remove?: () => Promise<unknown>;
   /** Ask this before remove (a delete that cannot be undone). */
@@ -329,7 +330,7 @@ export const codeTxt = (c: FeatureInfo['code']) => (c ? `${pct(c.t, c.n)}% of ${
 
 const api = (project: string) => `/api/projects/${project}`;
 const quiet = { quiet: true };
-/** For "Keep all": the calls run one after the other, then every screen loads again. */
+/** The calls run one after the other, then every screen loads again. */
 export async function runAll(fns: (() => Promise<unknown>)[]) {
   try {
     for (const fn of fns) await fn();
@@ -356,9 +357,8 @@ function changesOf(
     const canBack = has && !(field === 'title' && !before);
     out.push({
       key: `f:${field}`, sec: 'Feature', kind: before ? 'changed' : 'new', text: cur || '(empty)', before: before || null,
-      ctx: `${FIELD_LABEL[field] ?? field} · ${before ? 'The AI changed this field.' : 'The AI filled this field.'}`,
-      tab: field === 'roles' ? 'scopes' : 'scopes', keepLbl: 'Keep',
-      keep: () => mutate('PATCH', `${base}/features/${f.id}`, { check: [field] }, quiet),
+      ctx: `${FIELD_LABEL[field] ?? field} · ${before ? 'Changed.' : 'Filled.'}`,
+      tab: 'scopes',
       ...(canBack ? { removeLbl: before ? 'Change back' : 'Clear', remove: revert('feature', f.id, field) } : {}),
     });
   }
@@ -372,9 +372,8 @@ function changesOf(
     const backFields = s.aiFields.filter((k) => k in b && !(k === 'title' && !b[k]));
     out.push({
       key: `s:${s.id}`, sec: 'Scopes', kind: isNew ? 'new' : 'changed', text: s.title, before: 'title' in b ? (b.title ?? '') : null,
-      ctx: `${scopeIdLabel(f, s.id)} · ${isNew ? (s.parentId !== null ? 'The AI added this variation.' : 'The AI added this scope.') : `The AI changed: ${s.aiFields.map((k) => (FIELD_LABEL[k] ?? k).toLowerCase()).join(', ')}.`}`,
-      tab: 'scopes', scopeId: s.id, keepLbl: 'Keep',
-      keep: () => mutate('PATCH', `${base}/scopes/${s.id}`, { check: true }, quiet),
+      ctx: `${scopeIdLabel(f, s.id)} · ${isNew ? (s.parentId !== null ? 'New variation.' : 'New scope.') : `Changed: ${s.aiFields.map((k) => (FIELD_LABEL[k] ?? k).toLowerCase()).join(', ')}.`}`,
+      tab: 'scopes', scopeId: s.id,
       ...(isNew
         ? { removeLbl: s.parentId !== null ? 'Remove variation' : 'Remove scope', confirm: `Delete ${s.parentId !== null ? 'variation' : 'scope'} ${scopeIdLabel(f, s.id)} “${s.title}”${s.columns ? ', all its variations,' : ''} and its requirements? The AI will not add it again.`, remove: () => mutate('DELETE', `${base}/scopes/${s.id}`, {}, quiet) }
         : backFields.length
@@ -405,21 +404,20 @@ function changesOf(
       out.push({
         key: `l:${l.id}`, sec: 'Tests', kind: 'gone', text: l.title ?? l.testId, before: null,
         ctx: `${l.testId} → ${where} · The test is not in the repo now. It was deleted or renamed.${to ? ` It is likely ${to.id} now.` : ''}`,
-        tab: 'scopes', scopeId: sid, keepLbl: to ? `Move to ${to.id}` : '',
-        keep: to ? () => mutate('POST', `${base}/links/move-test`, { from: l.testId, to: to.id }, quiet) : undefined,
+        tab: 'scopes', scopeId: sid, fixLbl: to ? `Move to ${to.id}` : undefined,
+        fix: to ? () => mutate('POST', `${base}/links/move-test`, { from: l.testId, to: to.id }, quiet) : undefined,
         removeLbl: 'Unlink', remove: () => mutate('DELETE', `${base}/links/${l.id}`, {}, quiet),
       });
     } else if (l.source === 'ai' && !l.checked) {
       out.push({
         key: `l:${l.id}`, sec: 'Tests', kind: 'new', text: t?.title ?? l.title ?? l.testId, before: null,
-        ctx: `${l.testId} → ${where} · The AI linked this test.`, tab: 'scopes', scopeId: sid, keepLbl: 'Keep',
-        keep: () => mutate('PATCH', `${base}/links/${l.id}`, { check: true }, quiet),
+        ctx: `${l.testId} → ${where} · New link.`, tab: 'scopes', scopeId: sid,
         removeLbl: 'Unlink', remove: () => mutate('DELETE', `${base}/links/${l.id}`, {}, quiet),
       });
     } else if (syncNewer && changedTests.has(l.testId)) {
       out.push({
         key: `t:${l.id}`, sec: 'Tests', kind: 'test', text: t?.title ?? l.title ?? l.testId, before: null,
-        ctx: `${l.testId} → ${where} · The test code changed in the last sync. Check that it still checks the scope.`, tab: 'scopes', scopeId: sid, keepLbl: '',
+        ctx: `${l.testId} → ${where} · The test code changed in the last sync. Check that it still checks the scope.`, tab: 'scopes', scopeId: sid,
       });
     }
   }
@@ -428,23 +426,23 @@ function changesOf(
   for (const sh of f.screenshots) {
     if (!sh.aiDraft) continue;
     out.push({
-      key: `x:${sh.id}`, sec: 'Screenshots', kind: 'new', text: sh.caption || `Screenshot IMG-${sh.id}`, before: null, ctx: `IMG-${sh.id} · The AI added this screenshot.`,
-      tab: 'shots', keepLbl: 'Keep', keep: () => mutate('PATCH', `${base}/screenshots/${sh.id}`, { check: true }, quiet),
+      key: `x:${sh.id}`, sec: 'Screenshots', kind: 'new', text: sh.caption || `Screenshot IMG-${sh.id}`, before: null, ctx: `IMG-${sh.id} · New screenshot.`,
+      tab: 'shots',
       removeLbl: 'Remove', remove: () => mutate('DELETE', `${base}/screenshots/${sh.id}`, {}, quiet),
     });
   }
   for (const e of codeMap?.features.find((x) => x.featureId === f.id)?.entries ?? []) {
     if (e.source !== 'ai' || e.checked) continue;
     out.push({
-      key: `c:${e.id}`, sec: 'Code', kind: 'new', text: e.function ? `${e.function}` : `${e.file} (whole file)`, before: null, ctx: `${e.file} · The AI put this code in the feature.`,
-      tab: 'code', keepLbl: 'Keep', keep: () => mutate('PATCH', `${base}/feature-code/${e.id}`, { check: true }, quiet),
+      key: `c:${e.id}`, sec: 'Code', kind: 'new', text: e.function ? `${e.function}` : `${e.file} (whole file)`, before: null, ctx: `${e.file} · New code in the feature.`,
+      tab: 'code',
       removeLbl: 'Remove', remove: () => mutate('DELETE', `${base}/feature-code/${e.id}`, {}, quiet),
     });
   }
   if (!out.length && f.reviewWanted) {
     out.push({
-      key: 'wanted', sec: 'Feature', kind: 'wanted', text: f.title, before: null, ctx: 'A person marked this feature as not reviewed. No AI change waits.',
-      tab: 'scopes', keepLbl: '',
+      key: 'wanted', sec: 'Feature', kind: 'wanted', text: f.title, before: null, ctx: 'A person marked this feature as not reviewed. No change waits.',
+      tab: 'scopes',
     });
   }
   void fd;
@@ -455,9 +453,8 @@ function itemChange(base: string, i: FeatureItem, sec: string, prefix: string, t
   // The AI changes only its own draft items, so an item has no text of a person to change back to.
   return {
     key: `i:${i.id}`, sec, kind: 'new', text: i.text, before: null,
-    ctx: `${prefix ? prefix + ' · ' : ''}The AI added this item.`,
-    tab, scopeId, keepLbl: 'Keep',
-    keep: () => mutate('PATCH', `${base}/items/${i.id}`, { check: true }, quiet),
+    ctx: `${prefix ? prefix + ' · ' : ''}New item.`,
+    tab, scopeId,
     removeLbl: 'Remove', remove: () => mutate('DELETE', `${base}/items/${i.id}`, {}, quiet),
   };
 }
