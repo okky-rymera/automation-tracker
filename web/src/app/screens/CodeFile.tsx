@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { mutate, useApi, type FileDetail } from '../../api';
 import { fmt, type Tracker } from '../data';
 import { go, link, type Route } from '../route';
-import { Banner, INext, IPrev, Loading, Seg, useAct } from '../ui';
+import { Banner, INext, IPrev, Loading, Seg, useAct, useSay } from '../ui';
 import { fileOrder, useView, ViewSeg } from './Code';
 
 type Eff = 'run' | 'cyonly' | 'mcov' | 'setup' | 'miss' | 'lib' | 'mlib' | 'none';
@@ -24,6 +24,7 @@ export function CodeFile({ t, route }: { t: Tracker; route: Route }) {
 
 function FileView({ t, route, d, view }: { t: Tracker; route: Route; d: FileX; view: ReturnType<typeof useView> }) {
   const act = useAct();
+  const say = useSay();
   const src = useMemo(() => d.source.split('\n'), [d.source]);
   const eff = useMemo(() => {
     const m = new Map<number, Eff>();
@@ -61,6 +62,14 @@ function FileView({ t, route, d, view }: { t: Tracker; route: Route; d: FileX; v
   const sb = sel ? Math.max(sel.a, sel.b) : -1;
   const inSel = (n: number) => n >= sa && n <= sb;
   const scrollTo = (n: number) => setTimeout(() => document.getElementById(`L${n}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 40);
+  // A link to a line or a function puts that line at the top of the screen, just under the fixed top bar.
+  const scrollToTop = (n: number) =>
+    setTimeout(() => {
+      const el = document.getElementById(`L${n}`);
+      if (!el) return;
+      const bar = document.querySelector('.top')?.getBoundingClientRect().bottom ?? 0;
+      window.scrollBy({ top: el.getBoundingClientRect().top - bar - 8, behavior: 'smooth' });
+    }, 40);
   const goBlk = (k: number) => {
     if (!blocks.length) return;
     const kk = (k + blocks.length) % blocks.length;
@@ -74,9 +83,23 @@ function FileView({ t, route, d, view }: { t: Tracker; route: Route; d: FileX; v
       const n = Number(qLine);
       setSel({ a: n, b: n });
       setMode('all');
-      scrollTo(n);
+      scrollToTop(n);
     }
   }, [qLine]);
+  // A link with a function name (from the AI decisions on the Code page) selects that function and scrolls to it.
+  const qFn = route.q.get('fn');
+  // Two functions can have the same name (for example two "{closure}"). The AI decision counts all of them, so the message names the others.
+  useEffect(() => {
+    const all = qFn ? d.functions.filter((f) => f.name === qFn) : [];
+    const fn = all[0];
+    if (fn) {
+      setSel({ a: fn.start, b: fn.end });
+      setMode('all');
+      scrollToTop(fn.start);
+      if (all.length > 1) say(`${all.length} functions have the name ${qFn}. This one starts at line ${fn.start}. ${all.length > 2 ? 'The others start at lines' : 'The other starts at line'} ${all.slice(1).map((x) => x.start).join(', ')}.`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qFn]);
 
   // Counts of this file, with the marks.
   const c = { run: 0, cyonly: 0, mcov: 0, setup: 0, miss: 0, lib: 0, mlib: 0 };

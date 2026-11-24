@@ -4,7 +4,7 @@ import { link, setQuery, useSticky, type Route } from '../route';
 import { Bar, Card, IFile, IFolder, INext, Loading, Seg, SortTh } from '../ui';
 import { codeNums, type LC } from './Overview';
 import { Warnings } from './Warnings';
-import { LibraryReview } from './LibraryReview';
+import { LibraryReview, useReviewData } from './LibraryReview';
 
 type Sort = 'path' | 'unc' | 'pct' | 'lib' | 'marked';
 const NAT: Record<Sort, 'ascending' | 'descending'> = { path: 'ascending', unc: 'descending', pct: 'ascending', lib: 'descending', marked: 'descending' };
@@ -39,6 +39,37 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
   const [sort, setSort] = useSticky<Sort>('code.sort', 'unc');
   const [rev, setRev] = useSticky('code.rev', false);
   const [exp, setExp] = useSticky<Record<string, boolean>>('code.exp', {});
+  const review = useReviewData(t.project);
+  const tab = route.q.get('tab') === 'decisions' ? 'decisions' : 'files';
+  const tabs = (
+    <div className="tabs" role="tablist">
+      {([['files', 'Files'], ['decisions', 'AI decisions']] as const).map(([k, l]) => (
+        <button key={k} className={`tab ${tab === k ? 'tab-on' : ''}`} role="tab" aria-selected={tab === k} onClick={() => setQuery({ tab: k === 'files' ? null : k })}>
+          {l}{k === 'decisions' && review.count !== undefined && <span className="badge" style={{ marginLeft: 6 }}>{review.count}</span>}
+        </button>
+      ))}
+    </div>
+  );
+  const head = view && (
+    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 260 }}>
+        <h1 className="h1">Code coverage</h1>
+        <p className="muted" style={{ margin: 0 }}>
+          Find the plugin code no test runs yet. From {view === 'both' ? 'the Playwright and the Cypress run together' : `the run “${t.summary.runs[view]?.label}”`}.
+        </p>
+      </div>
+      <ViewSeg t={t} view={view} />
+    </div>
+  );
+  if (view && tab === 'decisions') {
+    return (
+      <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {head}
+        {tabs}
+        <LibraryReview t={t} d={review} view={route.q.get('view')} />
+      </main>
+    );
+  }
   if (!view) {
     return (
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -154,20 +185,12 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
   const onSort = (k: Sort) => (setRev(sort === k ? !rev : false), setSort(k));
   const tw = (n: number) => [n, ''] as [number, string];
   void tw;
-  const run = t.summary.runs;
   const js = data.filter((e) => e.lang === 'js').length;
 
   return (
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 260 }}>
-          <h1 className="h1">Code coverage</h1>
-          <p className="muted" style={{ margin: 0 }}>
-            Find the plugin code no test runs yet. From {view === 'both' ? 'the Playwright and the Cypress run together' : `the run “${run[view]?.label}”`}.
-          </p>
-        </div>
-        <ViewSeg t={t} view={view} />
-      </div>
+      {head}
+      {tabs}
       <Warnings p={t.summary} parse={false} />
       <div className="grid3">
         <Card className="q-card">
@@ -191,7 +214,6 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
           <div className="q-sub">{fmt(tot.mlib)} as library, {fmt(tot.mcov)} as covered. Marks count in these totals. Open a file to add or remove them.</div>
         </Card>
       </div>
-      <LibraryReview t={t} />
       <div className="toolbar" style={{ gap: 10 }}>
         <label className="sr" htmlFor="cq">Search files</label>
         <input id="cq" className="input" style={{ flex: '1 1 240px', maxWidth: 360 }} placeholder="Search file paths" value={cq} onChange={(e) => setCq(e.target.value)} />
