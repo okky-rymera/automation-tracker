@@ -7,7 +7,20 @@ export type FunctionState = LineState | 'unknown';
  * Runnable PHP lines by state. runByTests counts library lines too.
  * cypressOnly ("both" view only): "tested" lines that only Cypress tests ran, so the Playwright tests do not reach them yet.
  */
-export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly', number>;
+/**
+ * markedLibrary: lines that a mark made library. decisionLibrary, autoLibrary, personLibrary: the parts of it from
+ * a library decision (AI or person), the automatic guard and blank lines, and a person's line marks. The rest come
+ * from an "unused" decision. unused: all library lines of an "unused" decision, also lines that the run counted as
+ * library already (these are not in markedLibrary).
+ */
+export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly', number> & {
+  markedLibrary?: number;
+  markedCovered?: number;
+  decisionLibrary?: number;
+  unused?: number;
+  autoLibrary?: number;
+  personLibrary?: number;
+};
 
 /** Which coverage the app shows: one test tool, or both runs together. */
 export type View = 'playwright' | 'cypress' | 'both';

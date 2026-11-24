@@ -8,7 +8,7 @@ const ZERO: LineCounts = { runnable: 0, library: 0, tested: 0, setup: 0, backgro
 
 function sumLines(files: FileEntry[]): LineCounts {
   const out = { ...ZERO };
-  for (const f of files) if (f.measured) for (const k of Object.keys(out) as (keyof LineCounts)[]) out[k] += f.lines[k];
+  for (const f of files) if (f.measured) for (const k of Object.keys(out) as (keyof LineCounts)[]) out[k] = (out[k] ?? 0) + (f.lines[k] ?? 0);
   return out;
 }
 

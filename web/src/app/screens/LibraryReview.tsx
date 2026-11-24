@@ -3,7 +3,7 @@ import { day, short, type Tracker } from '../data';
 import { link } from '../route';
 import { Card, useAct } from '../ui';
 
-export interface Decision { file: string; function: string; kind: 'library'; reason: string; by: 'ai' | 'person'; commit: string | null; createdAt: string }
+export interface Decision { file: string; function: string; kind: 'library' | 'unused'; reason: string; by: 'ai' | 'person'; commit: string | null; createdAt: string }
 interface Untested { file: string; function: string; commit: string }
 export interface LeftOut { testId: string; title: string | null; file: string | null; framework: string | null; reason: string; by: 'ai' | 'person'; createdAt: string }
 export type UntestedByTool = Record<'playwright' | 'cypress', { untested: Untested[]; fullRunAt: string | null; run: string } | null> & { fullRunDays: number };
@@ -34,10 +34,10 @@ export function LibraryReview({ t, d, view }: { t: Tracker; d: ReturnType<typeof
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))', gap: 16, alignItems: 'start' }}>
       <Card className="q-card" style={{ gridColumn: '1 / -1' }}>
-        <div className="q-q">Library code decided by the AI</div>
+        <div className="q-q">Library and unused code decided by the AI</div>
         <div className="q-sub">
-          The AI mapping sorts the code that no test runs. A function it calls library code (start-up, small shared helpers, glue) counts as library lines, not as uncovered code.
-          Remove a decision that is wrong: the function then counts as uncovered again, and the AI looks at it again.
+          The AI mapping sorts the code that no feature holds. Library code (start-up, small shared helpers, glue) and unused code (nothing loads or calls it) do not count as uncovered code.
+          The overview shows unused code apart, so the team can delete it. Remove a decision that is wrong: the code then counts as uncovered again, and the AI looks at it again.
         </div>
         {!decisions ? (
           <div className="muted" style={{ fontSize: 13 }}>Loading…</div>
@@ -45,7 +45,9 @@ export function LibraryReview({ t, d, view }: { t: Tracker; d: ReturnType<typeof
           <div className="muted" style={{ fontSize: 13 }}>None yet.</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column' }}>
-            <div className="faint" style={{ fontSize: 12 }}>{decisions.length} functions in {byFile.size} files. Open a file group, then click a function to see its code.</div>
+            <div className="faint" style={{ fontSize: 12 }}>
+              {decisions.filter((x) => x.kind === 'library').length} library and {decisions.filter((x) => x.kind === 'unused').length} unused items in {byFile.size} files. Open a file group, then click an item to see its code.
+            </div>
             {[...byFile].sort(([a], [b]) => a.localeCompare(b)).map(([path, list]) => (
               <details key={path} style={{ borderTop: '1px solid var(--line)', padding: '6px 0' }}>
                 <summary style={{ cursor: 'pointer', fontSize: 13 }}>
@@ -55,11 +57,12 @@ export function LibraryReview({ t, d, view }: { t: Tracker; d: ReturnType<typeof
                   {list.map((x) => (
                     <div key={x.function} style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 13 }}
                       title={`${x.by === 'ai' ? 'AI' : 'A person'}, ${day(x.createdAt)}${x.commit ? `, at ${short(x.commit)}` : ''}`}>
-                      <a className="mono" style={{ flex: '0 1 auto', minWidth: 0, overflowWrap: 'anywhere' }} href={link(t.project, 'codefile', null, { path, fn: x.function, view })}
-                        title="Open the file at this function">{x.function}</a>
+                      <a className="mono" style={{ flex: '0 1 auto', minWidth: 0, overflowWrap: 'anywhere' }} href={link(t.project, 'codefile', null, x.function ? { path, fn: x.function, view } : { path, view })}
+                        title={x.function ? 'Open the file at this function' : 'Open the file'}>{x.function || '(code outside functions)'}</a>
+                      <span className={`tag ${x.kind === 'unused' ? 'tag-changed' : ''}`} style={{ flex: 'none' }}>{x.kind === 'unused' ? 'Unused' : 'Library'}</span>
                       <span className="muted" style={{ flex: 1, minWidth: 0 }}>{x.reason}</span>
-                      <button className="btn btn-sm" aria-label={`Remove the library decision for ${x.function}`}
-                        onClick={() => act(() => mutate('DELETE', `/api/projects/${t.project}/code-decisions`, { file: x.file, function: x.function }), `${x.function} counts as uncovered again`)}>
+                      <button className="btn btn-sm" aria-label={`Remove the ${x.kind} decision for ${x.function || 'the code outside functions'}`}
+                        onClick={() => act(() => mutate('DELETE', `/api/projects/${t.project}/code-decisions`, { file: x.file, function: x.function }), `${x.function || 'The code outside functions'} counts as uncovered again`)}>
                         Remove
                       </button>
                     </div>

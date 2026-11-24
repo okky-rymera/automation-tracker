@@ -127,7 +127,7 @@ function prompt(p: ProjectConfig, u: Unit, scratch: string): string {
 
 You run headless, in a loop. No person reads this session or answers a question. So:
 - Do only this one unit. Do not start a second unit.
-- Finish the unit with "map apply" (or "map skip" when the unit has no feature). A unit that is not saved counts as failed.
+- Finish the unit with "map apply"${u.kind === 'code' ? '. A code unit cannot be skipped: put code that is in no feature in "library" or "unused"' : ' (or "map skip" when the unit has no feature)'}. A unit that is not saved counts as failed.${u.kind === 'code' ? '\n- Sort every item of each file in unit.files: "apply" refuses a payload that leaves one out. Put fewer files in unit.files when the area does not need all of a file.' : ''}
 - Decide each test of the file: link it, or put it in "leftOut" with a reason. When "next" gives "unlinkedTests", decide only those tests: the other tests are done.
 - Put a question for a person in the feature's "questions" list, not in this session.
 - Write the payload JSON and the screenshots only in this folder: ${scratch}

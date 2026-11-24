@@ -829,6 +829,32 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX issue_scopes_scope ON issue_scopes(scope_id);
   `,
+  // 39: code tracking by content (server/code-fingerprint.ts).
+  //  code_decisions.kind "unused": code that no plugin code loads or calls. It counts apart from
+  //    library code on the overview, so the team can delete it. function "": the code outside all
+  //    functions of the file (for a template, all of its code).
+  //  fingerprint (code_decisions and feature_code): the content hash of the code when the AI or a person
+  //    set the entry. NULL: not set yet; the app fills it from the code now (the baseline). An entry
+  //    whose code changed after a sync is "to check" for the AI.
+  `
+  CREATE TABLE code_decisions_new (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    file TEXT NOT NULL,
+    function TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('library', 'unused')),
+    reason TEXT NOT NULL,
+    by TEXT NOT NULL CHECK (by IN ('ai', 'person')),
+    commit_sha TEXT,
+    created_at TEXT NOT NULL,
+    fingerprint TEXT,
+    PRIMARY KEY (project_id, file, function)
+  );
+  INSERT INTO code_decisions_new (project_id, file, function, kind, reason, by, commit_sha, created_at)
+    SELECT project_id, file, function, kind, reason, by, commit_sha, created_at FROM code_decisions;
+  DROP TABLE code_decisions;
+  ALTER TABLE code_decisions_new RENAME TO code_decisions;
+  ALTER TABLE feature_code ADD COLUMN fingerprint TEXT;
+  `,
 ];
 
 function open(): DatabaseSync {

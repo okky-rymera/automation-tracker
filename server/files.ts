@@ -13,9 +13,15 @@ const FN_STATES: FunctionState[] = [...LINE_STATES, 'unknown'];
 
 /**
  * cypressOnly: "tested" lines that only Cypress tests ran ("both" view only, else 0).
- * markedLibrary, markedCovered: lines that a person's mark made "library" or "tested". They are in those counts too.
+ * markedLibrary, markedCovered: lines that a mark made "library" or "tested". They are in those counts too.
+ * decisionLibrary, autoLibrary, personLibrary: the parts of markedLibrary that come from a library decision,
+ * the automatic library lines, or a person's marks (coverage.ts withMarks).
+ * unused: all library lines of an "unused" decision, also lines that the run counted as library already.
  */
-export type LineCounts = Record<LineState | 'runnable' | 'runByTests' | 'cypressOnly' | 'markedLibrary' | 'markedCovered', number>;
+export type LineCounts = Record<
+  LineState | 'runnable' | 'runByTests' | 'cypressOnly' | 'markedLibrary' | 'markedCovered' | 'decisionLibrary' | 'unused' | 'autoLibrary' | 'personLibrary',
+  number
+>;
 
 export interface FileEntry {
   path: string;
@@ -66,6 +72,10 @@ export function listFiles(project: ProjectConfig, view: View | null): FileEntry[
     lines.cypressOnly = fl?.cypressOnly?.length ?? 0;
     lines.markedLibrary = fl?.markedLibrary?.length ?? 0;
     lines.markedCovered = fl?.markedCovered?.length ?? 0;
+    lines.decisionLibrary = fl?.decisionLibrary?.length ?? 0;
+    lines.unused = fl?.unused?.length ?? 0;
+    lines.autoLibrary = fl?.autoLibrary?.length ?? 0;
+    lines.personLibrary = fl?.personLibrary?.length ?? 0;
     const functions = Object.fromEntries(FN_STATES.map((s) => [s, fns.filter((f) => f.state === s).length])) as FileEntry['functions'];
     functions.total = fns.length;
     return {

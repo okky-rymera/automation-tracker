@@ -35,7 +35,7 @@ npm run -s map -- feature  <project> <id>               # one feature, all field
 npm run -s map -- code     <project> <repo file>        # functions, coverage state, tests that ran them
 npm run -s map -- test-code <project> playwright|cypress <ref>  # functions the tests of one test file ran (a hint)
 npm run -s map -- apply    <project> <payload.json>     # write + mark the unit done (one transaction)
-npm run -s map -- skip     <project> <kind> <ref> <reason> [--files a.php,b.php]  # code needs --files
+npm run -s map -- skip     <project> <kind> <ref> <reason>  # test units only: a code unit cannot be skipped
 npm run -s map -- reset    <project> <kind> <ref>       # process that unit again next time
 ```
 
@@ -75,7 +75,7 @@ about these items: the person may want your suggestion.
   folder), not the repo path. Run `next` for that kind to see the format.
 - Otherwise run `next <project>` with no kind. It keeps this order: all
   Playwright spec files first, then all Cypress `.feature` files, then the
-  plugin code that no unit holds yet. Do not change the order, unless the user
+  plugin code that the feature list does not account for yet. Do not change the order, unless the user
   names a kind. For one kind, run `next <project> <kind>`.
 - In each kind, `next` gives first a file that changed
   since it was processed (`state: "changed"`), then a new file. For a changed
@@ -87,12 +87,22 @@ about these items: the person may want your suggestion.
   Leave the other tests of the file as they are.
 - A unit that failed 2 times in one mapping loop is parked: `next` skips it
   until its files change (`state: "parked"`).
-- For `code`, `next` gives candidate PHP files with the most **open**
-  functions: no test runs them, no feature holds them, and they are not
-  library code. A file with `changedSinceArea: true` is in a code area that is
-  done, but a sync changed it: look only at its open functions. Choose **one plugin feature or settings area** (for
+- For `code`, `next` gives the PHP files with code that the feature list does
+  not account for, most lines first. Each file lists its `items`: one for each
+  function, and `(code outside functions)` for the class lines, start-up code
+  or template HTML outside all functions. An item is:
+  - `open`: no feature holds it, and it has no `library` or `unused` decision.
+    Tests can run it or not: code that tests run belongs in a feature too.
+  - `check`: it was sorted, but its code changed since (a sync). `heldBy` or
+    `decision` says where it is now. Keep it there (send the entry again), move
+    it (`removeCode` on the old feature, `code` on the new one), or decide again.
+
+  Choose **one plugin feature or settings area** (for
   example "Settings > Prices > Hide wholesale price column"), not one file. The
-  area name is the `ref`. To choose well:
+  area name is the `ref`. `unit.files` lists the files whose items the unit
+  sorts. `apply` refuses a payload that leaves an item of these files out, so
+  sort all items of each file you list (other items of a big file can go to
+  other features or to `library` in the same payload). To choose well:
   - Big helper files (many small functions for many features): put their
     shared helpers in `library` (see "Sort the code that no test runs").
   - The coverage data comes from the Playwright run and the Cypress run, when
@@ -101,8 +111,8 @@ about these items: the person may want your suggestion.
     Cypress links (CY) already covers that area well, so a different area is a
     better use of the run.
   - Prefer one screen, one settings section, or one REST route: about 1–6 files.
-  - A file can be in more than one area (a shared menu or order file). A file in
-    any done area leaves the `next` candidate list.
+  - A file can be in more than one area (a shared menu or order file). A file
+    leaves the `next` list only when each of its items is sorted.
 
 ### 2. Study it
 
@@ -124,7 +134,9 @@ not only a copy of test titles.
   make their data through the REST API make the list longer. If the tests are
   not in a coverage run, find the code by reading it.
 - **For code areas**: run `code <project> <file>` for each main file. It shows
-  each function's coverage state and the tests (PW-… and CY-…) that ran it. These
+  each function's coverage state, the tests (PW-… and CY-…) that ran it, the
+  features and decision that hold it, and its `work` status (`open` or `check`).
+  `outsideFunctions` is the same for the code outside all functions. These
   tests are candidates to link. The states:
   - `tested`: a test ran it while it did its checks.
   - `setup`: only the test setup ran it (log in, make products).
@@ -324,13 +336,24 @@ coverage by feature (Features tab > "Code by feature"). Give:
   routes and the logic behind them. Leave out shared helpers, plugin start-up
   code and test setup. One function can be in more than one feature when it
   really does each of them.
+- **A template goes with the code that loads it.** When a function of the
+  feature loads a template or a data file (`require WWP_VIEWS_PATH .
+  'view-x.php'`, `$i18n = require ... 'I18n/settings.php'`), put that file in
+  the same feature as a whole file: `{ "file": "views/view-x.php" }`. The
+  template has no functions, so the coverage run does not name it, but it is
+  the screen of the feature.
 - For a test file, start from `test-code`, then read the code to check it.
   For a code area, use the files of the area.
-- The tool only adds code. If code you added before is wrong, say so in the
-  report: a person removes it in the app.
+- The tool only adds code, with one exception: `removeCode` on a feature takes
+  out code that the AI added, to move it after a change:
+  `"removeCode": [{ "file": "includes/class-x.php", "function": "Class_X::old" }]`
+  (no function: the whole-file entry). Code that a person added stays. If
+  other code you added before is wrong, say so in the report: a person removes it in the app.
 
-**Sort the code that no test runs (code units).** For each open function of the
-area (state `never`, `setup` or `background` in the `code` output), decide:
+**Sort the code (code units).** For each `open` or `check` item of the files
+in `unit.files`, decide (the coverage state does not matter: `tested` code
+needs a feature too). If `next <project> code` says "No coverage run yet",
+stop: the code work comes from a coverage run, so no code unit is possible.
 
 - **Feature code**: it does something a user or admin can see or use (a
   setting, a screen, a REST route, a price rule, an email). Put it in the
@@ -338,20 +361,29 @@ area (state `never`, `setup` or `background` in the `code` output), decide:
   for it, with no test link. If no feature fits, make a feature. Write the
   scopes from the code, as for any feature.
 - **Library code**: start-up, hook registration, small helpers that many
-  features call, glue, or code that nothing calls. Put it in the top-level
-  `library` list of the payload, one entry for each function, with a reason:
+  features call, or glue. Put it in the top-level `library` list of the
+  payload, one entry for each function, with a reason. `"function": ""` is the
+  code outside all functions of the file:
 
   ```json
   "library": [
-    { "file": "includes/class-x.php", "function": "Class_X::helper", "reason": "A small helper that the price and cart features call." }
+    { "file": "includes/class-x.php", "function": "Class_X::helper", "reason": "A small helper that the price and cart features call." },
+    { "file": "plugin.bootstrap.php", "function": "", "reason": "Start-up checks: the plugin stops when WooCommerce is missing." }
   ]
   ```
 
   The app then counts its lines as library code, not as code that no test
   runs, and `next` does not offer it again. A person can remove a decision.
-  A code unit can send only `library`, with an empty `features` list.
-- Do not leave an open function out. A function you leave out comes back
-  only when a sync changes its file.
+  The `ABSPATH` guard at the top of a file and blank lines are library
+  already: the app finds them itself.
+- **Unused code**: no plugin code loads or calls it (search the plugin for its
+  name or file name first, and say what you searched in the reason). Put it in
+  the top-level `unused` list, in the same form as `library`. The overview
+  shows it apart, so the team can delete it. A template that no PHP file
+  `require`s is unused as a whole: `{ "file": "views/view-x.php", "function": "", "reason": "No PHP file requires it (searched for view-x)." }`.
+- A code unit can send only `library` and `unused`, with an empty `features`
+  list. A code unit cannot be skipped: code that fits no feature is library or unused.
+- Do not leave an item out: `apply` refuses the payload and names the items.
 
 **Add screenshots, so a person sees how the feature looks.** People open the
 feature page to learn the feature. A picture of the settings and of the result

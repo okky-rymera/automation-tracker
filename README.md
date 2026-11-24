@@ -76,6 +76,8 @@ The AI skill also adds screenshots. It takes them with playwright-cli on the tes
 
 The Claude Code skill `map-features` (in `.claude/skills/`) writes a first draft of the list. It does one unit at a time: one Playwright spec file, one Cypress `.feature` file, or one plugin code area. It does all Playwright files first, then all Cypress files, then the plugin code that is left. Start Claude Code in this folder and say, for example, "map the next cypress file for wwp".
 
+The code work comes from the code, not from a list of files that the AI looked at (`server/code-work.ts`). Each PHP function, and the code outside all functions of each file, must be in a feature or have a decision: library (start-up, helpers, glue) or unused (no plugin code loads or calls it). The app makes the guard lines (`defined( 'ABSPATH' )`) and blank lines library itself. The app keeps a content fingerprint of each sorted function (`server/code-fingerprint.ts`). After a sync, only the code that changed goes back to the AI, as "check". A save that leaves code of its files unsorted is refused, and a code unit cannot be skipped. `npm run -s check-fingerprint -- <project>` checks the fingerprints.
+
 - The skill reads the tests and the plugin code. It can also run the test or try the feature in a browser.
 - It adds to the features that exist before it makes new ones, and it links each test to the scopes it checks.
 - It puts the plugin code of each feature (files or functions) in the feature, for "Code by feature".
@@ -229,7 +231,7 @@ The tracker server syncs each project with sync on once a day, when it is due (`
 **The AI step after the sync** (on by default; the Settings screen turns it off). It uses Sonnet; the Settings screen changes the model. When no project is due for a sync, the server gives one project at a time to Claude:
 
 1. The AI update checks the features whose tests or code changed since the last AI check. The list keeps these features from day to day, so a day with no AI step loses nothing.
-2. The mapping loop does at most 10 units: changed, new and unlinked test files, then the code that no test runs.
+2. The mapping loop does at most 10 units: changed, new and unlinked test files, then the code that is in no feature and has no decision, and the code that changed.
 
 - A project gets the AI step after each sync, until the loop finds no unit left. At the unit limit, it waits until the next day, so each project gets some AI work each day.
 - The syncs go first. When a sync becomes due, the AI step stops after the current unit or feature.

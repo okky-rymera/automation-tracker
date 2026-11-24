@@ -38,7 +38,9 @@ export function codeRows(projectId: string, featureId?: number): CodeRow[] {
   return rows.map(({ scopes, ...r }) => ({ ...r, checked: !!r.checked, scopeIds: scopes ? String(scopes).split(',').map(Number) : [] }));
 }
 
-const zero = (): LineCounts => ({ runnable: 0, library: 0, tested: 0, setup: 0, background: 0, never: 0, runByTests: 0, cypressOnly: 0, markedLibrary: 0, markedCovered: 0 });
+const zero = (): LineCounts => ({
+  runnable: 0, library: 0, tested: 0, setup: 0, background: 0, never: 0, runByTests: 0, cypressOnly: 0, markedLibrary: 0, markedCovered: 0, decisionLibrary: 0, unused: 0, autoLibrary: 0, personLibrary: 0,
+});
 
 /** Line numbers of an entry: all runnable lines of the file, or the lines of the functions with that name. Null: not in the code now. */
 function entryLines(cov: CoverageData, file: string, fn: string): Set<number> | null {
@@ -60,6 +62,10 @@ function count(cov: CoverageData, file: string, lines: Set<number>): LineCounts 
   c.cypressOnly = (fl.cypressOnly ?? []).filter((n) => lines.has(n)).length;
   c.markedLibrary = (fl.markedLibrary ?? []).filter((n) => lines.has(n)).length;
   c.markedCovered = (fl.markedCovered ?? []).filter((n) => lines.has(n)).length;
+  c.decisionLibrary = (fl.decisionLibrary ?? []).filter((n) => lines.has(n)).length;
+  c.unused = (fl.unused ?? []).filter((n) => lines.has(n)).length;
+  c.autoLibrary = (fl.autoLibrary ?? []).filter((n) => lines.has(n)).length;
+  c.personLibrary = (fl.personLibrary ?? []).filter((n) => lines.has(n)).length;
   return c;
 }
 

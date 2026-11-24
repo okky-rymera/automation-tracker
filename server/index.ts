@@ -59,7 +59,7 @@ function runInfo(p: ProjectConfig) {
   );
 }
 
-const lineKeys = ['runnable', 'library', 'tested', 'setup', 'background', 'never', 'runByTests', 'cypressOnly', 'markedLibrary', 'markedCovered'] as const;
+const lineKeys = ['runnable', 'library', 'tested', 'setup', 'background', 'never', 'runByTests', 'cypressOnly', 'markedLibrary', 'markedCovered', 'decisionLibrary', 'unused', 'autoLibrary', 'personLibrary'] as const;
 const lineTotals = (php: FileEntry[]) => Object.fromEntries(lineKeys.map((k) => [k, php.reduce((n, f) => n + f.lines[k], 0)]));
 
 /**

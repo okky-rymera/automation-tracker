@@ -1,4 +1,5 @@
-import { useApi, type FileEntry, type View } from '../../api';
+import { useEffect } from 'react';
+import { featureTotal, useApi, type FileEntry, type View } from '../../api';
 import { fmt, type Tracker } from '../data';
 import { link, setQuery, useSticky, type Route } from '../route';
 import { Bar, Card, IFile, IFolder, INext, Loading, Seg, SortTh } from '../ui';
@@ -6,15 +7,17 @@ import { codeNums, type LC } from './Overview';
 import { Warnings } from './Warnings';
 import { LibraryReview, useReviewData } from './LibraryReview';
 
-type Sort = 'path' | 'unc' | 'pct' | 'lib' | 'marked';
-const NAT: Record<Sort, 'ascending' | 'descending'> = { path: 'ascending', unc: 'descending', pct: 'ascending', lib: 'descending', marked: 'descending' };
+type Sort = 'path' | 'unc' | 'nof' | 'pct' | 'lib' | 'marked';
+const NAT: Record<Sort, 'ascending' | 'descending'> = { path: 'ascending', unc: 'descending', nof: 'descending', pct: 'ascending', lib: 'descending', marked: 'descending' };
 export const VIEW_LABEL: Record<View, string> = { playwright: 'Playwright', cypress: 'Cypress', both: 'Both' };
 
-interface Stats { run: number; mcov: number; setup: number; miss: number; lib: number; mlib: number; feat: number; unc: number; marked: number; pct: number; nfiles: number }
-const stats = (l: LC): Stats => {
+/** nof: plugin lines that no feature holds (both runs together, as the overview counts them). */
+interface Stats { run: number; mcov: number; setup: number; miss: number; lib: number; mlib: number; feat: number; unc: number; nof: number; marked: number; pct: number; nfiles: number }
+const stats = (l: LC, nof: number): Stats => {
   const c = codeNums(l);
-  return { ...c, unc: c.setup + c.miss, marked: c.mlib + c.mcov, pct: c.feat ? c.pct : 100, nfiles: 1 };
+  return { ...c, unc: c.setup + c.miss, nof, marked: c.mlib + c.mcov, pct: c.feat ? c.pct : 100, nfiles: 1 };
 };
+const zeroStats = (): Stats => ({ run: 0, mcov: 0, setup: 0, miss: 0, lib: 0, mlib: 0, feat: 0, unc: 0, nof: 0, marked: 0, pct: 0, nfiles: 0 });
 interface Dir { name: string; path: string; dirs: Map<string, Dir>; files: { e: FileEntry; s: Stats; name: string }[]; s?: Stats }
 
 /** File order of the tree as it shows now: the file page uses it for "Previous" and "Next". */
@@ -39,6 +42,15 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
   const [sort, setSort] = useSticky<Sort>('code.sort', 'unc');
   const [rev, setRev] = useSticky('code.rev', false);
   const [exp, setExp] = useSticky<Record<string, boolean>>('code.exp', {});
+  // The overview links ask for a sort (?sort=unc, nof or marked). Use it one time, then take it out of the URL.
+  const askedSort = route.q.get('sort');
+  useEffect(() => {
+    if (!askedSort || !(askedSort in NAT)) return;
+    setSort(askedSort as Sort);
+    setRev(false);
+    if (askedSort === 'unc') setHide(true);
+    setQuery({ sort: null });
+  }, [askedSort]); // eslint-disable-line react-hooks/exhaustive-deps
   const review = useReviewData(t.project);
   const tab = route.q.get('tab') === 'decisions' ? 'decisions' : 'files';
   const tabs = (
@@ -79,11 +91,12 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
     );
   }
   if (!data) return <Loading error={error} />;
-  const files = data.filter((e) => e.lang === 'php' && e.measured).map((e) => ({ e, s: stats(e.lines as LC), name: e.path.split('/').pop()! }));
+  const noFeature = new Map((t.codeMap?.unmapped ?? []).map((u) => [u.file, featureTotal(u.lines)]));
+  const files = data.filter((e) => e.lang === 'php' && e.measured).map((e) => ({ e, s: stats(e.lines as LC, noFeature.get(e.path) ?? 0), name: e.path.split('/').pop()! }));
   const tot = files.reduce<Stats>((a, { s }) => {
     for (const k of Object.keys(a) as (keyof Stats)[]) a[k] += s[k];
     return a;
-  }, { run: 0, mcov: 0, setup: 0, miss: 0, lib: 0, mlib: 0, feat: 0, unc: 0, marked: 0, pct: 0, nfiles: 0 });
+  }, zeroStats());
   const totPct = tot.feat ? Math.round(((tot.run + tot.mcov) / tot.feat) * 100) : 0;
   const ql = cq.trim().toLowerCase();
   const list = files.filter((x) => (!ql || x.e.path.toLowerCase().includes(ql)) && (!hide || x.s.unc > 0));
@@ -101,7 +114,7 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
     n.files.push(x);
   }
   const agg = (d: Dir): Stats => {
-    const a: Stats = { run: 0, mcov: 0, setup: 0, miss: 0, lib: 0, mlib: 0, feat: 0, unc: 0, marked: 0, pct: 0, nfiles: 0 };
+    const a = zeroStats();
     for (const s of [...[...d.dirs.values()].map(agg), ...d.files.map((f) => f.s)]) for (const k of Object.keys(a) as (keyof Stats)[]) if (k !== 'pct') a[k] += s[k];
     a.pct = a.feat ? Math.round(((a.run + a.mcov) / a.feat) * 100) : 100;
     d.s = a;
@@ -114,6 +127,7 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
       : sort === 'pct' ? A.pct - B.pct || B.unc - A.unc || a.name.localeCompare(b.name)
       : sort === 'lib' ? B.lib - A.lib || a.name.localeCompare(b.name)
       : sort === 'marked' ? B.marked - A.marked || a.name.localeCompare(b.name)
+      : sort === 'nof' ? B.nof - A.nof || a.name.localeCompare(b.name)
       : B.unc - A.unc || a.name.localeCompare(b.name);
   };
   const cmp = (a: { name: string; s?: Stats }, b: { name: string; s?: Stats }) => (rev ? -cmp0(a, b) : cmp0(a, b));
@@ -133,6 +147,7 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
           </div>
           <span className="num" style={{ fontSize: 13, width: 40 }}>{s.feat ? `${s.pct}%` : '–'}</span>
         </div>
+        <div role="cell" className="num" style={{ fontSize: 13 }}>{s.nof ? fmt(s.nof) : '–'}</div>
         <div role="cell" className="num" style={{ fontSize: 13 }}>{fmt(s.lib)}</div>
         <div role="cell" className="num" style={{ fontSize: 13 }}>{s.marked ? fmt(s.marked) : '–'}</div>
       </>
@@ -192,28 +207,10 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
       {head}
       {tabs}
       <Warnings p={t.summary} parse={false} />
-      <div className="grid3">
-        <Card className="q-card">
-          <div className="q-q">Feature code run by tests</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}><span className="q-big">{totPct}%</span><span className="q-sub">{fmt(tot.run + tot.mcov)} of {fmt(tot.feat)} feature lines</span></div>
-          <Bar total={tot.feat} label={`${fmt(tot.run)} run by tests, ${fmt(tot.mcov)} marked covered, ${fmt(tot.setup)} only in setup, ${fmt(tot.miss)} never run`} parts={[[tot.run, 'c-good'], [tot.mcov, 'c-mcov'], [tot.setup, 'c-skip'], [tot.miss, 'c-fail']]} />
-          <div className="legend">
-            <span><i className="sw c-good" />{fmt(tot.run)} Run by tests</span><span><i className="sw c-mcov" />{fmt(tot.mcov)} Marked covered</span>
-            <span><i className="sw c-skip" />{fmt(tot.setup)} Only in setup</span><span><i className="sw c-fail" />{fmt(tot.miss)} Never run</span>
-          </div>
-        </Card>
-        <Card className="q-card">
-          <div className="q-q">Uncovered feature lines</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}><span className="q-big">{fmt(tot.unc)}</span><span className="q-sub">in {files.filter((x) => x.s.unc > 0).length} files</span></div>
-          <div className="q-sub">Never run, or run only while a test sets up. Library code is left out.</div>
-          <div><button className="linkbtn" onClick={() => (setSort('unc'), setRev(false), setHide(true))}>Show the files with the most first</button></div>
-        </Card>
-        <Card className="q-card">
-          <div className="q-q">Marked by hand</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}><span className="q-big">{fmt(tot.marked)}</span><span className="q-sub">lines</span></div>
-          <div className="q-sub">{fmt(tot.mlib)} as library, {fmt(tot.mcov)} as covered. Marks count in these totals. Open a file to add or remove them.</div>
-        </Card>
-      </div>
+      <p className="muted" style={{ margin: 0 }}>
+        <strong>{fmt(tot.unc)} uncovered lines</strong> in {files.filter((x) => x.s.unc > 0).length} files. Tests run {totPct}% of {fmt(tot.feat)} plugin lines. Library code is left out.{' '}
+        <a className="linkbtn" href={link(t.project, 'overview')}>See all numbers on the overview</a>
+      </p>
       <div className="toolbar" style={{ gap: 10 }}>
         <label className="sr" htmlFor="cq">Search files</label>
         <input id="cq" className="input" style={{ flex: '1 1 240px', maxWidth: 360 }} placeholder="Search file paths" value={cq} onChange={(e) => setCq(e.target.value)} />
@@ -229,7 +226,8 @@ export function CodeList({ t, route }: { t: Tracker; route: Route }) {
             <div className="gr gh cols-cf" role="row">
               <SortTh k="path" label="Name" sort={sort} rev={rev} natural={NAT.path} onSort={onSort} />
               <SortTh k="unc" label="Uncovered lines" sort={sort} rev={rev} natural={NAT.unc} onSort={onSort} className="num" />
-              <SortTh k="pct" label="Feature lines run" sort={sort} rev={rev} natural={NAT.pct} onSort={onSort} />
+              <SortTh k="pct" label="Plugin lines run" sort={sort} rev={rev} natural={NAT.pct} onSort={onSort} />
+              <SortTh k="nof" label="In no feature" sort={sort} rev={rev} natural={NAT.nof} onSort={onSort} className="num" />
               <SortTh k="lib" label="Library lines" sort={sort} rev={rev} natural={NAT.lib} onSort={onSort} className="num" />
               <SortTh k="marked" label="Marked" sort={sort} rev={rev} natural={NAT.marked} onSort={onSort} className="num" />
             </div>

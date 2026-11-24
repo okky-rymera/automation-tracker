@@ -29,7 +29,7 @@ export function Projects() {
                   <div className="mono faint" style={{ overflowWrap: 'anywhere' }}>{p.path}</div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                     <span className="q-big">{featurePct(l)}%</span>
-                    <span className="q-sub">{fmt(l.tested)} of {fmt(ft)} feature lines run by tests</span>
+                    <span className="q-sub">{fmt(l.tested)} of {fmt(ft)} plugin lines run by tests</span>
                   </div>
                   <Bar total={ft} parts={[[l.tested, 'c-good'], [l.setup + l.background, 'c-skip'], [l.never, 'c-fail']]} />
                   <div className="kv">

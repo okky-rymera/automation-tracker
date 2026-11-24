@@ -26,6 +26,9 @@
  *  - A link that a person removed is never added again.
  *  - Links made here have source "ai", so the app can show them as AI links.
  *  - Mapped code (feature_code) is only added. Code that a person removed is never added again.
+ *    One exception, for code units only: "removeCode" takes out code that the AI added and no person
+ *    checked, so the AI can move code that changed (server/code-work.ts "check" items).
+ *  - A library or unused decision is refused for code that a person put in a feature or checked.
  *  - One exception to the first rule: with unit kind "answer", "answeredQuestions" deletes open questions,
  *    also a person's. The person asked the answer-questions skill to answer them. The automatic AI update
  *    cannot send this field (its schema in server/ai-update.ts is closed).
@@ -44,7 +47,9 @@ import { EditError, edits, idNumber, NEW_SCOPE_ID, variationTitle, columnWord, c
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
-import { addLibrary } from './code-decisions.ts';
+import { addDecisions } from './code-decisions.ts';
+import { codeWork, fillFingerprints, workByFile, type WorkItem } from './code-work.ts';
+import { currentFingerprint } from './code-fingerprint.ts';
 import { addLeftOut, clearLeftOutForLinked, leftOutIds } from './left-out.ts';
 import { execFileSync } from 'node:child_process';
 
@@ -150,9 +155,18 @@ function status(p: ProjectConfig) {
   }
   const code = units(p.id, 'code');
   const php = (db.prepare("SELECT COUNT(*) AS n FROM source_files WHERE project_id = ? AND lang = 'php'").get(p.id) as any).n;
-  const phpSet = new Set((db.prepare("SELECT path FROM source_files WHERE project_id = ? AND lang = 'php'").all(p.id) as any[]).map((r) => r.path));
-  const covered = new Set(code.flatMap((u) => u.files).filter((f) => phpSet.has(f)));
-  res.code = { areas: code.length, phpFiles: php, phpFilesInAreas: covered.size, changed: code.filter((u) => u.hash !== hashFiles(p, u.files)).map((u) => u.ref) };
+  fillFingerprints(p);
+  const work = codeWork(p);
+  const statusView = resolveView(p, 'both');
+  res.code = {
+    areas: code.length,
+    phpFiles: php,
+    // No coverage run: the code work comes from the run, so it cannot be known yet.
+    ...(statusView && loadCoverage(p, statusView) ? {} : { noCoverageRun: true }),
+    filesWithWork: new Set(work.map((w) => w.file)).size,
+    open: work.filter((w) => w.status === 'open').length,
+    toCheck: work.filter((w) => w.status === 'check').length,
+  };
   const f = db.prepare("SELECT COUNT(*) AS n, SUM(ai_fields <> '[]') AS ai FROM features WHERE project_id = ?").get(p.id) as any;
   const noCode = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.removed = 0)').get(p.id) as any).n;
   const noShots = (db.prepare('SELECT COUNT(*) AS n FROM features f WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM screenshots s WHERE s.feature_id = f.id AND s.removed = 0)').get(p.id) as any).n;
@@ -223,49 +237,41 @@ function next(p: ProjectConfig, kind: Kind) {
 }
 
 /**
- * PHP files with code that no test runs and that is not sorted yet, most such functions first.
- * A file is a candidate when no code area holds it, or when it changed since its code area was
- * processed (a sync brought new code). "open" functions: no test runs them, no feature holds them,
- * and they are not library code (a library decision, server/code-decisions.ts, or a library mark).
+ * PHP files with code that the feature list does not account for yet (server/code-work.ts): "open"
+ * items (no feature holds them, no decision) and "check" items (sorted, but the code changed since).
+ * The files with the most such lines come first. A parked file (failed 2 times in a loop) is left
+ * out until it changes.
  */
 function nextCode(p: ProjectConfig) {
-  const areas = units(p.id, 'code');
-  const changedAreas = new Set(areas.filter((u) => u.status === 'done' && u.hash && hashFiles(p, u.files) !== u.hash).flatMap((u) => u.files));
-  const inAreas = new Set(areas.flatMap((u) => u.files));
-  const php = (db.prepare("SELECT path FROM source_files WHERE project_id = ? AND lang = 'php' ORDER BY path").all(p.id) as any[]).map((r) => r.path as string);
+  fillFingerprints(p);
   const view = resolveView(p, 'both');
   const cov = view && loadCoverage(p, view);
-  // Code that a feature holds: whole files, and functions by file.
-  const held = new Map<string, Set<string>>();
-  for (const r of db.prepare('SELECT file, function FROM feature_code WHERE project_id = ? AND removed = 0').all(p.id) as any[]) {
-    const s = held.get(r.file) ?? new Set<string>();
-    s.add(r.function ?? '');
-    held.set(r.file, s);
-  }
   const parked = parkedUnits(p.id, 'code');
-  const list = php
-    .filter((f) => !inAreas.has(f) || changedAreas.has(f))
-    .filter((f) => {
-      const park = parked.get(f);
-      return !park || park.hash !== hashFiles(p, [f]);
-    })
-    .map((f) => {
-      const fns = cov?.functionsByFile.get(f) ?? [];
-      const by = (s: string) => fns.filter((x) => x.state === s).length;
-      const h = held.get(f);
-      const open = fns.filter((x) => x.state !== 'tested' && x.state !== 'library' && !(h && (h.has('') || h.has(x.function)))).length;
-      return { file: f, functions: fns.length, tested: by('tested'), notTested: fns.length - by('tested') - by('library'), never: by('never'), open, ...(changedAreas.has(f) ? { changedSinceArea: true } : {}) };
-    })
-    .filter((x) => !x.changedSinceArea || x.open > 0)
-    .sort((a, b) => b.open - a.open || b.notTested - a.notTested || a.file.localeCompare(b.file));
+  const list = workByFile(codeWork(p, undefined, cov)).filter((x) => {
+    const park = parked.get(x.file);
+    return !park || park.hash !== hashFiles(p, [x.file]);
+  });
+  const item = (w: WorkItem) => ({
+    function: w.function || '(code outside functions)',
+    status: w.status,
+    ...(w.lines ? { lines: w.lines } : {}),
+    featureLines: w.featureLines,
+    ...(w.state ? { state: w.state } : {}),
+    ...(w.heldBy ? { heldBy: w.heldBy.map((h) => `F-${h.featureId} ${h.feature}${h.source === 'manual' ? ' (a person added it)' : ''}`) } : {}),
+    ...(w.decision ? { decision: w.decision } : {}),
+  });
   out({
     kind: 'code',
     coverage: cov?.label ?? null,
-    message: list.length
-      ? 'Pick one plugin feature or settings area. Read the files it needs, then name the area as the unit ref.'
-      : 'Every PHP file is in a processed code area.',
+    message: !cov
+      ? 'No coverage run yet: the code work comes from a coverage run, so it is not known. Run the coverage first (the sync does it). No code unit is possible now.'
+      : list.length
+      ? 'Pick one plugin feature or settings area. Sort every item of each file that you put in unit.files: put it in a feature, or in "library" or "unused". A "check" item changed since it was sorted: keep it, move it, or decide again.'
+      : 'All plugin code is in a feature, or has a library or unused decision.',
     remainingFiles: list.length,
-    candidates: list.slice(0, 20),
+    open: list.reduce((n, x) => n + x.open, 0),
+    toCheck: list.reduce((n, x) => n + x.check, 0),
+    candidates: list.slice(0, 20).map((x) => ({ file: x.file, open: x.open, check: x.check, featureLines: x.featureLines, items: x.items.map(item) })),
   });
 }
 
@@ -276,20 +282,42 @@ function code(p: ProjectConfig, file: string | undefined) {
   const cov = view && loadCoverage(p, view);
   const runToTest = runTestOwners(p);
   const fns = cov?.functionsByFile.get(file) ?? [];
+  // What holds each function now: features (by name, or the whole file) and decisions. "work": the open or "check" status.
+  const heldRows = db
+    .prepare('SELECT c.function, c.feature_id AS fid, f.title FROM feature_code c JOIN features f ON f.id = c.feature_id WHERE c.project_id = ? AND c.file = ? AND c.removed = 0')
+    .all(p.id, file) as any[];
+  const decisions = new Map((db.prepare('SELECT function, kind, reason FROM code_decisions WHERE project_id = ? AND file = ?').all(p.id, file) as any[]).map((r) => [r.function as string, r]));
+  const work = new Map(codeWork(p, [file], cov).map((w) => [w.function, w.status]));
+  const about = (name: string) => {
+    const features = heldRows.filter((r) => r.function === name || r.function === '').map((r) => `F-${r.fid} ${r.title}${r.function === '' ? ' (whole file)' : ''}`);
+    const d = decisions.get(name);
+    return {
+      ...(features.length ? { features } : {}),
+      ...(d ? { decision: `${d.kind}: ${d.reason}` } : {}),
+      ...(work.has(name) ? { work: work.get(name) } : {}),
+    };
+  };
+  const seen = new Set<string>();
   out({
     file,
     coverage: cov?.label ?? null,
     functions: fns.map((fn) => {
       const tests = [...new Set(fn.tests.map((t) => runToTest.get(t)).filter(Boolean))] as string[];
+      // Closures share one name: give the holder and work status only on the first one.
+      const extra = seen.has(fn.function) ? {} : about(fn.function);
+      seen.add(fn.function);
       // Library code runs on every request, so its test list says nothing about one feature.
-      if (fn.state === 'library') return { name: fn.function, lines: `${fn.start}-${fn.end}`, state: fn.state, testCount: tests.length };
+      if (fn.state === 'library') return { name: fn.function, lines: `${fn.start}-${fn.end}`, state: fn.state, testCount: tests.length, ...extra };
       return {
         name: fn.function,
         lines: `${fn.start}-${fn.end}`,
         state: fn.state,
         tests: tests.map((id) => ({ id, links: linksOf(p.id, id).filter((l) => !l.removed).map((l) => `F-${l.featureId} ${l.feature}`) })),
+        ...extra,
       };
     }),
+    // The code outside all functions (class lines, properties, start-up code, a template). Name it "" in the payload.
+    outsideFunctions: about(''),
   });
 }
 
@@ -339,7 +367,8 @@ interface CodeIn {
   scopes?: (string | number)[];
 }
 
-function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: Map<string, number | null>, report: string[]) {
+/** confirm: a code unit, so sending an entry again sets its fingerprint to the code now (it checked the code). */
+function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: Map<string, number | null>, report: string[], confirm: boolean) {
   for (const e of entries) {
     const file = str(e?.file, 500);
     const full = file && repoFile(p, file);
@@ -360,17 +389,23 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: M
       continue;
     }
     for (const fn of fns.length ? fns : ['']) {
-      const cur = db.prepare('SELECT id, removed, source FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
+      const cur = db.prepare('SELECT id, removed, source, fingerprint FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
       const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
       if (cur?.removed) {
         report.push(`F-${fid} code ${what}: a person removed it. Not added again.`);
         continue;
       }
+      // The code now: a new entry gets it, and sending an entry again confirms it (server/code-work.ts "check").
+      const fp = currentFingerprint(p, file, fn, 'file');
       if (!cur) {
-        const id = Number(db.prepare("INSERT INTO feature_code (project_id, feature_id, file, function, source) VALUES (?, ?, ?, ?, 'ai')").run(p.id, fid, file, fn).lastInsertRowid);
+        const id = Number(db.prepare("INSERT INTO feature_code (project_id, feature_id, file, function, source, fingerprint) VALUES (?, ?, ?, ?, 'ai', ?)").run(p.id, fid, file, fn, fp).lastInsertRowid);
         addScopeTags('code_scopes', id, want);
         report.push(`F-${fid} code: added ${what}${want.length ? ` / ${names(want)}` : ''}.`);
         continue;
+      }
+      if (confirm && fp && cur.fingerprint !== fp) {
+        db.prepare('UPDATE feature_code SET fingerprint = ? WHERE id = ?').run(fp, cur.id);
+        report.push(`F-${fid} code ${what}: checked again after a change. It stays in the feature.`);
       }
       const have = new Set((db.prepare('SELECT scope_id FROM code_scopes WHERE code_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
       const missing = want.filter((x) => !have.has(x));
@@ -383,6 +418,26 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: M
       addScopeTags('code_scopes', cur.id, missing);
       report.push(`F-${fid} code ${what}: added scopes ${names(missing)}.`);
     }
+  }
+}
+
+/** Takes AI code out of a feature (removeCode). Code that a person added or checked stays. The row goes: the AI can add it again later. */
+function removeCode(fid: number, entries: { file: string; function?: string }[], report: string[]) {
+  for (const e of entries) {
+    const file = str(e?.file, 500);
+    const fn = str(e?.function ?? '', 300);
+    const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
+    const cur = db.prepare('SELECT id, source, checked FROM feature_code WHERE feature_id = ? AND file = ? AND function = ? AND removed = 0').get(fid, file, fn) as any;
+    if (!cur) {
+      report.push(`F-${fid} removeCode ${what}: the feature does not have this code.`);
+      continue;
+    }
+    if (cur.source === 'manual' || cur.checked) {
+      report.push(`F-${fid} removeCode ${what}: a person ${cur.source === 'manual' ? 'added' : 'checked'} it. Not removed.`);
+      continue;
+    }
+    db.prepare('DELETE FROM feature_code WHERE id = ?').run(cur.id);
+    report.push(`F-${fid} code: removed ${what}.`);
   }
 }
 
@@ -535,8 +590,13 @@ interface FeatureIn {
   answeredQuestions?: number[];
   scopes?: ScopeIn[];
   links?: LinkIn[];
-  /** Plugin code of the feature: a whole file, or functions in it. */
+  /** Plugin code of the feature: a whole file, or functions in it. Sending code that the feature has already confirms it (a "check" item). */
   code?: CodeIn[];
+  /**
+   * Code to take out of this feature, to move it to another feature (or to "library" or "unused") after
+   * it changed. Only code that the AI added: a person's code stays. function "" or no function: the whole-file entry.
+   */
+  removeCode?: { file: string; function?: string }[];
   /** Images of the feature: a local image file, a caption, and the scopes it shows. */
   screenshots?: ShotIn[];
 }
@@ -579,6 +639,11 @@ interface Payload {
    */
   library?: { file: string; function: string; reason: string }[];
   /**
+   * Code that no plugin code loads or calls (server/code-decisions.ts, kind "unused"). It counts apart
+   * from library code, so the team can delete it. function "": the code outside all functions (a whole template).
+   */
+  unused?: { file: string; function?: string; reason: string }[];
+  /**
    * Tests of the unit that fit no feature, each with a reason (server/left-out.ts). "next" then does
    * not give the file again for them.
    */
@@ -609,16 +674,30 @@ function apply(p: ProjectConfig, file: string | undefined) {
   if (!ref) fail('unit.ref is empty');
   const library = Array.isArray(body.library) ? body.library : [];
   if (body.library !== undefined && !Array.isArray(body.library)) fail('library must be a list');
+  const unused = Array.isArray(body.unused) ? body.unused : [];
+  if (body.unused !== undefined && !Array.isArray(body.unused)) fail('unused must be a list');
+  if ((library.length || unused.length) && kind !== 'code' && !update) fail('"library" and "unused" work only for a code unit. Nothing was saved.');
   const leftOut = Array.isArray(body.leftOut) ? body.leftOut : [];
   if (body.leftOut !== undefined && !Array.isArray(body.leftOut)) fail('leftOut must be a list');
   if (leftOut.length && (kind === 'code' || update)) fail('leftOut works only for a Playwright or Cypress unit. Nothing was saved.');
   if (!Array.isArray(body.features)) body.features = [];
-  if (!body.features.length && !(kind === 'code' && library.length) && !leftOut.length)
-    fail('features is empty. Use the skip command for a unit with no feature (a code unit can send only "library"; a test unit can send only "leftOut").');
-  for (const it of library) {
-    const known = it && typeof it.file === 'string' ? functionNames(p, it.file) : null;
-    if (known && !known.has(String(it.function))) fail(`library: ${it.file} has no function "${it.function}" in the coverage run. Use the names that "code" lists. Nothing was saved.`);
+  if (!body.features.length && !(kind === 'code' && (library.length || unused.length)) && !leftOut.length)
+    fail('features is empty. Use the skip command for a test unit with no feature (a code unit can send only "library" or "unused"; a test unit can send only "leftOut").');
+  for (const [what, items] of [['library', library], ['unused', unused]] as const) {
+    for (const it of items as { file: string; function?: string }[]) {
+      // A bad entry: addDecisions refuses it with a clear message.
+      if (!it || typeof it.file !== 'string') continue;
+      const fn = String(it?.function ?? '');
+      const known = it && typeof it.file === 'string' ? functionNames(p, it.file) : null;
+      if (fn && known && !known.has(fn)) fail(`${what}: ${it.file} has no function "${fn}" in the coverage run. Use the names that "code" lists, or "" for the code outside functions. Nothing was saved.`);
+      // A decision makes the lines library: a person's feature would lose code that the person put there or checked.
+      const person = db
+        .prepare("SELECT c.feature_id AS fid FROM feature_code c WHERE c.project_id = ? AND c.file = ? AND c.removed = 0 AND (c.source = 'manual' OR c.checked = 1) AND (c.function = ? OR c.function = '')")
+        .get(p.id, it?.file, fn) as any;
+      if (person) fail(`${what}: a person put ${it.file} ${fn || '(code outside functions)'} in F-${person.fid} or checked it there. Keep it in a feature: send it in that feature's "code". Nothing was saved.`);
+    }
   }
+  if (kind !== 'code' && body.features.some((f) => f?.removeCode !== undefined)) fail('"removeCode" works only for a code unit. Nothing was saved.');
 
   // Files the unit read: the test file, or the code files of the area.
   let files = (unit.files ?? []).map((f) => str(f, 500)).filter(Boolean);
@@ -627,11 +706,17 @@ function apply(p: ProjectConfig, file: string | undefined) {
     if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND framework = ? AND file = ? AND removed_at IS NULL').get(p.id, kind, ref))
       fail(`No ${kind} file "${ref}" in the last scan. Use the ref that "next" gave.`);
     files = [...new Set([testRepoPath(p, kind, ref), ...files])];
-  } else if (!files.length) fail('A code unit needs unit.files: the repo files that the area uses.');
+  } else if (!files.length) fail('A code unit needs unit.files: the repo files whose code the unit sorted.');
   for (const f of files) {
     const full = repoFile(p, f);
     if (!full) fail(`File path is outside the plugin repo, or hidden: ${f}`);
     if (!fs.existsSync(full)) fail(`No file ${f} in the plugin repo. Give paths relative to the repo root.`);
+  }
+
+  // A code unit must sort code that was open or to check: else the loop would get the same files again.
+  if (kind === 'code') {
+    fillFingerprints(p);
+    if (!codeWork(p, files).length) fail(`unit.files has no open or "check" code: ${files.join(', ')}. List the files whose code this unit sorts ("next ${p.id} code" lists them). Nothing was saved.`);
   }
 
   // Old field names, checked before anything is written.
@@ -687,7 +772,8 @@ function apply(p: ProjectConfig, file: string | undefined) {
           else if (sid !== null) writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
         }
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
-        writeCode(p, fid, list<CodeIn>(inF.code, 'code'), scopeIds, report);
+        removeCode(fid, list<{ file: string; function?: string }>(inF.removeCode, 'removeCode'), report);
+        writeCode(p, fid, list<CodeIn>(inF.code, 'code'), scopeIds, report, kind === 'code');
         for (const x of list<ShotIn>(inF.screenshots, 'screenshots')) writeScreenshot(p, fid, x, scopeIds, report);
         if (totalChanges() > before) changed.add(fid);
       }
@@ -712,9 +798,24 @@ function apply(p: ProjectConfig, file: string | undefined) {
           .all(p.id, kind, ref) as any[]).map((r) => r.id as string);
         if (open.length) throw new EditError(`these tests have no link and are not in "leftOut": ${open.join(', ')}. Link each test, or put it in "leftOut" with a reason`);
       }
+      const commit = library.length || unused.length ? headCommit(p) : null;
+      const named = (l: { file: string; function?: string }) => `${l.file} ${l.function || '(code outside functions)'}`;
       if (library.length) {
-        const n = addLibrary(p, library, 'ai', headCommit(p));
-        report.push(`Library code: ${n} function${n === 1 ? '' : 's'} (${library.map((l) => `${l.file} ${l.function}`).join(', ')}).`);
+        const n = addDecisions(p, 'library', library, 'ai', commit);
+        report.push(`Library code: ${n} item${n === 1 ? '' : 's'} (${library.map(named).join(', ')}).`);
+      }
+      if (unused.length) {
+        const n = addDecisions(p, 'unused', unused, 'ai', commit);
+        report.push(`Unused code: ${n} item${n === 1 ? '' : 's'} (${unused.map(named).join(', ')}).`);
+      }
+      // Each code item of the unit's files must be sorted now. A left-out item would come back in "next"
+      // again and again. The check sees the writes above (same transaction).
+      if (kind === 'code') {
+        const left = codeWork(p, files);
+        if (left.length)
+          throw new EditError(
+            `these items of unit.files are not sorted: ${left.map((w) => `${w.file} ${w.function || '(code outside functions)'}${w.status === 'check' ? ' (changed: confirm, move or decide again)' : ''}`).join('; ')}. Put each one in a feature's "code", or in "library" or "unused". Or take its file out of unit.files`,
+          );
       }
       // The review state in the app: the AI changed these features after their last review.
       const stamp = now();
@@ -1268,12 +1369,9 @@ function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<strin
 function skip(p: ProjectConfig, kind: Kind, ref: string | undefined, reason: string | undefined, codeFiles: string[]) {
   if (!ref || !reason) fail('Usage: skip <project> <kind> <ref> <reason> [--files a.php,b.php]');
   let files: string[];
-  if (kind === 'code') {
-    // The files of a skipped area leave the "next" list too, so name them.
-    if (!codeFiles.length) fail('A code unit needs --files: the repo files of the area, separated by commas.');
-    for (const f of codeFiles) if (!repoFile(p, f) || !fs.existsSync(repoFile(p, f)!)) fail(`No file ${f} in the plugin repo.`);
-    files = codeFiles;
-  } else {
+  // A skip does not sort code, so the code would come back in "next" again and again.
+  if (kind === 'code') fail('A code unit cannot be skipped. Put each item in "library" (start-up, helpers, glue) or "unused" (nothing loads or calls it), with a reason, and use apply.');
+  {
     if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND framework = ? AND file = ?').get(p.id, kind, ref)) fail(`No ${kind} file "${ref}" in the last scan.`);
     files = [testRepoPath(p, kind, ref)];
   }

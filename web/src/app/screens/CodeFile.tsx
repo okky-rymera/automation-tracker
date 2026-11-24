@@ -8,7 +8,7 @@ import { fileOrder, useView, ViewSeg } from './Code';
 type Eff = 'run' | 'cyonly' | 'mcov' | 'setup' | 'miss' | 'lib' | 'mlib' | 'none';
 /** The file with the hand marks (server: line_marks). Stale: the marked line changed since, so the mark does not count. */
 type FileX = FileDetail & {
-  lines: FileDetail['lines'] & { markedLibrary?: number[]; markedCovered?: number[] };
+  lines: FileDetail['lines'] & { markedLibrary?: number[]; markedCovered?: number[]; decisionLibrary?: number[]; unused?: number[]; autoLibrary?: number[]; personLibrary?: number[] };
   marks?: { line: number; kind: 'library' | 'covered'; stale: boolean }[];
 };
 const CLS: Record<Eff, string> = { run: 'st-run', cyonly: 'st-cyonly', mcov: 'st-mcov', setup: 'st-setup', miss: 'st-miss', lib: 'st-lib', mlib: 'st-mlib', none: '' };
@@ -35,7 +35,9 @@ function FileView({ t, route, d, view }: { t: Tracker; route: Route; d: FileX; v
     put(d.lines.tested, 'run');
     put(d.lines.cypressOnly, 'cyonly');
     put(d.lines.library, 'lib');
-    put(d.lines.markedLibrary, 'mlib');
+    // A person's library marks only. Lines of a decision (AI or person) and the automatic guard and blank
+    // lines are in markedLibrary too, but they are library lines with no mark to remove here.
+    put(d.lines.personLibrary, 'mlib');
     put(d.lines.markedCovered, 'mcov');
     return src.map((_, k) => m.get(k + 1) ?? 'none');
   }, [d, src]);
@@ -215,7 +217,7 @@ function FileView({ t, route, d, view }: { t: Tracker; route: Route; d: FileX; v
         ) : (
           <>
             <div className="muted" style={{ fontSize: 13 }}>
-              {fmt(c.run + c.cyonly + c.mcov)} of {fmt(feat)} feature lines run by tests ({pctTxt}%) · {fmt(c.setup + c.miss)} uncovered · {fmt(c.lib + c.mlib)} library lines left out
+              {fmt(c.run + c.cyonly + c.mcov)} of {fmt(feat)} plugin lines run by tests ({pctTxt}%) · {fmt(c.setup + c.miss)} uncovered · {fmt(c.lib + c.mlib)} library lines left out
               {marked ? ` · ${marked} marked by hand` : ''}{!d.loaded ? ' · no request loaded this file' : ''}
             </div>
             <div className="bar stack" style={{ maxWidth: 560 }}>

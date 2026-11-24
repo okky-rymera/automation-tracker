@@ -1,11 +1,12 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { ROOT, type Framework, type ProjectConfig, type RunRef } from './projects.ts';
 import { db, json, now, tx } from './db.ts';
 import { SCAN_TTL_MS } from './cache.ts';
-import { isStale, marksByFile, marksVersion, repoLines } from './line-marks.ts';
-import { decisionsVersion, libraryFunctions } from './code-decisions.ts';
+import { isStale, marksByFile, marksVersion, repoLines, type LineMark } from './line-marks.ts';
+import { decisionsState, decidedFunctions } from './code-decisions.ts';
 
 /** One function from the analysis (coverage/analyze.py → report.json). */
 interface ReportFunction {
@@ -50,7 +51,22 @@ interface Report {
  * markedLibrary, markedCovered: lines that a person's mark moved to "library" or "tested" (line-marks.ts).
  * A line that had that state already is not in these lists.
  */
-export type FileLines = Record<LineState | 'runByTests', number[]> & { cypressOnly?: number[]; markedLibrary?: number[]; markedCovered?: number[] };
+/**
+ * markedLibrary, markedCovered: the lines that a mark changed (see withMarks). The library ones come from
+ * four sources: decisionLibrary (a library decision), an "unused" decision, autoLibrary (guard lines and
+ * blank lines outside functions) and personLibrary (a person's library marks).
+ * unused: all lines of an "unused" decision that are library now, also the lines that the run counted as
+ * library already (these are not in markedLibrary).
+ */
+export type FileLines = Record<LineState | 'runByTests', number[]> & {
+  cypressOnly?: number[];
+  markedLibrary?: number[];
+  markedCovered?: number[];
+  decisionLibrary?: number[];
+  unused?: number[];
+  autoLibrary?: number[];
+  personLibrary?: number[];
+};
 type LinesByFile = Record<string, FileLines>;
 
 export type FunctionState = LineState | 'unknown';
@@ -407,26 +423,50 @@ const markedCache = new Map<string, { key: string; base: CoverageData['lines']; 
  *  - the functions with a changed line get new counts and a new state (functionLines).
  * Made again when a mark changes, a marked file changes, or the base data changes.
  */
-function withMarks(project: ProjectConfig, view: View, base: CoverageData): CoverageData {
-  const marks = marksByFile(project.id);
-  // Library decisions on whole functions (code-decisions.ts) count as library marks on each runnable
-  // line of the function. A person's mark on the same line wins.
-  for (const [file, names] of libraryFunctions(project.id)) {
-    const fl = base.lines[file];
-    const fns = base.functionsByFile.get(file);
-    if (!fl || !fns) continue;
-    const texts = repoLines(project, file);
-    if (!texts) continue;
-    const runnable = [...stateMap(fl).keys()];
-    const list = marks.get(file) ?? [];
-    const have = new Set(list.map((m) => m.line));
-    for (const f of fns) {
-      if (!names.has(f.function)) continue;
-      for (const n of runnable) if (n >= f.start && n <= f.end && !have.has(n) && texts[n - 1] !== undefined) list.push({ file, line: n, kind: 'library', text: texts[n - 1] });
+/** The "ABSPATH" check at the top of a plugin file: it stops a direct call of the file. */
+const GUARD = /defined\s*\(\s*['"]ABSPATH['"]\s*\)/;
+
+/**
+ * Lines outside all functions that are library code with no decision: the ABSPATH guard (its line, the
+ * lines up to its exit, and its closing brace) and blank lines that the run counts as runnable.
+ * A line after the guard that is not part of it (real code) is never taken.
+ */
+export function autoLibraryLines(texts: string[], runnable: number[], fns: { start: number; end: number }[]): number[] {
+  const loose = runnable.filter((n) => !fns.some((f) => n >= f.start && n <= f.end));
+  if (!loose.length) return [];
+  const guard = new Set<number>();
+  const stop = /\b(exit|die|return)\b/;
+  texts.forEach((t, i) => {
+    if (!GUARD.test(t)) return;
+    // "defined( 'ABSPATH' ) || exit;" (or "or die"): one line.
+    if (/defined\s*\([^)]*\)\s*(\|\||\bor\b)\s*(exit|die)\b/i.test(t)) return guard.add(i + 1);
+    // "if ( ! defined( 'ABSPATH' ) )": only the negative form stops the file. A positive form
+    // ("if ( defined( 'ABSPATH' ) ) {") wraps real code, so it is not a guard.
+    if (!/!\s*defined/.test(t)) return;
+    // The lines up to the exit (at most 3 lines after the check), then its closing brace. No exit: no guard.
+    let end = -1;
+    for (let k = i; k < Math.min(texts.length, i + 4); k++) {
+      if (k > i && !/^\s*(\{\s*)?(exit|die|return)\b/.test(texts[k]) && !/^\s*\{?\s*$/.test(texts[k])) break;
+      if (stop.test(texts[k])) {
+        end = k;
+        break;
+      }
     }
-    if (list.length) marks.set(file, list);
-  }
-  if (!marks.size) return base;
+    if (end < 0) return;
+    for (let k = i; k <= end; k++) guard.add(k + 1);
+    // The closing brace of "if ( ... ) {" on the line after the exit.
+    const part = texts.slice(i, end + 1).join('\n');
+    const open = (part.match(/\{/g) ?? []).length - (part.match(/\}/g) ?? []).length;
+    if (open > 0 && /^\s*\}\s*$/.test(texts[end + 1] ?? '')) guard.add(end + 2);
+  });
+  return loose.filter((n) => guard.has(n) || texts[n - 1] === '');
+}
+
+type SrcMark = LineMark & { src?: 'decision' | 'unused' | 'auto' };
+
+function withMarks(project: ProjectConfig, view: View, base: CoverageData): CoverageData {
+  // The cache check comes first: the marks below read each file of the run. The key changes when a mark,
+  // a decision (read from the database) or a file of the run changes.
   const mtime = (f: string) => {
     try {
       return fs.statSync(path.join(project.path, f)).mtimeMs;
@@ -434,11 +474,49 @@ function withMarks(project: ProjectConfig, view: View, base: CoverageData): Cove
       return 0;
     }
   };
-  const key = `${marksVersion()}|${decisionsVersion()}|${[...marks.keys()].map((f) => `${f}:${mtime(f)}`).join('|')}`;
+  const key = crypto
+    .createHash('sha1')
+    .update(`${marksVersion()}|${decisionsState(project.id)}|${Object.keys(base.lines).map((f) => `${f}:${mtime(f)}`).join('|')}`)
+    .digest('hex');
   const cacheKey = `${project.id}:${view}`;
   const hit = markedCache.get(cacheKey);
   // base.lines is the same object while the run is not imported again (a new label copies only the top object).
   if (hit && hit.key === key && hit.base === base.lines) return hit.data.label === base.label ? hit.data : { ...hit.data, label: base.label };
+
+  const marks: Map<string, SrcMark[]> = marksByFile(project.id);
+  const decided = decidedFunctions(project.id);
+  // Decisions on functions (code-decisions.ts) count as library marks on each runnable line of the
+  // function; a decision on "" covers the lines outside all functions. Then the automatic library lines.
+  // A person's mark on the same line wins.
+  for (const file of Object.keys(base.lines)) {
+    const fl = base.lines[file];
+    const fns = base.functionsByFile.get(file) ?? [];
+    const names = decided.get(file);
+    const texts = repoLines(project, file);
+    if (!texts) continue;
+    const runnable = [...stateMap(fl).keys()];
+    const list = marks.get(file) ?? [];
+    const have = new Set(list.map((m) => m.line));
+    const add = (n: number, src: SrcMark['src']) => {
+      if (have.has(n) || texts[n - 1] === undefined) return;
+      have.add(n);
+      list.push({ file, line: n, kind: 'library', text: texts[n - 1], src });
+    };
+    if (names) {
+      for (const f of fns) {
+        const k = names.get(f.function);
+        if (k) for (const n of runnable) if (n >= f.start && n <= f.end) add(n, k === 'unused' ? 'unused' : 'decision');
+      }
+      const k = names.get('');
+      if (k) for (const n of runnable) if (!fns.some((f) => n >= f.start && n <= f.end)) add(n, k === 'unused' ? 'unused' : 'decision');
+    }
+    for (const n of autoLibraryLines(texts, runnable, fns)) add(n, 'auto');
+    if (list.length) marks.set(file, list);
+  }
+  if (!marks.size) {
+    markedCache.set(cacheKey, { key, base: base.lines, data: base });
+    return base;
+  }
 
   const lines: CoverageData['lines'] = { ...base.lines };
   const functionsByFile = new Map(base.functionsByFile);
@@ -450,6 +528,8 @@ function withMarks(project: ProjectConfig, view: View, base: CoverageData): Cove
     const st = stateMap(fl);
     const library: number[] = [];
     const covered: number[] = [];
+    const bySrc: Record<'decision' | 'unused' | 'auto', number[]> = { decision: [], unused: [], auto: [] };
+    const person: number[] = [];
     // marked: all lines with a mark that counts.
     const marked = new Set<number>();
     // changed: lines whose state or Cypress-only mark changed. Only their functions get new counts.
@@ -462,9 +542,15 @@ function withMarks(project: ProjectConfig, view: View, base: CoverageData): Cove
       st.set(m.line, to);
       marked.add(m.line);
       // A Cypress-only line is not Cypress-only after the mark, so the mark changes it too.
+      const src = (m as SrcMark).src;
+      // An unused line counts as unused also when the run counted it as library already: the overview
+      // shows the code that the team can delete.
+      if (src === 'unused') bySrc.unused.push(m.line);
       if (was !== to || cyBefore.has(m.line)) {
         changed.add(m.line);
         (m.kind === 'library' ? library : covered).push(m.line);
+        if (src === 'decision' || src === 'auto') bySrc[src].push(m.line);
+        else if (!src && m.kind === 'library') person.push(m.line);
       }
     }
     if (!marked.size) continue;
@@ -475,6 +561,10 @@ function withMarks(project: ProjectConfig, view: View, base: CoverageData): Cove
     if (fl.cypressOnly) out.cypressOnly = fl.cypressOnly.filter((n) => !marked.has(n));
     out.markedLibrary = library.sort((x, y) => x - y);
     out.markedCovered = covered.sort((x, y) => x - y);
+    out.decisionLibrary = bySrc.decision.sort((x, y) => x - y);
+    out.unused = bySrc.unused.sort((x, y) => x - y);
+    out.autoLibrary = bySrc.auto.sort((x, y) => x - y);
+    out.personLibrary = person.sort((x, y) => x - y);
     lines[file] = out;
     const cyOnly = new Set(out.cypressOnly ?? []);
     const fns = base.functionsByFile.get(file);
