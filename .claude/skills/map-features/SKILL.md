@@ -468,7 +468,9 @@ install that plugin to test it, so it must not hide inside a core feature.
   price".
 - Some scopes show the locked field or the upsell when the other plugin is
   not active. Put these scopes in the same Integration feature. Example:
-  "Without Lead Capture, the Register Text field is locked".
+  "Without Lead Capture, the Register Text field is locked". A whole upsell
+  page or popup for another plugin is different: it goes in the "Upsells"
+  group (see "No scopes for marketing text").
 - Link a test from an `Integration/<plugin>/` folder, or with an
   `@integration:<plugin>` tag, only to Integration features. Do not link it
   to a core scope, also when it checks the core behavior on the way.
@@ -543,6 +545,41 @@ setting "Hide Retail Price".
 
 An API title has the prefix, then a subject, then a verb: "Create: a simple
 product gets the wholesale price, and the response shows it for that role".
+
+**No scopes for marketing text.** Promotion screens are upsell pages,
+upgrade popups, About pages and Getting Started pages. Their marketing text
+changes often. Examples are headings, feature lists, reasons to buy, bonus
+offers, logos and reviews. A check of that text is fragile. It tests nothing
+that the plugin does.
+
+- Do not write a scope that checks only that text. A scope such as "The page
+  shows the upsell title and description" or "The popup shows a short text"
+  must not exist.
+- Do not quote that text in new scope titles, descriptions or screenshot
+  captions. Write "the upsell page" or "the upgrade popup", not its heading.
+- Keep the caption of a screenshot that is there already. The tool matches
+  screenshots by caption, so a new caption adds a copy.
+- Write scopes for what the screen does:
+  - when it shows or hides,
+  - what opens it,
+  - where each button or link goes,
+  - what a button installs or turns on.
+- A short button or link label is fine when it names the thing that a person
+  clicks, for example "Activate Plugin".
+- Link a test that also checks what the screen does to those scopes only.
+  Put a test that checks only marketing text in `leftOut`, with the reason
+  "Checks only marketing text".
+- A feature can already have a scope that checks only marketing text. Do not
+  change it and do not link tests to it. Name it in the report, so a person
+  can delete it or mark it "To remove".
+- The same promotion screen can exist for several plugins. For new scopes,
+  write one scope with variations, with a "Plugin" column. Do not make one
+  feature for each plugin. For scopes that are there already, follow the
+  variations rule: do not join them, but name them in the report.
+- A whole upsell page or popup for another plugin goes in the "Upsells"
+  group. It shows when that plugin is not active, so you can test it without
+  that plugin. This is an exception to "Integration groups". A locked field
+  inside a screen of an Integration feature stays in that Integration feature.
 
 **Settings that turn something off** ("Hide …", "Disable …", "Do not …"): do
 not write "the setting is on" or "off" anywhere. Quote the label and say

@@ -141,6 +141,9 @@ Write the payload to the session scratchpad folder, then run `apply`.
 - Do not add a scope for the page before the feature changes it. Follow the rule
   "No scope for the page before the feature changes it" in the map-features
   `references/payload.md`.
+- Do not add a scope that checks the marketing text of an upsell or promotion
+  screen. Follow the rule "No scopes for marketing text" in the map-features
+  "Writing style".
 
 ## 5. Report
 
