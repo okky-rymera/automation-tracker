@@ -315,16 +315,42 @@ export function Banner({ tone = 'info', children }: { tone?: 'info' | 'warn' | '
 }
 
 /* ---------------- Dialogs ---------------- */
-export function Dialog({ title, sub, onClose, children, foot, filter, onFilter, wide }: {
-  title: string; sub?: ReactNode; onClose: () => void; children: ReactNode; foot?: ReactNode; filter?: string; onFilter?: (v: string) => void; wide?: boolean;
-}) {
+/**
+ * Escape closes a popup. Only the top popup closes: a picker opened from a popup closes first.
+ * Escape in a text field or a drop-down list does not close the popup: the field uses it.
+ * An open image or "…" menu closes first, and the popup stays.
+ */
+export function useEscapeClose(onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const on = (e: globalThis.KeyboardEvent) => e.key === 'Escape' && onClose();
+    const on = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const el = e.target as HTMLElement | null;
+      // Only fields that take typed text keep Escape. The filter field of a picker is not an edit: Escape there closes the picker.
+      const typed = el && el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file'].includes((el as HTMLInputElement).type);
+      const field = el && el.id !== 'mq' && (el.isContentEditable || typed || ['TEXTAREA', 'SELECT'].includes(el.tagName) || el.closest('form, .start-vars'));
+      if (field) return;
+      // An open image closes first.
+      const big = document.querySelector<HTMLElement>('.lightbox');
+      if (big) return big.click();
+      const all = document.querySelectorAll('.overlay');
+      if (all[all.length - 1] !== ref.current) return;
+      // An open "…" menu in the popup closes first: the menu closes itself.
+      if (ref.current?.querySelector('.menu')) return;
+      onClose();
+    };
     addEventListener('keydown', on);
     return () => removeEventListener('keydown', on);
   }, [onClose]);
+  return ref;
+}
+
+export function Dialog({ title, sub, onClose, children, foot, filter, onFilter, wide }: {
+  title: string; sub?: ReactNode; onClose: () => void; children: ReactNode; foot?: ReactNode; filter?: string; onFilter?: (v: string) => void; wide?: boolean;
+}) {
+  const ref = useEscapeClose(onClose);
   return (
-    <div className="overlay">
+    <div className="overlay" ref={ref}>
       <button className="backdrop" onClick={onClose} aria-label="Close" />
       <div className="panel" role="dialog" aria-label={title} style={wide ? { maxWidth: 880 } : undefined}>
         <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--line)', display: 'flex', flexDirection: 'column', gap: 8 }}>

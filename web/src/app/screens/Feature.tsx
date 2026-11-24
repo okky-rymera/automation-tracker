@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { featureTotal, mutate, pct, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot } from '../../api';
 import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, scopeIdLabel, scopeLinks, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
-import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, type PickRow } from '../ui';
+import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
 
 const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', questions: 'question' };
@@ -215,7 +215,6 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
   const base = `/api/projects/${p}`;
   const act = useAct();
   const [flt, setFlt] = useState<'all' | 'gaps' | 'review' | 'remove'>('all');
-  const [openAll, setOpenAll] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addingGroup, setAddingGroup] = useState(false);
   const status = (id: number) => scopeStatus(f, id, t.testById);
@@ -237,12 +236,13 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
   // ?scope= names a scope or a variation. A variation opens in the table of its scope.
   const openRow = openScope === null ? null : f.scopes.find((s) => s.id === openScope) ?? null;
   const openCard = openRow ? (openRow.parentId ?? openRow.id) : null;
+  const popScope = openCard === null ? null : top.find((s) => s.id === openCard) ?? null;
 
   // Open the scope from the link (?scope=), and show it.
   useEffect(() => {
-    if (openScope) setTimeout(() => document.getElementById(`scope-${openScope}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 60);
-  }, [openScope]);
-  const openTo = (id: number | null) => (setOpenAll(false), setQuery({ scope: id }));
+    if (openCard) setTimeout(() => document.getElementById(`scope-${openCard}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 60);
+  }, [openCard]);
+  const openTo = (id: number | null) => setQuery({ scope: id });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 14 }}>
@@ -257,7 +257,6 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
           ]}
         />
         <span style={{ flex: 1 }} />
-        <button className="btn btn-sm" onClick={() => (setOpenAll(!openAll), setQuery({ scope: null }))}>{openAll ? 'Close all' : 'Open all'}</button>
         <button className="btn btn-sm" onClick={() => setAddingGroup(true)}><IPlus />Add group</button>
         <button className="btn btn-sm add-btn" onClick={() => setAdding(true)}><IPlus />Add scope</button>
       </div>
@@ -292,15 +291,17 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
                 ><ITrash s={14} /></button>
               )}
             </div>
-            {list.map((s) => (
-              <ScopeCard
-                key={s.id} t={t} f={f} s={s} openAll={openAll} open={openAll || openCard === s.id} openRow={openRow?.parentId === s.id ? openRow.id : null}
-                setOpen={(on) => openTo(on ? s.id : null)} setRow={(id) => openTo(id ?? s.id)}
-              />
-            ))}
+            {list.map((s) => <ScopeRow key={s.id} t={t} f={f} s={s} open={openCard === s.id} onOpen={() => openTo(s.id)} />)}
           </div>
         );
       })}
+      {/* The popup is outside the group lists: a filter or a new group does not close it or build it again. */}
+      {popScope && (
+        <ScopePopup
+          key={popScope.id} t={t} f={f} s={popScope} openRow={openRow?.parentId === popScope.id ? openRow.id : null}
+          setOpen={(on) => openTo(on ? popScope.id : null)} setRow={(id) => openTo(id ?? popScope.id)}
+        />
+      )}
       {!top.some(shown) && <div className="faint" style={{ fontSize: 13 }}>{top.length ? 'No scope matches this filter.' : 'No scope yet. A scope is one thing the feature does, like a test scenario.'}</div>}
       {adding && (
         <AddRow
@@ -333,13 +334,23 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
  * coverage and its tests. A line opens in place for the tests and screenshots of that variation. The scope
  * keeps the title, description, requirements, group and move: a variation has none of them.
  */
-function ScopeCard({ t, f, s, open, openAll, openRow, setOpen, setRow }: {
-  t: Tracker; f: FeatureX; s: ScopeX; open: boolean; openAll: boolean; openRow: number | null; setOpen: (on: boolean) => void; setRow: (id: number | null) => void;
-}) {
-  const p = t.project;
-  const base = `/api/projects/${p}`;
-  const url = `${base}/scopes/${s.id}`;
-  const act = useAct();
+function ScopeRow({ t, f, s, open, onOpen }: { t: Tracker; f: FeatureX; s: ScopeX; open: boolean; onOpen: () => void }) {
+  return (
+    <div className={`scope${scopeToRemove(f, s) ? ' scope-marked' : ''}`} id={`scope-${s.id}`}>
+      <div className="scope-head-wrap">
+        <IdBtn label={`S-${s.id}`} text={`F-${f.id}/S-${s.id}`} />
+        <button className="scope-head" onClick={onOpen} aria-haspopup="dialog" aria-expanded={open}>
+          <span style={{ flex: 1, fontWeight: 500 }}>{s.title}</span>
+          <ScopeStatusTags t={t} f={f} s={s} />
+          <INext s={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The tags of a scope: changed, covered or not, "To remove", and the coverage of its variations. */
+function ScopeStatusTags({ t, f, s }: { t: Tracker; f: FeatureX; s: ScopeX }) {
   const vars = s.columns ? (variationsOf(f, s.id) as ScopeX[]) : [];
   const st = scopeStatus(f, s.id, t.testById);
   const marked = scopeToRemove(f, s);
@@ -348,16 +359,10 @@ function ScopeCard({ t, f, s, open, openAll, openRow, setOpen, setRow }: {
   const links = f.links.filter((l) => l.scopeIds.includes(s.id));
   // Code of this scope that no linked test checks: a test to write.
   const codeNoTest = !s.columns && !links.length && !!t.codeMap?.features.find((x) => x.featureId === f.id)?.entries.some((e) => e.scopeIds.includes(s.id));
-  const [addReq, setAddReq] = useState(false);
-  const [modal, setModal] = useState<null | 'link' | 'move'>(null);
-  const [starting, setStarting] = useState(false);
-  const [mq, setMq] = useState('');
-  const shots = f.screenshots.filter((x) => x.scopeIds.includes(s.id));
-  const [big, setBig] = useState<number | null>(null);
   const counted = vars.filter((v) => !scopeToRemove(f, v));
   const ok = counted.filter((v) => scopeStatus(f, v.id, t.testById) === 'ok').length;
   const covered = counted.length ? `${ok} of ${counted.length} covered` : vars.length ? 'All marked “To remove”' : 'No variation yet';
-  const tags = (
+  return (
     <>
       {changed && <span className="tag tag-changed">{chgLabel}</span>}
       {s.columns ? (
@@ -376,113 +381,165 @@ function ScopeCard({ t, f, s, open, openAll, openRow, setOpen, setRow }: {
       {codeNoTest && !marked && <span className="tag tag-skip" title="The AI put plugin code on this scope, but no test is linked to it. Write a test for it.">Code, no test</span>}
     </>
   );
+}
+
+/**
+ * The popup of one scope. The scopes tab shows it outside the group lists, so it stays open when the
+ * scope leaves the filter or goes to another group. Focus goes into it, Tab stays in it, and focus goes
+ * back to the scope row when it closes.
+ */
+function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
+  t: Tracker; f: FeatureX; s: ScopeX; openRow: number | null; setOpen: (on: boolean) => void; setRow: (id: number | null) => void;
+}) {
+  const p = t.project;
+  const base = `/api/projects/${p}`;
+  const url = `${base}/scopes/${s.id}`;
+  const act = useAct();
+  const vars = s.columns ? (variationsOf(f, s.id) as ScopeX[]) : [];
+  const links = f.links.filter((l) => l.scopeIds.includes(s.id));
+  const [addReq, setAddReq] = useState(false);
+  const [modal, setModal] = useState<null | 'link' | 'move'>(null);
+  const [starting, setStarting] = useState(false);
+  const [mq, setMq] = useState('');
+  const shots = f.screenshots.filter((x) => x.scopeIds.includes(s.id));
+  const [big, setBig] = useState<number | null>(null);
+  const tags = <ScopeStatusTags t={t} f={f} s={s} />;
   const q = mq.trim().toLowerCase();
   const have = new Set(links.map((l) => l.testId));
+  const close = useCallback(() => setOpen(false), [setOpen]);
+  // A variation from the link (?scope=SV) shows in the popup in place of its scope. "Back" shows the scope again.
+  const openVar = openRow === null ? null : vars.find((v) => v.id === openRow) ?? null;
+  const popRef = useEscapeClose(close);
+  // A switch between the scope and a variation starts at the top of the popup.
+  useEffect(() => {
+    popRef.current?.querySelector('.scope-pop-panel')?.scrollTo(0, 0);
+  }, [openVar?.id, popRef]);
+  // Focus goes into the popup when it opens, and back to the scope row when it closes.
+  useEffect(() => {
+    const before = document.activeElement as HTMLElement | null;
+    popRef.current?.querySelector<HTMLElement>('.scope-pop-panel')?.focus({ preventScroll: true });
+    return () => {
+      const row = document.querySelector<HTMLElement>(`#scope-${s.id} .scope-head`);
+      (row ?? (before?.isConnected ? before : null))?.focus({ preventScroll: true });
+    };
+  }, [popRef, s.id]);
+  // Tab and Shift+Tab stay in the popup.
+  const keepTab = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Tab') return;
+    const all = [...e.currentTarget.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]')].filter((x) => !x.hasAttribute('disabled') && x.offsetParent !== null);
+    if (!all.length) return;
+    const first = all[0], last = all[all.length - 1];
+    const cur = document.activeElement;
+    if (e.shiftKey && (cur === first || cur === e.currentTarget)) (e.preventDefault(), last.focus());
+    else if (!e.shiftKey && cur === last) (e.preventDefault(), first.focus());
+  };
   const what = s.columns ? `scope S-${s.id} “${s.title}”, its ${vars.length} variation${vars.length === 1 ? '' : 's'}` : `scope S-${s.id} “${s.title}”`;
   return (
-    <div className={`scope${marked ? ' scope-marked' : ''}`} id={`scope-${s.id}`}>
-      {!open ? (
-        <div className="scope-head-wrap">
-          <IdBtn label={`S-${s.id}`} text={`F-${f.id}/S-${s.id}`} />
-          <button className="scope-head" onClick={() => setOpen(true)} aria-expanded={false}>
-            <span style={{ flex: 1, fontWeight: 500 }}>{s.title}</span>
-            {tags}
-            <INext s={14} />
-          </button>
-        </div>
-      ) : (
-        <>
-          <div className="scope-head scope-head-open">
-            <IdBtn label={`S-${s.id}`} text={`F-${f.id}/S-${s.id}`} />
-            <InlineText
-              id={`in-s${s.id}`} label="Scope title" className="ie-scope" value={s.title} required="A scope needs a title. The old title is back."
-              onSave={(title) => act(() => mutate('PATCH', url, { title }), s.columns ? 'Scope renamed. Its variations have new titles. The AI still knows the old titles.' : 'Scope renamed. The AI still knows it by its old title.', () => mutate('PATCH', url, { title: s.title }, { quiet: true }))}
-            />
-            {tags}
-            <button className="icon-btn" onClick={() => setOpen(false)} aria-expanded aria-label="Close scope" title="Close"><span style={{ display: 'inline-flex', transform: 'rotate(90deg)' }}><INext s={14} /></span></button>
-          </div>
-          <div className="scope-body">
-            {s.toRemove ? (
-              <div className="remove-box">
-                <strong>To remove:</strong> <span>{s.toRemove.reason}</span>
-                <span className="faint">{removeWho(s.toRemove)}. Remove or move its tests, then delete or move the scope.</span>
-                <button className="btn btn-sm" onClick={() => act(() => mutate('PATCH', url, { toRemove: null }), `S-${s.id}: “To remove” mark cleared`, () => mutate('PATCH', url, { toRemove: s.toRemove }, { quiet: true }))}>Clear mark</button>
-              </div>
-            ) : f.toRemove ? (
-              <div className="remove-box"><strong>To remove:</strong> <span>the whole feature has the mark.</span></div>
-            ) : null}
-            {s.before && 'title' in s.before && s.before.title && (
-              <div className="was-box"><strong>Title before the change:</strong> <span className="was-old">{s.before.title}</span></div>
+    <>
+        <div className="overlay scope-pop" ref={popRef}>
+          <button className="backdrop" onClick={close} aria-label="Close scope" tabIndex={-1} />
+          <div className="panel scope-pop-panel" role="dialog" aria-modal="true" aria-label={`S-${s.id} ${s.title}`} tabIndex={-1} onKeyDown={keepTab}>
+            {openVar ? (
+            <div className="sp-head">
+              <button className="icon-btn" onClick={() => setRow(null)} aria-label={`Back to S-${s.id}`} title={`Back to S-${s.id}`}><IPrev s={16} /></button>
+              <IdBtn label={`SV-${openVar.id}`} text={`F-${f.id}/SV-${openVar.id}`} />
+              <span className="sp-head-title">{(openVar.values ?? []).filter(Boolean).join(' · ') || 'No value'}</span>
+              <button className="icon-btn" onClick={close} aria-label="Close scope" title="Close (Esc)"><IX s={16} /></button>
+            </div>
+            ) : (
+            <div className="sp-head">
+              <IdBtn label={`S-${s.id}`} text={`F-${f.id}/S-${s.id}`} />
+              <select className="input sel-sm sp-group" aria-label="Scope group" title="Scope group" value={s.groupId == null ? 'none' : String(s.groupId)} onChange={(e) => act(() => mutate('PATCH', url, { groupId: e.target.value === 'none' ? null : Number(e.target.value) }), 'Scope moved to the group')}>
+                <option value="none">No group</option>
+                {f.scopeGroups.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}
+              </select>
+              <span style={{ flex: 1 }} />
+              <button className="icon-btn" onClick={close} aria-label="Close scope" title="Close (Esc)"><IX s={16} /></button>
+            </div>
             )}
-            <InlineText
-              label="Scope description" className="ie-sdesc" multi value={s.description} placeholder={s.columns ? 'Add a description for all variations: the steps, or what the user sees.' : 'Add a description: the steps, or what the user sees.'}
-              onSave={(description) => act(() => mutate('PATCH', url, { description }), 'Description saved', () => mutate('PATCH', url, { description: s.description }, { quiet: true }))}
-            />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <section className="lc" aria-label="Requirements of this scope">
-                <div className="lc-head lc-head-row">
-                  <div className="lc-titlerow">
-                    <span className="lc-title">Requirements</span><span className="lc-count">{s.requirements.length}</span>
-                    {s.columns && <span className="faint" style={{ fontSize: 12 }}>for every variation</span>}
+            {openVar ? (
+              <VariationDetail key={openVar.id} t={t} f={f} s={s} v={openVar} />
+            ) : (
+            <div className="sp-main">
+                <div className="sp-intro">
+                <InlineText
+                  id={`in-s${s.id}`} label="Scope title" className="ie-scope sp-title" value={s.title} required="A scope needs a title. The old title is back."
+                  onSave={(title) => act(() => mutate('PATCH', url, { title }), s.columns ? 'Scope renamed. Its variations have new titles. The AI still knows the old titles.' : 'Scope renamed. The AI still knows it by its old title.', () => mutate('PATCH', url, { title: s.title }, { quiet: true }))}
+                />
+                <div className="sp-tags">{tags}</div>
+                {s.toRemove ? (
+                  <div className="remove-box">
+                    <strong>To remove:</strong> <span>{s.toRemove.reason}</span>
+                    <span className="faint">{removeWho(s.toRemove)}. Remove or move its tests, then delete or move the scope.</span>
+                    <button className="btn btn-sm" onClick={() => act(() => mutate('PATCH', url, { toRemove: null }), `S-${s.id}: “To remove” mark cleared`, () => mutate('PATCH', url, { toRemove: s.toRemove }, { quiet: true }))}>Clear mark</button>
                   </div>
-                  <button className="btn btn-ghost btn-sm add-btn" onClick={() => setAddReq(true)} aria-label="Add a requirement"><IPlus />Add</button>
-                </div>
-                {!s.requirements.length && !addReq && <div className="lc-empty">None yet.</div>}
-                {s.requirements.map((r) => <ItemRow key={r.id} t={t} item={r} bullet />)}
-                {addReq && (
-                  <AddRow
-                    placeholder="New requirement. Enter adds it." onClose={() => setAddReq(false)}
-                    onAdd={async (text) => void (await act(() => mutate('POST', `${base}/features/${f.id}/items`, { kind: 'requirement', text, scopeId: s.id }), 'Requirement added'))}
-                  />
+                ) : f.toRemove ? (
+                  <div className="remove-box"><strong>To remove:</strong> <span>the whole feature has the mark.</span></div>
+                ) : null}
+                {s.before && 'title' in s.before && s.before.title && (
+                  <div className="was-box"><strong>Title before the change:</strong> <span className="was-old">{s.before.title}</span></div>
                 )}
-              </section>
-              {s.columns ? (
-                <Variations t={t} f={f} s={s} vars={vars} openAll={openAll} openRow={openRow} setRow={setRow} />
-              ) : (
-                <>
-                  <section className="lc" aria-label="Tests of this scope">
-                    <div className="lc-head lc-head-row">
-                      <div className="lc-titlerow"><span className="lc-title">Tests</span><span className="lc-count">{links.length}</span></div>
-                      <button className="btn btn-ghost btn-sm add-btn" onClick={() => (setMq(''), setModal('link'))} aria-label="Link a test"><IPlus />Link</button>
+                <InlineText
+                  label="Scope description" className="ie-sdesc sp-desc" multi value={s.description} placeholder={s.columns ? 'Add a description for all variations: the steps, or what the user sees.' : 'Add a description: the steps, or what the user sees.'}
+                  onSave={(description) => act(() => mutate('PATCH', url, { description }), 'Description saved', () => mutate('PATCH', url, { description: s.description }, { quiet: true }))}
+                />
+                </div>
+                <section className="lc" aria-label="Requirements of this scope">
+                  <div className="lc-head lc-head-row">
+                    <div className="lc-titlerow">
+                      <span className="lc-title">Requirements</span><span className="lc-count">{s.requirements.length}</span>
                     </div>
-                    {links.map((l) => <TestRow key={l.id} t={t} f={f} l={l} scopeId={s.id} />)}
-                    {!links.length && <div className="lc-empty">None yet.</div>}
-                  </section>
-                  <ScopeShots p={p} shots={shots} onBig={setBig} />
-                  {starting && <StartVariations nTests={links.length} nShots={shots.length} onClose={() => setStarting(false)} onAdd={(columns, values) => act(() => mutate('POST', `${url}/variations`, { columns, values }), 'Variations added. Add one more for each place.')} />}
-                </>
-              )}
-            </div>
-            <div className="scope-foot">
-              <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, marginRight: 'auto' }}>
-                <span className="faint">Group</span>
-                <select className="input sel-sm" value={s.groupId == null ? 'none' : String(s.groupId)} onChange={(e) => act(() => mutate('PATCH', url, { groupId: e.target.value === 'none' ? null : Number(e.target.value) }), 'Scope moved to the group')}>
-                  <option value="none">No group</option>
-                  {f.scopeGroups.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}
-                </select>
-              </label>
-              {!s.columns && !starting && (
-                <button className="btn btn-sm" onClick={() => setStarting(true)} title="One check in several places, for example on 4 pages: a table with a line for each place">Add variations…</button>
-              )}
-              {!s.toRemove && (
-                <button
-                  className="btn btn-sm"
-                  onClick={() => {
-                    const reason = askRemoveReason(`S-${s.id} “${s.title}”`);
-                    if (reason) act(() => mutate('PATCH', url, { toRemove: reason }), `S-${s.id} marked “To remove”`, () => mutate('PATCH', url, { toRemove: null }, { quiet: true }));
-                  }}
-                >Mark “To remove”…</button>
-              )}
-              <button className="btn btn-sm" onClick={() => (setMq(''), setModal('move'))}>Move to feature…</button>
-              <button
-                className="btn btn-sm btn-danger"
-                onClick={() => confirm(`Delete ${what} and its requirements? Its tests stay linked to the feature. The AI will not add it again.`) &&
-                  act(() => mutate('DELETE', url), `Scope S-${s.id} deleted. The AI will not add it again.`)}
-              >Delete</button>
-            </div>
+                    <button className="btn btn-ghost btn-sm add-btn" onClick={() => setAddReq(true)} aria-label="Add a requirement"><IPlus />Add</button>
+                  </div>
+                  {!s.requirements.length && !addReq && <div className="lc-empty">None yet.</div>}
+                  {s.requirements.map((r) => <ItemRow key={r.id} t={t} item={r} bullet />)}
+                  {addReq && (
+                    <AddRow
+                      placeholder="New requirement. Enter adds it." onClose={() => setAddReq(false)}
+                      onAdd={async (text) => void (await act(() => mutate('POST', `${base}/features/${f.id}/items`, { kind: 'requirement', text, scopeId: s.id }), 'Requirement added'))}
+                    />
+                  )}
+                </section>
+                {s.columns ? (
+                  <Variations t={t} f={f} s={s} vars={vars} setRow={setRow} />
+                ) : (
+                  <>
+                    <ScopeShots p={p} shots={shots} onBig={setBig} />
+                    <section className="lc" aria-label="Tests of this scope">
+                      <div className="lc-head lc-head-row">
+                        <div className="lc-titlerow"><span className="lc-title">Tests</span><span className="lc-count">{links.length}</span></div>
+                        <button className="btn btn-ghost btn-sm add-btn" onClick={() => (setMq(''), setModal('link'))} aria-label="Link a test"><IPlus />Link</button>
+                      </div>
+                      {links.map((l) => <TestRow key={l.id} t={t} f={f} l={l} scopeId={s.id} />)}
+                      {!links.length && <div className="lc-empty">None yet.</div>}
+                    </section>
+                    {starting && <StartVariations nTests={links.length} nShots={shots.length} onClose={() => setStarting(false)} onAdd={(columns, values) => act(() => mutate('POST', `${url}/variations`, { columns, values }), 'Variations added. Add one more for each place.')} />}
+                  </>
+                )}
+                <div className="scope-foot">
+                  {!s.columns && !starting && (
+                    <button className="btn btn-sm" onClick={() => setStarting(true)} title="One check in several places, for example on 4 pages: a list with a line for each place">Add variations…</button>
+                  )}
+                  {!s.toRemove && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => {
+                        const reason = askRemoveReason(`S-${s.id} “${s.title}”`);
+                        if (reason) act(() => mutate('PATCH', url, { toRemove: reason }), `S-${s.id} marked “To remove”`, () => mutate('PATCH', url, { toRemove: null }, { quiet: true }));
+                      }}
+                    >Mark “To remove”…</button>
+                  )}
+                  <button className="btn btn-sm" onClick={() => (setMq(''), setModal('move'))}>Move to feature…</button>
+                  <button
+                    className="btn btn-sm btn-danger"
+                    onClick={() => confirm(`Delete ${what} and its requirements? Its tests stay linked to the feature. The AI will not add it again.`) &&
+                      act(() => mutate('DELETE', url), `Scope S-${s.id} deleted. The AI will not add it again.`)}
+                  >Delete</button>
+                </div>
+              </div>
+            )}
           </div>
-        </>
-      )}
+        </div>
       {big !== null && (
         <button className="lightbox" onClick={() => setBig(null)} aria-label="Close the image"><img src={screenshotUrl(p, big)} alt="" /></button>
       )}
@@ -503,7 +560,7 @@ function ScopeCard({ t, f, s, open, openAll, openRow, setOpen, setRow }: {
             }))}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -514,7 +571,7 @@ function ScopeShots({ p, shots, onBig }: { p: string; shots: Screenshot[]; onBig
     <section className="lc" aria-label="Screenshots">
       <div className="lc-head lc-head-row">
         <div className="lc-titlerow"><span className="lc-title">Screenshots</span><span className="lc-count">{shots.length}</span></div>
-        <button className="btn btn-ghost btn-sm add-btn" onClick={() => setQuery({ tab: 'shots', scope: null })}>Tag more</button>
+        <button className="btn btn-ghost btn-sm add-btn" onClick={() => setQuery({ tab: 'shots', scope: null })} title="Tag more screenshots on the Screenshots tab"><IPlus />Tag more</button>
       </div>
       <div className="scope-shots">
         {shots.map((sh) => (
@@ -547,11 +604,11 @@ function LinkPicker({ t, have, title, sub, onPick, onClose }: { t: Tracker; have
 }
 
 /**
- * The variations of a scope, as a table: ID with copy button, the values, coverage and tests. The column
- * names are edited in the header. A line opens in place (VariationDetail).
+ * The variations of a scope, as a table: ID with copy button, the values and the coverage. The column
+ * names are edited in the table header. A click on a line opens the variation in the popup (VariationDetail).
  */
-function Variations({ t, f, s, vars, openAll, openRow, setRow }: {
-  t: Tracker; f: FeatureX; s: ScopeX; vars: ScopeX[]; openAll: boolean; openRow: number | null; setRow: (id: number | null) => void;
+function Variations({ t, f, s, vars, setRow }: {
+  t: Tracker; f: FeatureX; s: ScopeX; vars: ScopeX[]; setRow: (id: number | null) => void;
 }) {
   const url = `/api/projects/${t.project}/scopes/${s.id}`;
   const act = useAct();
@@ -561,7 +618,7 @@ function Variations({ t, f, s, vars, openAll, openRow, setRow }: {
   return (
     <section className="lc" aria-label="Variations of this scope">
       <div className="lc-head lc-head-row">
-        <div className="lc-titlerow"><span className="lc-title">Variations</span><span className="lc-count">{vars.length}</span><span className="faint" style={{ fontSize: 12 }}>each one has its own tests</span></div>
+        <div className="lc-titlerow"><span className="lc-title">Variations</span><span className="lc-count">{vars.length}</span></div>
         <Menu
           label="Variation actions"
           items={[
@@ -598,42 +655,28 @@ function Variations({ t, f, s, vars, openAll, openRow, setRow }: {
                   </span>
                 </th>
               ))}
-              <th scope="col">Coverage</th>
-              <th scope="col" className="set-th-num">Tests</th>
+              <th scope="col" className="set-th-cov">Coverage</th>
               <th scope="col" aria-label="Open" />
             </tr>
           </thead>
           <tbody>
             {vars.map((v) => {
-              const isOpen = openAll || openRow === v.id;
               const marked = scopeToRemove(f, v);
               const st = scopeStatus(f, v.id, t.testById);
-              const n = f.links.filter((l) => l.scopeIds.includes(v.id)).length;
-              const flip = () => setRow(isOpen ? null : v.id);
               return (
-                <Fragment key={v.id}>
-                  <tr className={`set-tr${isOpen ? ' set-tr-open' : ''}${marked ? ' scope-marked' : ''}`} id={`scope-${v.id}`} onClick={flip}>
-                    <td className="set-td-id" onClick={(e) => e.stopPropagation()}><IdBtn label={`SV-${v.id}`} text={`F-${f.id}/SV-${v.id}`} /></td>
-                    {columns.map((_, i) => <td key={i} className={v.values?.[i] ? '' : 'faint'}>{v.values?.[i] || '–'}</td>)}
-                    <td>
-                      <span className="set-tags">
-                        {marked ? <span className="tag tag-remove" title={(v.toRemove ?? s.toRemove ?? f.toRemove)?.reason}>To remove</span> : <span className={`tag ${ST_TAG[st]}`}>{ST_LABEL[st]}</span>}
-                        {scopeChanged(f, v) && <span className="tag tag-changed">{v.aiFields.includes('title') ? 'New' : 'Changed'}</span>}
-                      </span>
-                    </td>
-                    <td className="set-th-num">{n}</td>
-                    <td className="set-chev">
-                      <button className="icon-btn" aria-expanded={isOpen} aria-label={`${isOpen ? 'Close' : 'Open'} SV-${v.id}`} onClick={(e) => (e.stopPropagation(), flip())}>
-                        <span style={{ display: 'inline-flex', transform: isOpen ? 'rotate(90deg)' : undefined }}><INext s={14} /></span>
-                      </button>
-                    </td>
-                  </tr>
-                  {isOpen && (
-                    <tr className="set-detail-tr">
-                      <td colSpan={columns.length + 4}><VariationDetail t={t} f={f} s={s} v={v} /></td>
-                    </tr>
-                  )}
-                </Fragment>
+                <tr key={v.id} className={`set-tr${marked ? ' scope-marked' : ''}`} id={`scope-${v.id}`} onClick={() => setRow(v.id)}>
+                  <td className="set-td-id" onClick={(e) => e.stopPropagation()}><IdBtn label={`SV-${v.id}`} text={`F-${f.id}/SV-${v.id}`} /></td>
+                  {columns.map((_, i) => <td key={i} className={v.values?.[i] ? '' : 'faint'}>{v.values?.[i] || '–'}</td>)}
+                  <td className="set-th-cov">
+                    <span className="set-tags">
+                      {marked ? <span className="tag tag-remove" title={(v.toRemove ?? s.toRemove ?? f.toRemove)?.reason}>To remove</span> : <span className={`tag ${ST_TAG[st]}`}>{ST_LABEL[st]}</span>}
+                      {scopeChanged(f, v) && <span className="tag tag-changed">{v.aiFields.includes('title') ? 'New' : 'Changed'}</span>}
+                    </span>
+                  </td>
+                  <td className="set-chev">
+                    <button className="icon-btn" aria-label={`Open SV-${v.id}`} onClick={(e) => (e.stopPropagation(), setRow(v.id))}><INext s={14} /></button>
+                  </td>
+                </tr>
               );
             })}
           </tbody>
@@ -648,7 +691,10 @@ function Variations({ t, f, s, vars, openAll, openRow, setRow }: {
   );
 }
 
-/** One variation: its values, its tests and its screenshots. Its scope has the text, requirements, group and move. */
+/**
+ * One variation, shown in the scope popup in place of its scope: its values, screenshots and tests.
+ * Its scope has the text, requirements, group and move.
+ */
 function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v: ScopeX }) {
   const p = t.project;
   const base = `/api/projects/${p}`;
@@ -662,7 +708,7 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
   const shown = (v.values ?? []).filter(Boolean).join(', ');
   const setValue = (i: number, x: string) => act(() => mutate('PATCH', url, { values: columns.map((_, k) => (k === i ? x : (v.values?.[k] ?? ''))) }), 'Value changed');
   return (
-    <div className="set-detail">
+    <div className="sp-main">
       {v.toRemove ? (
         <div className="remove-box">
           <strong>To remove:</strong> <span>{v.toRemove.reason}</span>
@@ -672,14 +718,20 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
       ) : s.toRemove || f.toRemove ? (
         <div className="remove-box"><strong>To remove:</strong> <span>{s.toRemove ? `its scope S-${s.id} has the mark.` : 'the whole feature has the mark.'}</span></div>
       ) : null}
-      <div className="set-values">
-        {columns.map((c, i) => (
-          <label key={`${i}-${c}`} className="set-value">
-            <span className="faint">{c}</span>
-            <InlineText label={c} className="ie-setval" value={v.values?.[i] ?? ''} placeholder="Does not apply" onSave={(x) => setValue(i, x)} />
-          </label>
-        ))}
-      </div>
+      <section className="lc" aria-label="Values of this variation">
+        <div className="lc-head lc-head-row">
+          <div className="lc-titlerow"><span className="lc-title">Values</span></div>
+        </div>
+        <div className="set-fields">
+          {columns.map((c, i) => (
+            <label key={`${i}-${c}`} className="set-field">
+              <span className="set-field-name">{c}</span>
+              <InlineText label={c} className="ie-setval" value={v.values?.[i] ?? ''} placeholder="Does not apply" onSave={(x) => setValue(i, x)} />
+            </label>
+          ))}
+        </div>
+      </section>
+      <ScopeShots p={p} shots={shots} onBig={setBig} />
       <section className="lc" aria-label="Tests of this variation">
         <div className="lc-head lc-head-row">
           <div className="lc-titlerow"><span className="lc-title">Tests</span><span className="lc-count">{links.length}</span></div>
@@ -688,7 +740,6 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
         {links.map((l) => <TestRow key={l.id} t={t} f={f} l={l} scopeId={v.id} />)}
         {!links.length && <div className="lc-empty">None yet.</div>}
       </section>
-      <ScopeShots p={p} shots={shots} onBig={setBig} />
       <div className="scope-foot">
         <span style={{ marginRight: 'auto' }} />
         {!v.toRemove && (

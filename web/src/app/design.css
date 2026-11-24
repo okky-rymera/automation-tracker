@@ -379,23 +379,7 @@ button.copied svg{opacity:1}
 .dot-cy{background:#22a2b3}
 .dot-none{background:transparent;box-shadow:inset 0 0 0 1.5px var(--ink-3)}
 .dot-remove{background:var(--line);opacity:.6}
-.set-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
-.set-table{width:100%;border-collapse:collapse;font-size:13.5px}
-.set-table th{text-align:left;font-weight:600;font-size:12px;color:var(--ink-2);padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--surface-2)}
-.set-table td{padding:4px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
-.set-table tbody tr:last-child td{border-bottom:0}
-.set-tr{cursor:pointer}
-.set-tr:hover td{background:var(--surface-2)}
-.set-tr-open td{background:var(--surface-2);border-bottom-color:transparent}
-.set-th-id{width:1%}
-.set-td-id{white-space:nowrap}
-.set-th-num{width:1%;text-align:right;font-variant-numeric:tabular-nums}
-.set-chev{width:1%;text-align:right}
 .set-tags{display:inline-flex;gap:6px;flex-wrap:wrap}
-.set-hcell{display:inline-flex;align-items:center;gap:4px}
-.set-hcell .ie-setcol{font-weight:600}
-.set-detail-tr td{background:var(--bg);padding:0}
-.set-detail{display:flex;flex-direction:column;gap:12px;padding:10px 14px 14px 44px;border-left:3px solid var(--accent)}
 .set-values{display:flex;gap:16px;flex-wrap:wrap}
 .set-value{display:flex;flex-direction:column;gap:2px;font-size:12px;min-width:160px}
 .set-value .ie-setval{font-size:14px;font-weight:500}
@@ -405,4 +389,51 @@ button.copied svg{opacity:1}
 .start-vars .set-form{align-items:flex-end}
 .check-sub{padding-left:34px}
 .check-row .mono{white-space:nowrap}
-@media (max-width:700px){.set-detail{padding-left:12px}.set-form .set-cell{width:auto;flex:1 1 120px}}
+@media (max-width:700px){.set-form .set-cell{width:auto;flex:1 1 120px}}
+
+/* ---- Scope editor in a popup: one column. Header: ID and group. Then title, tags, sections, buttons. ---- */
+.scope-pop{padding:5vh 16px 16px}
+.scope-pop-panel{max-width:900px;max-height:90vh;overflow-y:auto;background:var(--surface)}
+.sp-head{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:8px;padding:8px 10px 8px 18px;background:var(--surface);border-bottom:1px solid var(--line)}
+.sp-head .sp-group{width:auto;max-width:260px}
+.sp-main{display:flex;flex-direction:column;gap:36px;padding:22px 28px 24px;min-width:0}
+.sp-intro{display:flex;flex-direction:column;gap:10px}
+.app .sp-title{flex:none;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-.01em;margin:-4px 0 0 -6px}
+.sp-tags{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.app .sp-desc{font-size:14px;color:var(--ink);line-height:1.55;margin-left:-6px}
+/* Sections: a heading with a light line under it, the add button on the right, then plain rows. */
+.scope-pop-panel .lc{border:0;border-radius:0;background:transparent;overflow:visible}
+.scope-pop-panel .lc-head,.scope-pop-panel .lc-head-row{background:transparent;padding:0 0 8px;margin-bottom:8px;border-bottom:1px solid var(--line);min-height:30px}
+.scope-pop-panel .lc-head-row{justify-content:space-between;gap:8px}
+.scope-pop-panel .lc-title{font-size:16px;font-weight:600;color:var(--ink)}
+.scope-pop-panel .lc-count{font-size:12px;min-width:20px;padding:0 6px;border-radius:999px;background:var(--surface-2);text-align:center;color:var(--ink-2)}
+.scope-pop-panel .lc-row{padding:6px 0;border-bottom:0}
+.scope-pop-panel .lc-empty{padding:2px 0;border-bottom:0}
+.scope-pop-panel .scope-shots{padding:4px 0 0}
+.scope-pop-panel .start-vars{border:1px dashed var(--line);border-radius:10px;padding:10px 12px}
+.scope-pop-panel .start-vars .lc-head{border-bottom:0;margin-bottom:0}
+.scope-pop-panel .scope-foot{border-top:1px solid var(--line);padding-top:16px;margin-top:-12px}
+@media (max-width:700px){.scope-pop{padding:8px}.scope-pop-panel{max-height:calc(100vh - 16px)}.sp-main{padding:16px}}
+
+/* Variations: a table in the scope. A click on a line shows the variation in the popup. */
+.set-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.set-table{width:100%;border-collapse:collapse;font-size:13.5px}
+.set-table th{text-align:left;font-weight:600;font-size:12px;color:var(--ink-2);padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--surface-2)}
+.set-table td{padding:4px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+.set-table tbody tr:last-child td{border-bottom:0}
+.set-tr{cursor:pointer}
+.set-tr:hover td{background:var(--surface-2)}
+.set-th-id{width:1%}
+.set-td-id{white-space:nowrap}
+.set-th-num{width:1%;text-align:right;font-variant-numeric:tabular-nums}
+.set-chev{width:1%;text-align:right}
+.set-th-cov,.set-table th.set-th-cov{width:1%;text-align:right;white-space:nowrap}
+.set-th-cov .set-tags{justify-content:flex-end;flex-wrap:nowrap}
+.set-hcell{display:inline-flex;align-items:center;gap:4px}
+.set-hcell .ie-setcol{font-weight:600}
+.scope-pop-panel .set-table-wrap{margin-bottom:8px}
+.sp-head-title{flex:1;min-width:0;font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.set-fields{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 20px;align-items:center}
+.set-field{display:contents}
+.set-field-name{font-size:13px;color:var(--ink-3)}
+.app .set-field .ie-setval{margin:0 0 0 -8px;font-size:14px;font-weight:500;line-height:1.45;min-height:calc(1.45em + 8px)}
