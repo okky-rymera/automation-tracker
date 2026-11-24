@@ -779,6 +779,12 @@ export const edits = {
          SELECT DISTINCT l.project_id, l.test_id, ?, 'person', ? FROM links l
          WHERE l.feature_id = ? AND NOT EXISTS (SELECT 1 FROM links o WHERE o.project_id = l.project_id AND o.test_id = l.test_id AND o.feature_id <> l.feature_id)`,
       ).run(`A person deleted F-${f} "${title}".`, now(), f);
+      // Its GitHub issues go off the tracker (they stay on GitHub). An issue that also has a scope of
+      // another feature (a scope that moved) stays, and shows on that feature.
+      db.prepare(
+        `DELETE FROM issues WHERE feature_id = ? AND NOT EXISTS (SELECT 1 FROM issue_scopes s JOIN scopes sc ON sc.id = s.scope_id
+           WHERE s.issue_id = issues.id AND sc.feature_id <> ?)`,
+      ).run(f, f);
       db.prepare('DELETE FROM features WHERE id = ?').run(f); // labels, lists, scopes and links go too
       sweepBefore();
     });
@@ -894,6 +900,8 @@ export const edits = {
       ).run(from, into);
       const shotBase = nextSort('screenshots', 'feature_id = ?', into);
       db.prepare('UPDATE screenshots SET feature_id = ?, sort = sort + ? WHERE feature_id = ?').run(into, shotBase, from);
+      // GitHub issues of the source feature stay on the tracker, on the target (scope issues follow their scopes).
+      db.prepare('UPDATE issues SET feature_id = ? WHERE feature_id = ?').run(into, from);
       // The deleted and moved scopes of the source stay remembered, on the target.
       db.prepare('UPDATE OR IGNORE scope_titles_gone SET feature_id = ? WHERE feature_id = ?').run(into, from);
       // The answered questions of the source stay answered, on the target.

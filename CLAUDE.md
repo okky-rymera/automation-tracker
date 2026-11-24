@@ -48,6 +48,9 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Link a test | `POST .../links` with `{ "testId", "scopeId" }` or `{ "testId", "featureId" }` |
 | Set the scopes of a link | `PATCH .../links/:lid` with `{ "scopeIds": [] }` |
 | Move all links of a renamed test | `POST .../links/move-test` with `{ "from": "<old test ID>", "to": "<new test ID>" }` |
+| Create a GitHub issue to write tests (only when the user asks: it posts to GitHub) | `POST .../features/:fid/issues` with `{ "scopeId": <id> }` for one scope, or `{}` for all scopes of the feature with no test and no open issue. The AI writes it with the create-issue skill, with no plan, in 1 to 2 minutes |
+| Add an issue that is on GitHub to a feature or scope | `POST .../features/:fid/issues/link` with `{ "issue": "1162" \| "owner/repo#12" \| "<issue link>", "scopeId"? }`. A number is an issue of the plugin repo. The app checks the issue on GitHub first |
+| List the issues, or take one off the tracker | `GET .../issues`, or `DELETE .../issues/:iid` (the issue on GitHub stays) |
 | Sync the copy with the remote branch | `POST .../sync` with `{ "tests": "auto" \| "always" \| "never" }`. `GET .../sync` shows the state. |
 
 IDs: `F-12` is feature 12, `S-40` is scope 40, `SV-44` is variation 44 (in the scopes routes, send 44), `G-3` is group 3, and `IMG-7` is screenshot 7. Send only the number.

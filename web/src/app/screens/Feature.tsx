@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { featureTotal, mutate, pct, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot } from '../../api';
-import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, scopeIdLabel, scopeLinks, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
+import { featureTotal, mutate, pct, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot, type TrackedIssue } from '../../api';
+import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, featureIssues, issueOpen, scopeIdLabel, scopeIssues, anyScopeLabel, scopeCountText, scopeLinks, scopesForIssue, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
 import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
@@ -37,6 +37,8 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
   const [merge, setMerge] = useState(false);
   const [mq, setMq] = useState('');
   const [addingRole, setAddingRole] = useState(false);
+  const issues = featureIssues(t, f);
+  const forIssue = scopesForIssue(t, f);
   const titleBox = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (route.q.get('focus') === 'title') {
@@ -170,6 +172,22 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
             </span>
           </div>
           <div style={{ fontSize: 13, borderTop: '1px solid var(--line)', paddingTop: 10 }}>{summary}</div>
+          <IssueList
+            t={t} f={f} issues={issues}
+            actions={<>
+              {!f.toRemove && (
+                <button
+                  className="btn btn-ghost btn-sm add-btn" disabled={!forIssue.length}
+                  title={forIssue.length ? `One GitHub issue to write tests for the ${scopeCountText(forIssue)} with no test` : 'Each scope has a test or an open issue'}
+                  onClick={() =>
+                    confirm(`Create one GitHub issue to write tests for the ${scopeCountText(forIssue)} of F-${f.id} with no test?\n\n${forIssue.map((x) => `${scopeIdLabel(f, x.id)} ${x.title}`).join('\n')}\n\nThe AI writes it with the create-issue skill, with no test plan, and posts it to the plugin repo on GitHub. This takes 1 to 2 minutes.`) &&
+                    act(() => mutate('POST', `${url}/issues`, {}), 'The AI creates the issue now. This takes 1 to 2 minutes.')
+                  }
+                ><IPlus />Create test issue</button>
+              )}
+              <button className="btn btn-ghost btn-sm add-btn" onClick={() => addIssue(act, `${url}/issues/link`, {}, `F-${f.id}`)} title="Add an issue that is on GitHub to this feature" aria-label="Add an issue"><IPlus />Add</button>
+            </>}
+          />
         </div>
 
         <div className="card" style={{ padding: '0 18px 18px' }}>
@@ -433,6 +451,12 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
     if (e.shiftKey && (cur === first || cur === e.currentTarget)) (e.preventDefault(), last.focus());
     else if (!e.shiftKey && cur === last) (e.preventDefault(), first.focus());
   };
+  const issues = scopeIssues(t, f, s.id);
+  const openIssues = issues.filter(issueOpen);
+  const createIssue = () =>
+    (!openIssues.length || confirm(`S-${s.id} has an open issue already (${openIssues.map((x) => (x.number ? `#${x.number}` : 'being created')).join(', ')}). Create one more?`)) &&
+    confirm(`Create a GitHub issue to write tests for S-${s.id} “${s.title}”?\n\nThe AI writes it with the create-issue skill, with no test plan, and posts it to the plugin repo on GitHub. This takes 1 to 2 minutes.`) &&
+    act(() => mutate('POST', `${base}/features/${f.id}/issues`, { scopeId: s.id }), 'The AI creates the issue now. This takes 1 to 2 minutes.');
   const what = s.columns ? `scope S-${s.id} “${s.title}”, its ${vars.length} variation${vars.length === 1 ? '' : 's'}` : `scope S-${s.id} “${s.title}”`;
   return (
     <>
@@ -516,6 +540,17 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
                     {starting && <StartVariations nTests={links.length} nShots={shots.length} onClose={() => setStarting(false)} onAdd={(columns, values) => act(() => mutate('POST', `${url}/variations`, { columns, values }), 'Variations added. Add one more for each place.')} />}
                   </>
                 )}
+                <section className="lc" aria-label="Issues of this scope">
+                  <div className="lc-head lc-head-row">
+                    <div className="lc-titlerow"><span className="lc-title">Issues</span><span className="lc-count">{issues.length}</span></div>
+                    <span style={{ display: 'inline-flex', gap: 4 }}>
+                      {!scopeToRemove(f, s) && <button className="btn btn-ghost btn-sm add-btn" onClick={createIssue} title="A GitHub issue to write tests for this scope, made by the AI with no test plan"><IPlus />Create test issue</button>}
+                      <button className="btn btn-ghost btn-sm add-btn" onClick={() => addIssue(act, `${base}/features/${f.id}/issues/link`, { scopeId: s.id }, `S-${s.id}`)} title="Add an issue that is on GitHub to this scope" aria-label="Add an issue"><IPlus />Add</button>
+                    </span>
+                  </div>
+                  <IssueList t={t} f={f} issues={issues} bare />
+                  {!issues.length && !t.issuesError && <div className="lc-empty">None yet.</div>}
+                </section>
                 <div className="scope-foot">
                   {!s.columns && !starting && (
                     <button className="btn btn-sm" onClick={() => setStarting(true)} title="One check in several places, for example on 4 pages: a list with a line for each place">Add variations…</button>
@@ -1143,4 +1178,76 @@ function askRemoveReason(what: string): string | null {
 function removeWho(m: { at: string; by: 'person' | 'ai' }) {
   const day = new Date(m.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
   return `${m.by === 'ai' ? 'Set by the AI for a person' : 'Set by a person'} on ${day}`;
+}
+
+/* ================= GitHub issues ================= */
+
+/** Asks for an issue that is on GitHub, and adds it to the feature or scope. The server checks it on GitHub first. */
+function addIssue(act: ReturnType<typeof useAct>, url: string, body: object, what: string) {
+  const issue = prompt(`GitHub issue to add to ${what}.\nType an issue number of the plugin repo (1162), owner/repo#12, or paste an issue link.`);
+  if (!issue?.trim()) return;
+  act(() => mutate('POST', url, { ...body, issue: issue.trim() }), `Issue added to ${what}`);
+}
+
+const PR_TAG: Record<string, [string, string]> = { OPEN: ['tag-new', 'Open'], MERGED: ['tag-ai', 'Merged'], CLOSED: ['tag-ro', 'Closed'] };
+const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+
+/**
+ * GitHub issues that the app made for scopes with no test: the issue, its state, and its linked pull
+ * requests. The daily sync checks the open issues again. A failed run can be taken off the list.
+ */
+function IssueList({ t, f, issues, bare, actions }: { t: Tracker; f: FeatureX; issues: TrackedIssue[]; bare?: boolean; actions?: React.ReactNode }) {
+  const act = useAct();
+  const forget = (x: TrackedIssue, msg: string) => act(() => mutate('DELETE', `/api/projects/${t.project}/issues/${x.id}`), msg);
+  return (
+    <div className={bare ? '' : 'issue-box'} aria-label={bare ? undefined : 'Issues of this feature'}>
+      {!bare && (
+        <div className="issue-box-head">
+          <span className="faint issue-box-title">Issues{issues.length ? ` ${issues.length}` : ''}</span>
+          <span style={{ flex: 1 }} />
+          {actions}
+        </div>
+      )}
+      {t.issuesError && <div className="err" style={{ fontSize: 13 }}>{t.issuesError}</div>}
+      {!bare && !issues.length && !t.issuesError && <div className="faint" style={{ fontSize: 13 }}>None yet.</div>}
+      {issues.map((x) => (
+        <div key={x.id} className="issue-row">
+          {x.status === 'creating' ? (
+            <><span className="tag tag-changed">Creating…</span><span className="muted">The AI writes the issue on GitHub.</span></>
+          ) : x.status === 'failed' ? (
+            <>
+              <span className="tag tag-fail">Not created</span>
+              <span className="muted issue-err">{x.error}</span>
+              <button className="btn btn-ghost btn-sm" onClick={() => forget(x, 'Removed from the list')}>Remove</button>
+            </>
+          ) : (
+            <>
+              <a href={x.url ?? undefined} target="_blank" rel="noreferrer" className="issue-link" title={`Open ${x.repo}#${x.number} on GitHub (new tab)`}>
+                <span className="mono">#{x.number}</span> <span className="issue-title">{x.title}</span>
+              </a>
+              <span className={`tag ${x.state === 'CLOSED' ? 'tag-ok' : 'tag-new'}`}>{x.state === 'CLOSED' ? 'Closed' : 'Open'}</span>
+              {x.prs.map((pr) => (
+                <a key={pr.number} href={pr.url} target="_blank" rel="noreferrer" className={`tag ${PR_TAG[pr.state]?.[0] ?? 'tag-ro'}`} style={{ textDecoration: 'none' }} title={pr.title}>
+                  PR #{pr.number} {PR_TAG[pr.state]?.[1] ?? pr.state}
+                </a>
+              ))}
+              {!x.prs.length && <span className="faint">No PR yet</span>}
+              {x.error && <span className="muted issue-err">{x.error}</span>}
+            </>
+          )}
+          <span style={{ flex: 1 }} />
+          <span className="faint issue-meta" title={x.syncedAt ? `Last check on GitHub: ${day(x.syncedAt)}` : undefined}>
+            {x.scopeIds.map((id) => anyScopeLabel(t, id)).join(', ')}
+            {x.status === 'created' && x.syncedAt ? ` · checked ${day(x.syncedAt)}` : ''}
+          </span>
+          {x.status === 'created' && (
+            <button
+              className="icon-btn" aria-label={`Take #${x.number} off the tracker`} title="Take off the tracker (the issue on GitHub stays)"
+              onClick={() => confirm(`Take issue #${x.number} off the tracker? The issue on GitHub stays.`) && forget(x, `#${x.number} taken off the tracker`)}
+            ><IX s={14} /></button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }

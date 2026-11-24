@@ -796,6 +796,39 @@ const MIGRATIONS: string[] = [
   UPDATE scopes SET ai_fields = COALESCE((SELECT json_group_array(value) FROM json_each(scopes.ai_fields) WHERE value <> 'group'), '[]') WHERE parent_id IS NOT NULL;
   DELETE FROM ai_before WHERE kind = 'scope' AND field IN ('group', 'title', 'description') AND row_id IN (SELECT id FROM scopes WHERE parent_id IS NOT NULL);
   `,
+  // 38: GitHub issues that the app made for scopes with no test (server/issues.ts). One issue can be for
+  //     several scopes (the "all scopes without tests" button of a feature). feature_id: the feature it
+  //     was made from. status: creating (the AI runs now) | created | failed. state: the GitHub state
+  //     (OPEN or CLOSED). prs: the linked pull requests, as a JSON list, from the last check.
+  //     issue_scopes: the scopes and variations of the issue. A deleted scope takes its row with it.
+  `
+  CREATE TABLE issues (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    feature_id INTEGER REFERENCES features(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL DEFAULT 'automation-plan',
+    repo TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('creating', 'created', 'failed')),
+    number INTEGER,
+    url TEXT,
+    title TEXT,
+    state TEXT,
+    prs TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    owner_pid INTEGER,
+    claude_pid INTEGER,
+    cost_usd REAL,
+    created_at TEXT NOT NULL,
+    synced_at TEXT
+  );
+  CREATE INDEX issues_project ON issues(project_id);
+  CREATE TABLE issue_scopes (
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    scope_id INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    PRIMARY KEY (issue_id, scope_id)
+  );
+  CREATE INDEX issue_scopes_scope ON issue_scopes(scope_id);
+  `,
 ];
 
 function open(): DatabaseSync {

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  featureTotal, mutate, pct, reloadAll, useApi,
+  featureTotal, mutate, onReload, pct, reloadAll, useApi,
   type CypressScenario, type Feature, type FeatureCodeMap, type FeatureData, type FeatureItem, type FeatureLink, type ItemField,
-  type LineCounts, type PlaywrightTest, type ProjectSummary, type Scope, type TestDecision,
+  type LineCounts, type PlaywrightTest, type ProjectSummary, type Scope, type TestDecision, type TrackedIssue,
 } from '../api';
 
 /* ------------------------------------------------------------------ */
@@ -87,7 +87,8 @@ export const ST_LABEL: Record<ScopeStatus, string> = { ok: 'Covered', fail: 'Fai
 export const ST_TAG: Record<ScopeStatus, string> = { ok: 'tag-ok', fail: 'tag-fail', skipped: 'tag-skip', cy: 'tag-cy', none: 'tag-none' };
 
 /** Scope counts of a feature. total and the states leave out the scopes marked "To remove"; remove counts them. */
-export interface Metrics { total: number; ok: number; fail: number; skip: number; cy: number; none: number; remove: number }
+/** cy: scopes with only Cypress tests (to convert) · cyAny: scopes that a Cypress test covers (see covers), with or without Playwright. */
+export interface Metrics { total: number; ok: number; fail: number; skip: number; cy: number; cyAny: number; none: number; remove: number }
 
 /** One change to review: a change since the last review, a link to a test that is gone, or a linked test that the last sync changed. */
 export interface Change {
@@ -139,6 +140,10 @@ export interface Tracker {
   newTests: Set<string>;
   /** Tests with no link that the AI or a person decided not to link, with the reason. Other tests with no link wait for a decision. */
   decided: Map<string, TestDecision>;
+  /** GitHub issues that the app made for scopes with no test, newest first. */
+  issues: TrackedIssue[];
+  /** Why the issue list did not load. The "Issues" sections show it. */
+  issuesError: string | null;
 }
 
 /**
@@ -196,11 +201,91 @@ export function useTracker(project: string): { t: Tracker | null; error: string 
   const sync = useSync(project);
   // Without the decisions, decided tests would show as "To decide": show the error, and wait for them before the first build.
   const error = summary.error ?? fd.error ?? pw.error ?? cy.error ?? dec.error;
-  const t = useMemo(
+  const t0 = useMemo(
     () => (summary.data && fd.data && pw.data && cy.data && dec.data ? build(project, summary.data, fd.data, pw.data, cy.data, code.data, sync, dec.data) : null),
     [project, summary.data, fd.data, pw.data, cy.data, code.data, sync, dec.data],
   );
+  // The issues are not in build: their list loads again each 5 seconds while one is being created.
+  const iss = useIssues(project);
+  const t = useMemo(() => (t0 ? { ...t0, issues: iss.list, issuesError: iss.error } : null), [t0, iss.list, iss.error]);
   return { t, error };
+}
+
+/**
+ * The issue list of the project. It loads again after each change, and each 5 seconds while an issue is
+ * being created. A new project starts with an empty list, so the issues of the last project do not show.
+ */
+function useIssues(project: string): { list: TrackedIssue[]; error: string | null } {
+  const [got, setGot] = useState<{ project: string; list: TrackedIssue[]; error: string | null }>({ project, list: [], error: null });
+  const [n, setN] = useState(0);
+  useEffect(() => onReload(() => setN((x) => x + 1)), []);
+  useEffect(() => {
+    let live = true;
+    fetch(`/api/projects/${project}/issues`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`The issue list did not load (${r.status}): ${(await r.text()).slice(0, 200)}`);
+        return r.json();
+      })
+      .then((d: TrackedIssue[]) => live && setGot({ project, list: d, error: null }))
+      .catch((e: Error) => live && setGot((g) => ({ project, list: g.project === project ? g.list : [], error: e.message })));
+    return () => {
+      live = false;
+    };
+  }, [project, n]);
+  const list = useMemo(() => (got.project === project ? got.list : []), [got, project]);
+  const creating = list.some((i) => i.status === 'creating');
+  useEffect(() => {
+    if (!creating) return;
+    const timer = setInterval(() => setN((x) => x + 1), 5000);
+    return () => clearInterval(timer);
+  }, [creating]);
+  return { list, error: got.project === project ? got.error : null };
+}
+
+/** The issue is open on GitHub, or the AI creates it now. */
+export const issueOpen = (i: TrackedIssue) => i.status === 'creating' || (i.status === 'created' && i.state !== 'CLOSED');
+/** Issues of a feature: made from it, or for one of its scopes (a scope can move to another feature). */
+export const featureIssues = (t: Tracker, f: Feature) => {
+  const ids = new Set(f.scopes.map((s) => s.id));
+  return t.issues.filter((i) => i.featureId === f.id || i.scopeIds.some((id) => ids.has(id)));
+};
+/** S-12 or SV-12, for a scope of any feature (a scope can move after its issue was made). */
+export const anyScopeLabel = (t: Tracker, id: number) => {
+  for (const f of t.fd.features) {
+    const s = f.scopes.find((x) => x.id === id);
+    if (s) return `${s.parentId != null ? 'SV' : 'S'}-${id}`;
+  }
+  return `S-${id}`;
+};
+/** "2 scopes and 3 variations": the size of a list of scopes and variations, in words. */
+export function scopeCountText(list: Scope[]): string {
+  const v = list.filter((s) => s.parentId != null).length;
+  const n = list.length - v;
+  const part = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+  return [n && part(n, 'scope', 'scopes'), v && part(v, 'variation', 'variations')].filter(Boolean).join(' and ');
+}
+/** Issues of a scope or of one of its variations. */
+export const scopeIssues = (t: Tracker, f: Feature, scopeId: number) => {
+  const ids = new Set([scopeId, ...f.scopes.filter((s) => s.parentId === scopeId).map((s) => s.id)]);
+  return t.issues.filter((i) => i.scopeIds.some((id) => ids.has(id)));
+};
+/**
+ * Scopes and variations that "Create test issue" on the feature takes: no test linked, not marked
+ * "To remove", and no open issue. The server picks them with the same rule (server/issues.ts unitsFor).
+ */
+export function scopesForIssue(t: Tracker, f: Feature): Scope[] {
+  if (f.toRemove) return [];
+  const tested = new Set(f.links.filter((l) => !l.missing).flatMap((l) => l.scopeIds));
+  const open = new Set(t.issues.filter(issueOpen).flatMap((i) => i.scopeIds));
+  const out: Scope[] = [];
+  for (const s of f.scopes.filter((x) => x.parentId === null && !x.toRemove)) {
+    if (!s.columns) {
+      if (!tested.has(s.id) && !open.has(s.id)) out.push(s);
+      continue;
+    }
+    out.push(...f.scopes.filter((v) => v.parentId === s.id && !v.toRemove && !tested.has(v.id) && !open.has(v.id)));
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -211,15 +296,23 @@ const activeLinks = (f: Feature) => f.links.filter((l) => !l.missing);
 export const scopeLinks = (f: Feature, scopeId: number) => activeLinks(f).filter((l) => l.scopeIds.includes(scopeId));
 
 /**
+ * A linked test covers its scope when it is in the test list, is not skipped, and did not fail.
+ * A test that did not run yet (no result) covers, for Playwright and Cypress alike.
+ */
+const covers = (t: TestInfo | undefined): t is TestInfo => !!t && !t.skipped && t.result !== 'failed';
+const cyCovers = (f: Feature, scopeId: number, byId: Map<string, TestInfo>) =>
+  scopeLinks(f, scopeId).some((l) => l.framework === 'cypress' && covers(byId.get(l.testId)));
+
+/**
  * Coverage state of a scope, from its linked tests:
- * ok: a Playwright test that is not skipped and did not fail · fail: its Playwright tests failed in the run
- * cy: only Cypress tests (to convert) · skipped: only skipped Playwright tests · none: no test.
+ * ok: a Playwright test covers it (see covers) · fail: its Playwright tests failed in the run
+ * cy: only Cypress tests (to convert), also when they failed · skipped: only skipped Playwright tests · none: no test covers it.
  */
 export function scopeStatus(f: Feature, scopeId: number, byId: Map<string, TestInfo>): ScopeStatus {
   const ls = scopeLinks(f, scopeId);
   const pw = ls.filter((l) => l.framework === 'playwright').map((l) => byId.get(l.testId)).filter(Boolean) as TestInfo[];
   const active = pw.filter((t) => !t.skipped);
-  if (active.some((t) => t.result !== 'failed')) return 'ok';
+  if (active.some(covers)) return 'ok';
   if (active.length) return 'fail';
   if (ls.some((l) => l.framework === 'cypress')) return 'cy';
   if (pw.length) return 'skipped';
@@ -254,13 +347,14 @@ export function testToRemove(t: Pick<Tracker, 'linkedTo' | 'infoById'>, testId: 
 }
 
 export function metrics(f: Feature, byId: Map<string, TestInfo>): Metrics {
-  const m: Metrics = { total: 0, ok: 0, fail: 0, skip: 0, cy: 0, none: 0, remove: 0 };
+  const m: Metrics = { total: 0, ok: 0, fail: 0, skip: 0, cy: 0, cyAny: 0, none: 0, remove: 0 };
   for (const s of countedScopes(f)) {
     if (scopeToRemove(f, s)) {
       m.remove++;
       continue;
     }
     m.total++;
+    if (cyCovers(f, s.id, byId)) m.cyAny++;
     const st = scopeStatus(f, s.id, byId);
     if (st === 'ok') m.ok++;
     else if (st === 'fail') m.fail++;
@@ -284,7 +378,7 @@ const FIELD_LABEL: Record<string, string> = { title: 'Title', description: 'Desc
 
 function build(
   project: string, summary: ProjectSummary, fd: FeatureData, pw: PlaywrightTest[], cy: CypressScenario[], codeMap: FeatureCodeMap | null, sync: SyncState | null, decisions: TestDecision[],
-): Tracker {
+): Omit<Tracker, 'issues' | 'issuesError'> {
   const tests: TestInfo[] = [
     ...pw.map<TestInfo>((t) => ({ id: t.id, fw: 'playwright', title: t.title, path: t.describes, file: t.file, line: t.line, tags: t.tags, skipped: t.skipped, result: testResult(t.run), pw: t })),
     ...cy.map<TestInfo>((t) => ({ id: t.id, fw: 'cypress', title: t.title, path: [t.feature], file: t.file, line: t.line, tags: t.tags, skipped: false, result: testResult(t.run), cy: t })),

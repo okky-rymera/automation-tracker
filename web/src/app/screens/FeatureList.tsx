@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { mutate } from '../../api';
-import { codeTxt, PRI_LABEL, type FeatureInfo, type Tracker } from '../data';
+import { codeTxt, featureIssues, issueOpen, PRI_LABEL, type FeatureInfo, type Tracker } from '../data';
 import { go, link, readRoute, useSticky } from '../route';
 import { AddRow, Bar, Dialog, InlineText, IPlus, ITrash, Pager, SortTh, useAct } from '../ui';
 
-type Sort = 'id' | 'grp' | 'pri' | 'gaps' | 'code' | 'review';
-const NAT: Record<Sort, 'ascending' | 'descending'> = { id: 'ascending', grp: 'ascending', pri: 'descending', gaps: 'descending', code: 'ascending', review: 'descending' };
+type Sort = 'id' | 'grp' | 'pri' | 'gaps' | 'cy' | 'code' | 'review';
+const NAT: Record<Sort, 'ascending' | 'descending'> = { id: 'ascending', grp: 'ascending', pri: 'descending', gaps: 'descending', cy: 'descending', code: 'ascending', review: 'descending' };
+const FLT = ['all', 'review', 'gaps', 'cyGaps', 'remove'];
 const PRI: Record<string, number> = { high: 0, medium: 1, low: 2, '': 3 };
 
 /** The order of the list as it shows now: the feature page uses it for "Previous" and "Next". */
@@ -17,8 +18,11 @@ export function FeatureList({ t }: { t: Tracker }) {
   const [fq, setFq] = useSticky('fl.q', '');
   const [grp, setGrp] = useSticky('fl.grp', 'all');
   const [pri, setPri] = useSticky('fl.pri', 'all');
-  const [flt, setFlt] = useSticky('fl.status', 'all');
-  const [sort, setSort] = useSticky<Sort>('fl.sort', 'id');
+  const [fltRaw, setFlt] = useSticky('fl.status', 'all');
+  const [sortRaw, setSort] = useSticky<Sort>('fl.sort', 'id');
+  // A saved or linked value that is not known (an old filter, a bad link) shows the default.
+  const flt = FLT.includes(fltRaw) ? fltRaw : 'all';
+  const sort: Sort = Object.hasOwn(NAT, sortRaw) ? sortRaw : 'id';
   const [rev, setRev] = useSticky('fl.rev', false);
   const [per, setPer] = useSticky('fl.per', 25);
   const [page, setPage] = useSticky('fl.page', 1);
@@ -26,17 +30,19 @@ export function FeatureList({ t }: { t: Tracker }) {
   // Links from the overview set the filter and the sort.
   useEffect(() => {
     const q = readRoute().q;
-    if (q.get('status')) (setFlt(q.get('status')!), setGrp('all'), setPri('all'), setFq(''), setPage(1));
-    if (q.get('sort')) (setSort(q.get('sort') as Sort), setRev(false));
+    const st = q.get('status'), so = q.get('sort');
+    if (st && FLT.includes(st)) (setFlt(st), setGrp('all'), setPri('all'), setFq(''), setPage(1));
+    if (so && Object.hasOwn(NAT, so)) (setSort(so as Sort), setRev(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const ql = fq.trim().toLowerCase();
   const gaps = (i: FeatureInfo) => i.m.total - i.m.ok;
+  const cyGaps = (i: FeatureInfo) => i.m.total - i.m.cyAny;
   const codeOf = (i: FeatureInfo) => (i.code ? i.code.t / i.code.n : 1);
   const all = t.info.filter(
     (i) =>
-      (flt === 'all' || (flt === 'review' && i.toReview) || (flt === 'gaps' && gaps(i) > 0) || (flt === 'remove' && (i.m.remove > 0 || !!i.f.toRemove))) &&
+      (flt === 'all' || (flt === 'review' && i.toReview) || (flt === 'gaps' && gaps(i) > 0) || (flt === 'cyGaps' && cyGaps(i) > 0) || (flt === 'remove' && (i.m.remove > 0 || !!i.f.toRemove))) &&
       (grp === 'all' || String(i.f.groupId ?? 'none') === grp) &&
       (pri === 'all' || i.f.priority === (pri === 'none' ? '' : pri)) &&
       (!ql ||
@@ -47,6 +53,7 @@ export function FeatureList({ t }: { t: Tracker }) {
   );
   all.sort((a, b) =>
     sort === 'gaps' ? gaps(b) - gaps(a) || a.f.id - b.f.id
+    : sort === 'cy' ? cyGaps(b) - cyGaps(a) || a.f.id - b.f.id
     : sort === 'review' ? b.changes.length - a.changes.length || a.f.id - b.f.id
     : sort === 'pri' ? PRI[a.f.priority] - PRI[b.f.priority] || a.f.id - b.f.id
     : sort === 'code' ? codeOf(a) - codeOf(b) || a.f.id - b.f.id
@@ -90,7 +97,7 @@ export function FeatureList({ t }: { t: Tracker }) {
         </select>
         <label className="sr" htmlFor="fst">Status</label>
         <select id="fst" className="input sel" value={flt} onChange={(e) => (setFlt(e.target.value), setPage(1))}>
-          <option value="all">Any status</option><option value="review">To review</option><option value="gaps">Has scopes to cover</option><option value="remove">Has scopes “To remove”</option>
+          <option value="all">Any status</option><option value="review">To review</option><option value="gaps">Has scopes to cover with Playwright</option><option value="cyGaps">Has scopes to cover with Cypress</option><option value="remove">Has scopes “To remove”</option>
         </select>
         {has && <button className="btn btn-ghost btn-sm" onClick={clear}>Clear filters</button>}
       </div>
@@ -101,20 +108,26 @@ export function FeatureList({ t }: { t: Tracker }) {
               <SortTh k="id" label="Feature" sort={sort} rev={rev} natural={NAT.id} onSort={onSort} />
               <SortTh k="grp" label="Group" sort={sort} rev={rev} natural={NAT.grp} onSort={onSort} />
               <SortTh k="pri" label="Priority" sort={sort} rev={rev} natural={NAT.pri} onSort={onSort} />
-              <SortTh k="gaps" label="Scopes covered" sort={sort} rev={rev} natural={NAT.gaps} onSort={onSort} />
+              <SortTh k="gaps" label="Playwright coverage" sort={sort} rev={rev} natural={NAT.gaps} onSort={onSort} />
+              <SortTh k="cy" label="Cypress coverage" sort={sort} rev={rev} natural={NAT.cy} onSort={onSort} />
               <SortTh k="code" label="Code run by tests" sort={sort} rev={rev} natural={NAT.code} onSort={onSort} />
               <SortTh k="review" label="To review" sort={sort} rev={rev} natural={NAT.review} onSort={onSort} />
             </div>
             {rows.map((i) => (
               <div className="gr cols-fl fl-row" role="row" key={i.f.id}>
                 <div role="cell"><a className="rowbtn" href={link(p, 'feature', i.f.id)} style={{ textDecoration: 'none' }}><span className="mono faint">F-{i.f.id}</span> {i.f.title}</a>
-                  {(i.m.remove > 0 || i.f.toRemove) && <span className="tag tag-remove" style={{ marginLeft: 6 }} title="Scopes marked “To remove”. They do not count in the coverage.">{i.f.toRemove ? 'To remove' : `${i.m.remove} to remove`}</span>}
+                  {i.f.toRemove && <span className="tag tag-remove" style={{ marginLeft: 6 }} title="This feature is marked “To remove”. It does not count in the coverage.">To remove</span>}
+                  <IssueBadge t={t} i={i} />
                 </div>
                 <div role="cell" style={{ fontSize: 13 }}>{i.group}</div>
                 <div role="cell" style={{ fontSize: 13 }}>{i.f.priority ? PRI_LABEL[i.f.priority] : '–'}</div>
                 <div role="cell" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <Bar small style={{ flex: 1 }} total={i.m.total} label={`${i.m.ok} of ${i.m.total} scopes covered by Playwright`} parts={[[i.m.ok, 'c-good']]} />
                   <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{i.m.ok}/{i.m.total}</span>
+                </div>
+                <div role="cell" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Bar small style={{ flex: 1 }} total={i.m.total} label={`${i.m.cyAny} of ${i.m.total} scopes covered by Cypress`} parts={[[i.m.cyAny, 'c-cy']]} />
+                  <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{i.m.cyAny}/{i.m.total}</span>
                 </div>
                 <div role="cell" style={{ fontSize: 13 }}>{codeTxt(i.code)}</div>
                 <div role="cell">
@@ -173,5 +186,19 @@ function GroupsDialog({ t, onClose }: { t: Tracker; onClose: () => void }) {
         <div style={{ padding: 8 }}><button className="btn btn-ghost btn-sm add-btn" onClick={() => setAdding(true)}><IPlus />Add group</button></div>
       )}
     </Dialog>
+  );
+}
+
+/** "2 open issues · 1 PR": the open GitHub issues of a feature that the app made, and their linked PRs that are open or merged. */
+function IssueBadge({ t, i }: { t: Tracker; i: FeatureInfo }) {
+  const open = featureIssues(t, i.f).filter(issueOpen);
+  if (!open.length) return null;
+  const prs = open.flatMap((x) => x.prs).filter((pr) => pr.state !== 'CLOSED');
+  const merged = prs.filter((pr) => pr.state === 'MERGED').length;
+  const tip = open.map((x) => (x.number ? `#${x.number} ${x.title ?? ''}` : 'An issue is being created')).join('\n') + (prs.length ? `\n${prs.length} linked PR${prs.length === 1 ? '' : 's'}, ${merged} merged` : '\nNo linked PR yet');
+  return (
+    <span className="tag tag-new" style={{ marginLeft: 6 }} title={tip}>
+      {open.length} open issue{open.length === 1 ? '' : 's'}{prs.length ? ` · ${prs.length} PR${prs.length === 1 ? '' : 's'}` : ''}
+    </span>
   );
 }

@@ -19,6 +19,7 @@ import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
 import { aiUpdateState, AiUpdateError, retryReview, startAiUpdate } from './ai-update.ts';
+import { forgetIssue, linkIssue, listIssues, startIssue } from './issues.ts';
 import { listParked, mapLoopState, MapLoopError, mapOlderRuns, mapRunReport, startMapLoop, stopMapLoop, unpark } from './map-loop.ts';
 
 const app = express();
@@ -283,6 +284,25 @@ app.post('/api/projects/:id/map-loop', loopEdit((req) => {
   return { loopId: startMapLoop(proj(req), { model, maxUnits: n(b.maxUnits), startedBy: 'app' }).loopId };
 }));
 app.post('/api/projects/:id/map-loop/stop', loopEdit((req) => stopMapLoop(P(req))));
+// ---- GitHub issues for scopes with no test (server/issues.ts) ----
+app.get('/api/projects/:id/issues', (req, res) => res.json(listIssues(P(req))));
+// Body { "scopeId"?: <id> }. With no scopeId: one issue for all scopes of the feature with no test.
+app.post('/api/projects/:id/features/:fid/issues', edit((req) => {
+  const sid = req.body?.scopeId;
+  return startIssue(proj(req), Number(req.params.fid), sid === undefined || sid === null ? null : Number(String(sid).replace(/^.*S-?V?-?/i, '')));
+}));
+// Adds an issue that is on GitHub. Body { "issue": "1162" | "owner/repo#12" | "<issue link>", "scopeId"?: <id> }. No scopeId: the feature.
+app.post('/api/projects/:id/features/:fid/issues/link', async (req, res) => {
+  try {
+    res.json(await linkIssue(proj(req), Number(req.params.fid), req.body));
+  } catch (e) {
+    if (e instanceof EditError) return res.status(400).json({ error: e.message });
+    console.error(e);
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+// Takes the issue off the tracker only. The issue on GitHub stays.
+app.delete('/api/projects/:id/issues/:iid', edit((req) => forgetIssue(P(req), Number(req.params.iid))));
 app.post('/api/projects/:id/rescan', edit((req) => syncProject(proj(req), true)));
 app.post('/api/projects/:id/groups', edit((req) => edits.addGroup(P(req), req.body)));
 app.patch('/api/projects/:id/groups/:gid', edit((req) => edits.updateGroup(P(req), req.params.gid, req.body)));

@@ -39,6 +39,7 @@ import { markLoopStopped, startMapLoop } from './map-loop.ts';
 import { mapLoopRunning, syncRunning } from './sync.ts';
 import { planUse } from './plan-limit.ts';
 import { setting } from './settings.ts';
+import { syncDueIssues } from './issues.ts';
 
 // The Settings screen (server/settings.ts) sets these; an environment variable wins. Each is read
 // when it is needed, so a change works at the next check, with no restart.
@@ -256,11 +257,15 @@ export function startDailySync(log: (l: string) => void = console.log) {
   // The timer always runs: the Settings screen can turn the daily sync on or off at any time.
   let busy = false;
   const tick = () => {
-    if (running || busy || !isOn()) return;
+    if (running || busy) return;
     busy = true;
-    runDue(log)
+    // The state of the open GitHub issues and their PRs (server/issues.ts): once each dueHours().
+    // It runs also when the daily sync is off: it only reads GitHub, and does not touch the copy.
+    syncDueIssues(log)
+      .catch((e) => log(`Issue check failed: ${(e as Error).message}`))
+      .then(() => (isOn() ? runDue(log) : undefined))
       .catch((e) => log(`Daily sync failed: ${(e as Error).message}`))
-      .then(() => runAiStep(log))
+      .then(() => (isOn() ? runAiStep(log) : undefined))
       .catch((e) => log(`Daily AI step failed: ${(e as Error).message}`))
       .finally(() => (busy = false));
   };

@@ -309,10 +309,35 @@ export function getJson(url: string): Promise<unknown> {
 let version = 0;
 const listeners = new Set<() => void>();
 
-/**
- * Sends a change to the API (POST, PATCH or DELETE with a JSON body).
- * On success, all views load their data again. Throws the API error text.
- */
+/** Calls fn after each reloadAll. Returns the function that stops it. */
+export function onReload(fn: () => void): () => void {
+  listeners.add(fn);
+  return () => void listeners.delete(fn);
+}
+
+/** A GitHub issue that the app made for scopes with no test (server/issues.ts). */
+export interface TrackedIssue {
+  id: number;
+  /** automation-plan: the app made it with the AI · linked: a person added an issue that was on GitHub. */
+  kind: string;
+  featureId: number | null;
+  /** The scopes and variations of the issue. */
+  scopeIds: number[];
+  repo: string;
+  /** creating: the AI writes it now · created: on GitHub · failed: see error. */
+  status: 'creating' | 'created' | 'failed';
+  number: number | null;
+  url: string | null;
+  title: string | null;
+  /** GitHub state: OPEN or CLOSED. */
+  state: string | null;
+  /** The linked pull requests, from the last check. */
+  prs: { number: number; title: string; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED' }[];
+  error: string | null;
+  createdAt: string;
+  syncedAt: string | null;
+}
+
 /** Tells every open view to load its data again. */
 export function reloadAll() {
   inflight.clear();
@@ -320,7 +345,11 @@ export function reloadAll() {
   listeners.forEach((f) => f());
 }
 
-/** Sends a change. quiet: no reload; call reloadAll() after the last change of a batch. */
+/**
+ * Sends a change to the API (POST, PATCH or DELETE with a JSON body).
+ * On success, all views load their data again. Throws the API error text.
+ * quiet: no reload; call reloadAll() after the last change of a batch.
+ */
 export async function mutate<T = unknown>(method: 'POST' | 'PATCH' | 'DELETE', url: string, body: unknown = {}, opts: { quiet?: boolean } = {}): Promise<T> {
   const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const out = await r.json().catch(() => ({}));
