@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { mutate } from '../../api';
+import { mutate, pct } from '../../api';
 import { codeTxt, featureIssues, issueOpen, PRI_LABEL, type FeatureInfo, type Tracker } from '../data';
 import { go, link, readRoute, useSticky } from '../route';
-import { AddRow, Bar, Dialog, InlineText, IPlus, ITrash, Pager, SortTh, useAct } from '../ui';
+import { AddRow, Dialog, InlineText, IPlus, ITrash, Pager, SortTh, useAct } from '../ui';
 
 type Sort = 'id' | 'grp' | 'pri' | 'gaps' | 'cy' | 'code' | 'review';
-const NAT: Record<Sort, 'ascending' | 'descending'> = { id: 'ascending', grp: 'ascending', pri: 'descending', gaps: 'descending', cy: 'descending', code: 'ascending', review: 'descending' };
+const NAT: Record<Sort, 'ascending' | 'descending'> = { id: 'ascending', grp: 'ascending', pri: 'descending', gaps: 'ascending', cy: 'ascending', code: 'ascending', review: 'descending' };
 const FLT = ['all', 'review', 'gaps', 'cyGaps', 'remove'];
 const PRI: Record<string, number> = { high: 0, medium: 1, low: 2, '': 3 };
 
@@ -40,6 +40,8 @@ export function FeatureList({ t }: { t: Tracker }) {
   const gaps = (i: FeatureInfo) => i.m.total - i.m.ok;
   const cyGaps = (i: FeatureInfo) => i.m.total - i.m.cyAny;
   const codeOf = (i: FeatureInfo) => (i.code ? i.code.t / i.code.n : 1);
+  // Covered share of the scopes. Equal shares: the feature with more scopes to cover comes first.
+  const share = (n: number, i: FeatureInfo) => (i.m.total ? n / i.m.total : 0);
   const all = t.info.filter(
     (i) =>
       (flt === 'all' || (flt === 'review' && i.toReview) || (flt === 'gaps' && gaps(i) > 0) || (flt === 'cyGaps' && cyGaps(i) > 0) || (flt === 'remove' && (i.m.remove > 0 || !!i.f.toRemove))) &&
@@ -52,8 +54,8 @@ export function FeatureList({ t }: { t: Tracker }) {
         i.f.scopes.some((s) => s.title.toLowerCase().includes(ql) || `s-${s.id}` === ql || `sv-${s.id}` === ql)),
   );
   all.sort((a, b) =>
-    sort === 'gaps' ? gaps(b) - gaps(a) || a.f.id - b.f.id
-    : sort === 'cy' ? cyGaps(b) - cyGaps(a) || a.f.id - b.f.id
+    sort === 'gaps' ? share(a.m.ok, a) - share(b.m.ok, b) || gaps(b) - gaps(a) || a.f.id - b.f.id
+    : sort === 'cy' ? share(a.m.cyAny, a) - share(b.m.cyAny, b) || cyGaps(b) - cyGaps(a) || a.f.id - b.f.id
     : sort === 'review' ? b.changes.length - a.changes.length || a.f.id - b.f.id
     : sort === 'pri' ? PRI[a.f.priority] - PRI[b.f.priority] || a.f.id - b.f.id
     : sort === 'code' ? codeOf(a) - codeOf(b) || a.f.id - b.f.id
@@ -61,6 +63,8 @@ export function FeatureList({ t }: { t: Tracker }) {
     : a.f.id - b.f.id,
   );
   if (rev) all.reverse();
+  // A feature with no scope to count has no percentage: it goes last in both directions.
+  if (sort === 'gaps' || sort === 'cy') all.sort((a, b) => Number(!a.m.total) - Number(!b.m.total));
   listOrder = all.map((i) => i.f.id);
   const pages = Math.max(1, Math.ceil(all.length / per));
   const pg = Math.min(page, pages);
@@ -121,14 +125,8 @@ export function FeatureList({ t }: { t: Tracker }) {
                 </div>
                 <div role="cell" style={{ fontSize: 13 }}>{i.group}</div>
                 <div role="cell" style={{ fontSize: 13 }}>{i.f.priority ? PRI_LABEL[i.f.priority] : '–'}</div>
-                <div role="cell" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Bar small style={{ flex: 1 }} total={i.m.total} label={`${i.m.ok} of ${i.m.total} scopes covered by Playwright`} parts={[[i.m.ok, 'c-good']]} />
-                  <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{i.m.ok}/{i.m.total}</span>
-                </div>
-                <div role="cell" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Bar small style={{ flex: 1 }} total={i.m.total} label={`${i.m.cyAny} of ${i.m.total} scopes covered by Cypress`} parts={[[i.m.cyAny, 'c-cy']]} />
-                  <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{i.m.cyAny}/{i.m.total}</span>
-                </div>
+                <CovCell n={i.m.ok} total={i.m.total} tool="Playwright" />
+                <CovCell n={i.m.cyAny} total={i.m.total} tool="Cypress" />
                 <div role="cell" style={{ fontSize: 13 }}>{codeTxt(i.code)}</div>
                 <div role="cell">
                   {i.toReview ? (
@@ -155,6 +153,14 @@ export function FeatureList({ t }: { t: Tracker }) {
       {groups && <GroupsDialog t={t} onClose={() => setGroups(false)} />}
     </main>
   );
+}
+
+/** The covered share of the scopes, in %. It shows 100% or 0% only when that is exact. */
+function CovCell({ n, total, tool }: { n: number; total: number; tool: string }) {
+  if (!total) return <div role="cell" style={{ fontSize: 13 }} title="No scope to count">–</div>;
+  const v = n === total ? 100 : n === 0 ? 0 : Math.min(99, Math.max(1, pct(n, total)));
+  const txt = `${n} of ${total} scopes covered by ${tool}`;
+  return <div role="cell" style={{ fontSize: 13 }} title={txt} aria-label={`${v}%, ${txt}`}>{v}%</div>;
 }
 
 /** Add, rename and delete feature groups. A delete keeps the features, with no group. */
