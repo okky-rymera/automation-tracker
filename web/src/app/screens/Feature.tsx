@@ -5,7 +5,7 @@ import { go, link, setQuery, withBack, type Route } from '../route';
 import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
 
-const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', questions: 'question' };
+const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', settings: 'setting', questions: 'question' };
 type Tab = 'scopes' | 'details' | 'code' | 'shots';
 
 export function FeaturePage({ t, route }: { t: Tracker; route: Route }) {
@@ -1092,7 +1092,8 @@ function ShotsTab({ t, f }: { t: Tracker; f: FeatureX }) {
           <figcaption className="shot-cap">
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4, flexWrap: 'wrap' }}>
               <IdBtn label={`IMG-${sh.id}`} text={`F-${f.id}/IMG-${sh.id}`} />
-              {sh.aiDraft && <span className="tag tag-new">New</span>}
+              {sh.aiDraft && (sh.aiChange.length ? <span className="tag tag-changed">Changed by AI</span> : <span className="tag tag-new">New</span>)}
+              {sh.stale && <span className="tag tag-fail" title={sh.stale}>Needs a new image</span>}
             </div>
             <InlineText label="Caption" className="ie-item" multi value={sh.caption} placeholder="Add a caption: what the image shows." onSave={(caption) => act(() => mutate('PATCH', `${base}/screenshots/${sh.id}`, { caption }), 'Caption saved')} />
           </figcaption>
@@ -1233,6 +1234,20 @@ function IssueList({ t, f, issues, bare, actions }: { t: Tracker; f: FeatureX; i
               ))}
               {!x.prs.length && <span className="faint">No PR yet</span>}
               {x.error && <span className="muted issue-err">{x.error}</span>}
+              {x.kind === 'automation-plan' && (
+                x.planStatus === 'writing' ? <span className="tag tag-changed" title="The AI writes the test plan and puts it into the issue. This takes some minutes.">Writing the plan…</span>
+                : x.planStatus === 'added' ? <span className="tag tag-ok">Plan added</span>
+                : (
+                  <>
+                    {x.planStatus === 'failed' && <span className="tag tag-fail" title={x.planError ?? undefined}>Plan failed</span>}
+                    {x.planStatus === 'failed' && x.planError && <span className="muted issue-err">{x.planError}</span>}
+                    <button className="btn btn-ghost btn-sm" title="The AI writes the test plan from the tracker facts and screenshots, and puts it into the issue"
+                      onClick={() => act(() => mutate('POST', `/api/projects/${t.project}/issues/${x.id}/plan`, {}), 'The AI writes the plan')}>
+                      {x.planStatus === 'failed' ? 'Try the plan again' : 'Add plan'}
+                    </button>
+                  </>
+                )
+              )}
             </>
           )}
           <span style={{ flex: 1 }} />

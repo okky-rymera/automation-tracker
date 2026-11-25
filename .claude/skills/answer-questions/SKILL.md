@@ -95,8 +95,9 @@ Keep the question (do not put it in `answeredQuestions`) when:
   When it asks about the add-on, keep it open, and say what you found.
 - A person must decide, for example "Is this a bug, or does it work as intended?"
   Give the facts in the report, and say what the person must decide.
-- The answer shows that a person's text in the feature is wrong. The tool
-  cannot change that text. Name the item and the correct text in the report.
+- The answer shows that a person's text in the feature is wrong. Correct it
+  with `{ "id", "text" }` (or the field), and name it in the report. The
+  review shows the old text with "Change back".
 
 Follow the writing rules of map-features for all text: plain words, short
 sentences, active voice. Read `.claude/skills/map-features/SKILL.md` >
@@ -144,6 +145,16 @@ Write the payload to the session scratchpad folder, then run `apply`.
 - Do not add a scope that checks the marketing text of an upsell or promotion
   screen. Follow the rule "No scopes for marketing text" in the map-features
   "Writing style".
+- Ask for each new scope: "What must the test site have for this scope?" If
+  only another plugin can make that thing, the scope needs that plugin. For
+  example, a second wholesale role needs Premium. Follow the rule
+  "Integration groups" in the map-features `SKILL.md`.
+  - A core feature is a feature that is not in an "Integration/<plugin>"
+    group. Do not add such a scope to a core feature, and do not write it as
+    a note there. Change nothing on the core feature for this answer. Keep
+    the question open. In the report, give the answer, the scope, and the
+    Integration feature that you suggest.
+  - On an Integration feature of that plugin, add the scope as usual.
 
 ## 5. Report
 

@@ -140,22 +140,30 @@ export interface Screenshot {
   scopeIds: number[];
   /** manual = a person uploaded it, ai = the map-features skill added it. */
   source: 'manual' | 'ai';
-  /** The AI skill added it, and no person checked it yet. */
+  /** The AI added or changed it, and no person checked it yet. */
   aiDraft: boolean;
+  /** What the AI changed on a screenshot that was there: tags, image, caption. Empty: none. */
+  aiChange: string[];
+  /** Why the image is old (the AI review after a code change). Null: not old. */
+  stale: string | null;
 }
+/** A screenshot that the AI deleted, until a person checks the delete. */
+export interface RemovedScreenshot { id: number; caption: string; scopeIds: number[] }
 export const screenshotUrl = (project: string, id: number) => `/api/projects/${project}/screenshots/${id}`;
 
-/** One sentence in a feature or scope list (requirements, notes, out of scope, where, open questions). */
+/** One sentence in a feature or scope list (requirements, notes, out of scope, where, settings, open questions). */
 export interface FeatureItem {
   id: number;
   text: string;
   aiDraft: boolean;
+  /** The text of a person from before the AI changed it ("Change back"). Not set for a new AI item. */
+  before?: string;
 }
 
-export type ItemField = 'requirements' | 'notes' | 'outOfScope' | 'where' | 'questions';
+export type ItemField = 'requirements' | 'notes' | 'outOfScope' | 'where' | 'settings' | 'questions';
 export type LabelField = 'roles';
 /** API kind names of the list and label fields. */
-export const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', questions: 'question' };
+export const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', settings: 'setting', questions: 'question' };
 export const LABEL_KIND: Record<LabelField, string> = { roles: 'role' };
 
 export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelField, string[]> {
@@ -173,6 +181,7 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   scopes: Scope[];
   links: FeatureLink[];
   screenshots: Screenshot[];
+  aiRemovedShots: RemovedScreenshot[];
   /** Mapped code: number of entries, and AI entries that no person checked. */
   code: { entries: number; aiToCheck: number };
   /** When a person last reviewed the feature. null: never. */
@@ -349,6 +358,9 @@ export interface TrackedIssue {
   error: string | null;
   createdAt: string;
   syncedAt: string | null;
+  /** The test plan: null (no plan yet), writing, added or failed (planError says why). */
+  planStatus: 'writing' | 'added' | 'failed' | null;
+  planError: string | null;
 }
 
 /** Tells every open view to load its data again. */

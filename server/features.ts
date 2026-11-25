@@ -7,7 +7,7 @@
  *  - title, description, priority, group
  *  - labels: short values that repeat across features (roles).
  *    A label exists while at least one feature uses it.
- *  - lists of sentences: requirements, notes, out of scope, where, open questions.
+ *  - lists of sentences: requirements, notes, out of scope, where, settings, open questions.
  *    Notes: only what no test can check (reasons, code facts, limits). A testable rule is a scope.
  *    Requirements: what must be true before a tester checks it (settings, data, the user).
  *  - scopes: the separate things the feature does, like the scenarios of a test.
@@ -34,7 +34,7 @@ import { db, json, now, tx } from './db.ts';
 export const PRIORITIES = ['', 'high', 'medium', 'low'];
 
 /** List fields of a feature: API name -> feature_items.kind. */
-export const ITEM_KINDS = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', questions: 'question' } as const;
+export const ITEM_KINDS = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', settings: 'setting', questions: 'question' } as const;
 /** The only list kind that a scope has. */
 export const SCOPE_ITEM_KIND = ITEM_KINDS.requirements;
 /** Label fields of a feature: API name -> feature_labels.kind. */
@@ -77,11 +77,44 @@ export function dropBefore(kind: BeforeKind, rowId: number, fields?: string[]) {
   const del = db.prepare('DELETE FROM ai_before WHERE kind = ? AND row_id = ? AND field = ?');
   for (const f of fields) del.run(kind, rowId, f);
 }
+/** A value in the form that ai_rejected keeps. */
+export const valueKey = (v: unknown) => String(v ?? '').trim().toLowerCase();
+/** True when a person changed this value back before: the AI does not write it again on this row. */
+export function isRejected(kind: BeforeKind | 'screenshot', rowId: number, field: string, value: unknown): boolean {
+  return !!db.prepare('SELECT 1 FROM ai_rejected WHERE kind = ? AND row_id = ? AND field = ? AND value_key = ?').get(kind, rowId, field, valueKey(value));
+}
+/** Remembers a value that a person changed back ("Change back"). */
+export function rejectValue(kind: BeforeKind | 'screenshot', rowId: number, field: string, value: unknown) {
+  db.prepare('INSERT OR IGNORE INTO ai_rejected (kind, row_id, field, value_key, at) VALUES (?, ?, ?, ?, ?)').run(kind, rowId, field, valueKey(value), now());
+}
+/**
+ * A person accepted the screenshots of a feature (or one screenshot): the AI changes are not marked now,
+ * and a screenshot that the AI deleted is deleted for good (its image and tags go, the row stays as a marker).
+ */
+export function acceptScreenshots(where: 'feature_id' | 'id', id: number) {
+  const gone = (db.prepare(`SELECT id FROM screenshots WHERE ${where} = ? AND removed = 1 AND ai_change IS NOT NULL`).all(id) as any[]).map((r) => r.id as number);
+  for (const g of gone) {
+    db.prepare('DELETE FROM screenshot_images WHERE screenshot_id = ?').run(g);
+    db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ?').run(g);
+  }
+  db.prepare(`DELETE FROM screenshot_before WHERE screenshot_id IN (SELECT id FROM screenshots WHERE ${where} = ?)`).run(id);
+  // The person saw the image: a "Needs a new image" mark goes too.
+  db.prepare(`UPDATE screenshots SET ai_change = NULL, stale = NULL WHERE ${where} = ?`).run(id);
+}
+
 /**
  * Deletes the "before" values whose row is gone or whose field has no AI mark now.
  * A safety net after deletes, merges and moves: an ID can come back for a new row.
  */
 export function sweepBefore() {
+  // A rejected value belongs to its row: a new row with the same ID must not inherit it.
+  db.prepare(
+    `DELETE FROM ai_rejected WHERE
+       (kind = 'item' AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.id = ai_rejected.row_id))
+       OR (kind = 'feature' AND NOT EXISTS (SELECT 1 FROM features f WHERE f.id = ai_rejected.row_id))
+       OR (kind = 'scope' AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.id = ai_rejected.row_id))
+       OR (kind = 'screenshot' AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.id = ai_rejected.row_id))`,
+  ).run();
   db.prepare(
     `DELETE FROM ai_before WHERE
        (kind = 'item' AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.id = ai_before.row_id AND i.ai_draft = 1))
@@ -99,7 +132,7 @@ const NO_OPEN_MARKS = `f.ai_fields = '[]'
   AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.feature_id = f.id AND s.ai_fields <> '[]')
   AND NOT EXISTS (SELECT 1 FROM links l WHERE l.feature_id = f.id AND l.source = 'ai' AND l.checked = 0 AND l.removed = 0)
   AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.source = 'ai' AND c.checked = 0 AND c.removed = 0)
-  AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.feature_id = f.id AND x.source = 'ai' AND x.checked = 0 AND x.removed = 0)`;
+  AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.feature_id = f.id AND ((x.source = 'ai' AND x.checked = 0 AND x.removed = 0) OR x.ai_change IS NOT NULL))`;
 
 /**
  * Review state, after a person changed something in the app. A feature with no open AI mark is
@@ -204,7 +237,7 @@ export function featureData(projectId: string) {
   const codeBy = new Map(code.map((r) => [r.feature_id, r]));
   // Screenshots without the image bytes: the app loads each image from its own URL.
   const shots = db
-    .prepare('SELECT id, feature_id, caption, sort, source, checked FROM screenshots WHERE project_id = ? AND removed = 0 ORDER BY sort, id')
+    .prepare('SELECT id, feature_id, caption, sort, source, checked, removed, ai_change, stale FROM screenshots WHERE project_id = ? AND (removed = 0 OR ai_change IS NOT NULL) ORDER BY sort, id')
     .all(projectId) as any[];
   const shotScopes = byKey(
     db
@@ -243,7 +276,11 @@ export function featureData(projectId: string) {
     const myLabels = labelsBy.get(f.id) ?? [];
     for (const [key, kind] of Object.entries(LABEL_KINDS)) f[key] = myLabels.filter((l) => l.kind === kind).map((l) => l.value);
     const myItems = itemsBy.get(f.id) ?? [];
-    const toItem = (i: any) => ({ id: i.id, text: i.text, aiDraft: !!i.aiDraft });
+    // An item whose text the AI changed has the text from before (a person's text), for "Change back".
+    const toItem = (i: any) => {
+      const b = i.aiDraft ? before.get(`item:${i.id}`) : undefined;
+      return { id: i.id, text: i.text, aiDraft: !!i.aiDraft, ...(b && 'text' in b ? { before: b.text ?? '' } : {}) };
+    };
     for (const [key, kind] of Object.entries(ITEM_KINDS)) f[key] = myItems.filter((i) => i.kind === kind && i.scope_id === null).map(toItem);
     f.scopeGroups = (scopeGroupsBy.get(f.id) ?? []).map(({ feature_id, ...g }) => g);
     // A scope with variations has columns. A variation has parentId and values (one for each column).
@@ -260,12 +297,18 @@ export function featureData(projectId: string) {
       framework: l.framework ?? (l.testId.startsWith('CY-') ? 'cypress' : 'playwright'),
       missing: !l.framework || !!l.testRemovedAt,
     }));
-    f.screenshots = (shotsBy.get(f.id) ?? []).map(({ feature_id, source, checked, ...s }) => ({
+    const myShots = shotsBy.get(f.id) ?? [];
+    f.screenshots = myShots.filter((s) => !s.removed).map(({ feature_id, source, checked, removed, ai_change, stale, ...s }) => ({
       ...s,
       source,
-      aiDraft: source === 'ai' && !checked,
+      aiDraft: (source === 'ai' && !checked) || ai_change !== null,
+      // What the AI changed on a screenshot that was there (tags, image, caption). Empty: no such change.
+      aiChange: ai_change === null ? [] : json(ai_change),
+      stale: stale ?? null,
       scopeIds: (shotScopes.get(s.id) ?? []).map((r) => r.scope_id),
     }));
+    // Screenshots that the AI deleted and no person checked yet: only the review shows them.
+    f.aiRemovedShots = myShots.filter((s) => s.removed).map((s) => ({ id: s.id, caption: s.caption, scopeIds: (shotScopes.get(s.id) ?? []).map((r) => r.scope_id) }));
   }
 
   const linked = new Set(links.map((l) => l.testId));
@@ -407,6 +450,11 @@ export function dropEmptyAiGroup(gid: number | null): string | null {
   db.prepare('DELETE FROM scope_group_titles_gone WHERE group_id = ?').run(gid);
   db.prepare('DELETE FROM scope_groups WHERE id = ?').run(gid);
   return g.title;
+}
+/** Deletes a feature group that an AI skill made, when no feature is in it now. */
+export function dropEmptyAiFeatureGroup(gid: number | null) {
+  if (gid === null) return;
+  db.prepare('DELETE FROM feature_groups WHERE id = ? AND ai_made = 1 AND NOT EXISTS (SELECT 1 FROM features WHERE group_id = ?)').run(gid, gid);
 }
 /** groupId from a request: null (no group), or a group of feature fid. */
 function groupOf(projectId: string, fid: number, v: unknown): number | null {
@@ -574,7 +622,7 @@ export function evidenceScope(id: number): number {
  * Remembers an old title of a scope on a feature: a person deleted the scope, moved it away, or
  * renamed it. The AI skill finds scopes by title, so without this it makes the scope again (map.ts goneScope).
  */
-function buryScope(featureId: number, scopeId: number, title: string) {
+export function buryScope(featureId: number, scopeId: number, title: string) {
   db.prepare('INSERT OR IGNORE INTO scope_titles_gone (feature_id, scope_id, title_key) VALUES (?, ?, lower(trim(?)))').run(featureId, scopeId, title);
 }
 /**
@@ -615,7 +663,8 @@ export function requirementClash(fid: number, scopeId: number | null, kind: stri
     : 'The feature has this requirement already, and it applies to every scope.';
 }
 function ownScreenshot(projectId: string, id: unknown): { id: number; featureId: number } {
-  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(idNumber(id), projectId) as any;
+  // A screenshot that the AI deleted can still be checked (the delete is then final) or deleted.
+  const r = db.prepare('SELECT id, feature_id FROM screenshots WHERE id = ? AND project_id = ? AND (removed = 0 OR ai_change IS NOT NULL)').get(idNumber(id), projectId) as any;
   if (!r) throw new EditError('Screenshot not found in this project');
   return { id: r.id, featureId: r.feature_id };
 }
@@ -664,7 +713,8 @@ export function imageType(data: Buffer): string {
 
 /** Type and upload time of one screenshot, or null. Cheap: it does not read the image. */
 export function screenshotInfo(projectId: string, id: unknown): { id: number; mime: string; createdAt: string } | null {
-  return (db.prepare('SELECT id, mime, created_at AS createdAt FROM screenshots WHERE id = ? AND project_id = ? AND removed = 0').get(idNumber(id), projectId) as any) ?? null;
+  // A screenshot that the AI deleted shows in the review until a person checks it.
+  return (db.prepare('SELECT id, mime, COALESCE(image_at, created_at) AS createdAt FROM screenshots WHERE id = ? AND project_id = ? AND (removed = 0 OR ai_change IS NOT NULL)').get(idNumber(id), projectId) as any) ?? null;
 }
 /** The image bytes of a screenshot (an ID from screenshotInfo). */
 export function screenshotData(id: number): Uint8Array {
@@ -695,6 +745,48 @@ export function labelValue(projectId: string, kind: string, v: unknown): string 
   return same ? same.value : s;
 }
 
+/** "Change back" of a list item: the text from before the AI change comes back, as text of a person. */
+function revertItem(p: string, id: unknown) {
+  const i = ownItem(p, String(id));
+  const r = i.ai_draft ? (db.prepare("SELECT before FROM ai_before WHERE kind = 'item' AND row_id = ? AND field = 'text'").get(i.id) as any) : null;
+  if (!r || r.before === null) throw new EditError('This item has no text from before the AI change');
+  return tx(() => {
+    rejectValue('item', i.id, 'text', i.text);
+    db.prepare('UPDATE feature_items SET text = ?, ai_draft = 0 WHERE id = ?').run(r.before, i.id);
+    dropBefore('item', i.id);
+    return { ok: true };
+  });
+}
+
+/** "Change back" of a screenshot that the AI changed or deleted. */
+function revertScreenshot(p: string, id: unknown) {
+  const s = db.prepare('SELECT * FROM screenshots WHERE id = ? AND project_id = ? AND ai_change IS NOT NULL').get(idNumber(id), p) as any;
+  if (!s) throw new EditError('This screenshot has no AI change to change back');
+  const b = db.prepare('SELECT * FROM screenshot_before WHERE screenshot_id = ?').get(s.id) as any;
+  if (!b) throw new EditError('This screenshot has no state from before the AI change');
+  return tx(() => {
+    const was = new Set<number>(json(b.scope_ids));
+    const cur = (db.prepare('SELECT scope_id FROM screenshot_scopes WHERE screenshot_id = ?').all(s.id) as any[]).map((r) => r.scope_id as number);
+    for (const x of cur) if (!was.has(x)) rejectValue('screenshot', s.id, 'tag', x);
+    for (const x of was) if (!cur.includes(x)) rejectValue('screenshot', s.id, 'tag-off', x);
+    if (s.removed) rejectValue('screenshot', s.id, 'removed', 1);
+    if (s.caption !== b.caption) rejectValue('screenshot', s.id, 'caption', s.caption);
+    // A refused image: the AI does not replace the image again until a later sync marks it as old (stale).
+    if (b.data) rejectValue('screenshot', s.id, 'image', 'replace');
+    db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ?').run(s.id);
+    const add = db.prepare('INSERT OR IGNORE INTO screenshot_scopes (screenshot_id, scope_id) VALUES (?, ?)');
+    // A scope that is gone now cannot come back as a tag.
+    for (const x of was) if (db.prepare('SELECT 1 FROM scopes WHERE id = ? AND feature_id = ?').get(x, s.feature_id)) add.run(s.id, x);
+    if (b.data) {
+      db.prepare('UPDATE screenshot_images SET data = ? WHERE screenshot_id = ?').run(b.data, s.id);
+      db.prepare('UPDATE screenshots SET mime = ?, image_at = ? WHERE id = ?').run(b.mime, now(), s.id);
+    }
+    db.prepare('UPDATE screenshots SET caption = ?, removed = 0, ai_change = NULL, checked = 1 WHERE id = ?').run(b.caption, s.id);
+    db.prepare('DELETE FROM screenshot_before WHERE screenshot_id = ?').run(s.id);
+    return { ok: true };
+  });
+}
+
 export const edits = {
   addGroup(p: string, b: any) {
     const r = db.prepare('INSERT INTO feature_groups (project_id, title, description, sort) VALUES (?, ?, ?, ?)').run(
@@ -704,6 +796,8 @@ export const edits = {
   },
   updateGroup(p: string, id: string, b: any) {
     const g = own('feature_groups', p, id);
+    // A group that a person changed stays, also with no features.
+    db.prepare('UPDATE feature_groups SET ai_made = 0 WHERE id = ?').run(g);
     if ('title' in b) db.prepare('UPDATE feature_groups SET title = ? WHERE id = ?').run(need(b.title, 'Title'), g);
     if ('description' in b) db.prepare('UPDATE feature_groups SET description = ? WHERE id = ?').run(text(b.description), g);
     if ('sort' in b) db.prepare('UPDATE feature_groups SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, g);
@@ -751,6 +845,7 @@ export const edits = {
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE screenshots SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
+      acceptScreenshots('feature_id', f);
       db.prepare('UPDATE features SET reviewed_at = ?, review_wanted = 0 WHERE id = ?').run(now(), f);
       db.prepare(
         `DELETE FROM ai_before WHERE (kind = 'feature' AND row_id = ?)
@@ -876,8 +971,8 @@ export const edits = {
       ).run(from, into);
       db.prepare('UPDATE feature_code SET feature_id = ? WHERE feature_id = ?').run(into, from);
       // Screenshots move with their scope tags (the scopes moved above). AI screenshots with the same
-      // match key: a live one wins over a deleted marker. Then keep the target's screenshot, with the
-      // source's scope tags and its "checked" mark added.
+      // match key: a live one wins over a deleted marker, and over an AI delete that waits for review.
+      // Then keep the target's screenshot, with the source's scope tags and its "checked" mark added.
       db.prepare(
         `DELETE FROM screenshots WHERE feature_id = ? AND removed = 1 AND match_key IS NOT NULL
          AND match_key IN (SELECT match_key FROM screenshots WHERE feature_id = ? AND removed = 0 AND match_key IS NOT NULL)`,
@@ -887,7 +982,7 @@ export const edits = {
          SELECT keep.id, ss.scope_id FROM screenshots old
          JOIN screenshots keep ON keep.feature_id = ? AND keep.match_key = old.match_key AND keep.removed = 0
          JOIN screenshot_scopes ss ON ss.screenshot_id = old.id
-         WHERE old.feature_id = ? AND old.match_key IS NOT NULL`,
+         WHERE old.feature_id = ? AND old.match_key IS NOT NULL AND old.removed = 0`,
       ).run(into, from);
       db.prepare(
         `UPDATE screenshots SET checked = MAX(checked, COALESCE((SELECT MAX(o.checked) FROM screenshots o
@@ -1173,6 +1268,8 @@ export const edits = {
         if (!hasScope.get(l.id)) removeLink.run(l.id); // marker: the skill does not link the test to the old feature again
       }
 
+      // A screenshot that the AI deleted (the delete waits for review) does not move: it only loses this scope's tag.
+      db.prepare('DELETE FROM screenshot_scopes WHERE scope_id = ? AND screenshot_id IN (SELECT id FROM screenshots WHERE feature_id = ? AND removed = 1)').run(sid, from);
       // Screenshots that show only this scope move. The others stay and lose this scope's tag.
       const shots = db
         .prepare(
@@ -1403,7 +1500,15 @@ export const edits = {
     const s = ownScreenshot(p, id);
     const scopeIds = 'scopeIds' in b ? scopeList(p, s.featureId, b.scopeIds) : null;
     tx(() => {
-      if ('caption' in b || scopeIds || b.check) db.prepare('UPDATE screenshots SET checked = 1 WHERE id = ?').run(s.id);
+      // { stale: null }: a person says the image is fine. Only the "Needs a new image" mark goes.
+      if ('stale' in b) {
+        if (b.stale !== null) throw new EditError('Only { "stale": null } is allowed: it clears the "Needs a new image" mark');
+        db.prepare('UPDATE screenshots SET stale = NULL WHERE id = ?').run(s.id);
+      }
+      if ('caption' in b || scopeIds || b.check) {
+        db.prepare('UPDATE screenshots SET checked = 1 WHERE id = ?').run(s.id);
+        acceptScreenshots('id', s.id);
+      }
       if ('caption' in b) db.prepare('UPDATE screenshots SET caption = ? WHERE id = ?').run(text(b.caption), s.id);
       if ('sort' in b) db.prepare('UPDATE screenshots SET sort = ? WHERE id = ?').run(Number(b.sort) || 0, s.id);
       if (scopeIds) {
@@ -1422,7 +1527,8 @@ export const edits = {
     const ai = (db.prepare('SELECT match_key FROM screenshots WHERE id = ?').get(s) as any).match_key !== null;
     if (!ai) return void db.prepare('DELETE FROM screenshots WHERE id = ?').run(s);
     tx(() => {
-      db.prepare('UPDATE screenshots SET removed = 1 WHERE id = ?').run(s);
+      db.prepare('UPDATE screenshots SET removed = 1, ai_change = NULL WHERE id = ?').run(s);
+      db.prepare('DELETE FROM screenshot_before WHERE screenshot_id = ?').run(s);
       db.prepare('DELETE FROM screenshot_images WHERE screenshot_id = ?').run(s);
       db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ?').run(s);
     });
@@ -1434,11 +1540,16 @@ export const edits = {
    * All fields are checked first, then changed in one transaction: all change, or none.
    * A field loses its AI mark, as for a change by a person: the normal edit does the change
    * (updateFeature, updateScope), so a scope title change is remembered for the AI skill too.
-   * A list item has no "before" value: the AI changes only its own drafts, never the text of a person.
+   * Body { kind: "item", id }: the text of a person that the AI changed comes back.
+   * Body { kind: "screenshot", id }: the caption, tags and image from before the AI changes come back,
+   * and a screenshot that the AI deleted comes back.
+   * The AI value that goes is remembered (ai_rejected): the AI does not write it again on that row.
    */
   revert(p: string, b: any) {
-    const kind = b?.kind as BeforeKind;
-    if (kind !== 'feature' && kind !== 'scope') throw new EditError('kind must be feature or scope');
+    const kind = b?.kind as BeforeKind | 'screenshot';
+    if (kind === 'item') return revertItem(p, b?.id);
+    if (kind === 'screenshot') return revertScreenshot(p, b?.id);
+    if (kind !== 'feature' && kind !== 'scope') throw new EditError('kind must be feature, scope, item or screenshot');
     const list: string[] = Array.isArray(b?.fields) ? b.fields.map(String) : [String(b?.field ?? '')];
     if (!list.length) throw new EditError('Send "field" or a list of "fields"');
     const allowed: readonly string[] = kind === 'feature' ? FEATURE_AI_FIELDS : SCOPE_AI_FIELDS;
@@ -1470,12 +1581,20 @@ export const edits = {
       bodies.push({ field, body });
     }
     return tx(() => {
+      const row = db.prepare(`SELECT * FROM ${kind === 'feature' ? 'features' : 'scopes'} WHERE id = ?`).get(id) as any;
       for (const { field, body } of bodies) {
-        // The AI group that the scope leaves is deleted when it has no scopes now, as in a move.
-        const left = kind === 'scope' && field === 'group' ? ((db.prepare('SELECT group_id FROM scopes WHERE id = ?').get(id) as any).group_id as number | null) : null;
+        // A group is remembered by its title: an AI group that the revert deletes gets a new ID when the AI makes it again.
+        const groupTitle = (gid: number | null) =>
+          gid === null ? null : ((db.prepare(`SELECT title FROM ${kind === 'feature' ? 'feature_groups' : 'scope_groups'} WHERE id = ?`).get(gid) as any)?.title ?? null);
+        if (field === 'group') {
+          if (row.group_id !== null) rejectValue(kind, id, 'group', groupTitle(row.group_id));
+        } else rejectValue(kind, id, field, row[field]);
+        // The AI group that the scope or feature leaves is deleted when it is empty now, as in a move.
+        const left = field === 'group' ? ((db.prepare(`SELECT group_id FROM ${kind === 'feature' ? 'features' : 'scopes'} WHERE id = ?`).get(id) as any).group_id as number | null) : null;
         if (kind === 'feature') edits.updateFeature(p, String(id), body);
         else edits.updateScope(p, String(id), body);
-        dropEmptyAiGroup(left);
+        if (kind === 'feature') dropEmptyAiFeatureGroup(left);
+        else dropEmptyAiGroup(left);
         dropBefore(kind, id, [field]);
       }
       return { ok: true };

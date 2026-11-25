@@ -34,7 +34,7 @@ const FW_LABEL: Record<Framework, string> = {
   cypress: 'Cypress',
 };
 const live = (ls: FeatureLink[], fw: Framework) => ls.filter((l) => l.framework === fw && !l.missing);
-const ITEM_FIELDS: ItemField[] = ['requirements', 'notes', 'outOfScope', 'where', 'questions'];
+const ITEM_FIELDS: ItemField[] = ['requirements', 'notes', 'outOfScope', 'where', 'settings', 'questions'];
 /** True when the skill wrote something in the feature that no person checked yet. */
 const aiLink = (l: FeatureLink) => l.source === 'ai' && !l.checked;
 const needsReview = (f: Feature) =>
@@ -43,7 +43,8 @@ const needsReview = (f: Feature) =>
   ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) ||
   f.links.some(aiLink) ||
   f.code.aiToCheck > 0 ||
-  f.screenshots.some((s) => s.aiDraft);
+  f.screenshots.some((s) => s.aiDraft) ||
+  (f.aiRemovedShots?.length ?? 0) > 0;
 
 /**
  * Review state of a feature:
@@ -577,6 +578,12 @@ const FIELDS: ({ kind: 'label'; key: LabelField; label: string; hint: string } |
     key: 'where',
     label: 'Where',
     hint: '+ add a screen, settings page or shop page',
+  },
+  {
+    kind: 'items',
+    key: 'settings',
+    label: 'Settings',
+    hint: '+ add a setting: where it is, its choices and its default value',
   },
   {
     kind: 'items',

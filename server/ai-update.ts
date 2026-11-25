@@ -8,7 +8,8 @@
  *  2. Run `claude -p` with a JSON schema, a spend limit, and only the read tools (Read, Grep, Glob).
  *     It reads the plugin code at the new commit. It does not write to the database.
  *  3. Save the answer with `npm run -s map -- apply` (unit kind "update"). The apply rules stay:
- *     new text has the AI draft mark, and text that a person wrote or checked is never changed.
+ *     new text has the AI draft mark. Text that a person wrote or checked can change too: the review
+ *     shows the old text with "Change back". Screenshots can get tags, lose tags, or be marked as old.
  *     A suggestion for such text goes into the feature's questions.
  *
  * Each run is a row in ai_updates, with its cost (total_cost_usd of the JSON output).
@@ -366,10 +367,12 @@ export interface Proposal {
   notes?: ItemOut[];
   outOfScope?: ItemOut[];
   where?: ItemOut[];
+  settings?: ItemOut[];
   questions?: ItemOut[];
   removeItems?: number[];
   scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[]; variations?: Record<string, string>[] }[];
   links?: { testId: string; scopes?: string[] }[];
+  screenshots?: { id: string; addScopes?: string[]; removeScopes?: string[]; caption?: string; remove?: boolean; stale?: string }[];
 }
 
 const item = {
@@ -393,6 +396,7 @@ export const SCHEMA = {
     notes: items,
     outOfScope: items,
     where: items,
+    settings: items,
     questions: items,
     removeItems: { type: 'array', items: { type: 'integer' } },
     scopes: {
@@ -422,6 +426,23 @@ export const SCHEMA = {
         additionalProperties: false,
         required: ['testId'],
         properties: { testId: { type: 'string' }, scopes: { type: 'array', items: { type: 'string' } } },
+      },
+    },
+    screenshots: {
+      type: 'array',
+      description: 'Changes to screenshots that are there. You cannot see the images: judge by the caption, the scopes and the code.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: {
+          id: { type: 'string', description: 'IMG-id of a screenshot of this feature' },
+          addScopes: { type: 'array', items: { type: 'string' }, description: 'S-ids or SV-ids that the image shows and that it has no tag for' },
+          removeScopes: { type: 'array', items: { type: 'string' }, description: 'S-ids or SV-ids whose tag is wrong now' },
+          caption: { type: 'string', description: 'A new caption, only when the old one is wrong now' },
+          remove: { type: 'boolean', description: 'true: the screenshot shows nothing of this feature now' },
+          stale: { type: 'string', description: 'Why the screen looks different now: the image needs a new picture' },
+        },
       },
     },
   },
@@ -524,10 +545,11 @@ ${diff || '(no changes in these files)'}
 ## How to answer
 - If the feature data is still correct, answer {"changed": false, "summary": "<why, in one or two sentences>"} and nothing else.
 - Else set "changed": true and send only what you add or change:
-  - "title", "description": only when they are AI draft (in aiFields). Else write the problem as a new item in "questions".
-  - List fields (requirements, notes, outOfScope, where, questions): a string adds an item. {"id", "text"} changes an AI draft item.
-  - "removeItems": IDs of AI draft items that are now wrong. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope.
-  - Text that a person wrote or checked (aiDraft false) cannot change. When it is now wrong, add a question that says what is wrong and what the code does now.
+  - You can change any text: AI draft text and text that a person wrote or checked. A person sees each change of their text in the review, with "Change back". So change a person's text only when the code proves it wrong now, never for style or wording.
+  - "title", "description": a new text replaces the old one.
+  - List fields (requirements, notes, outOfScope, where, settings, questions): a string adds an item. {"id", "text"} changes an item.
+  - "removeItems": IDs of AI draft items that are now wrong. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope. An item that a person wrote (aiDraft false) cannot be deleted: change its text instead.
+  - "screenshots": you cannot see the images. Use the caption, the scopes and the code. Add a tag ("addScopes") when the caption shows that the image shows a scope. Take a tag off ("removeScopes") when the scope is gone or the image does not show it now. Fix a caption that is wrong now. When the code changed what the screen shows (a label, a field, a layout), set "stale" to the reason: a later run takes a new image. Use "remove" only when the screen is gone from the plugin.
   - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. When an existing scope has "variations" (one check in several places, for example a row for each page) and the new behavior is that check in one more place, send that scope with its "id" and title and a "variations" list with the new variation only, an object with the column names as keys (for example [{"Page": "Checkout page"}]). Write only variations that the plugin really has, not all combinations. A variation has no description and no requirements: its scope has them. A scope that is now wrong cannot be deleted here: add a question for it.
   - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks. For a scope with variations, give the SV-ids of the variations that the test checks, not the S-id of the scope. For a new variation of this answer, which has no SV-id yet, give its title: the scope title and the values in brackets, with commas, for example "Price shows (Checkout page)".
   - A scope with "toRemove": a person decided that it must go. Do not change it, link a test to it, or add the same behavior again as a new scope.
@@ -537,7 +559,8 @@ ${diff || '(no changes in these files)'}
 
 ## Writing style
 Plain, simple English: short sentences, active voice, common words. Write about behavior that a store owner or tester sees, not about tests.
-Put code names (hooks, option keys, classes) only in "where" or "requirements", and only when they help a tester find the thing.
+"settings": one item for each setting of this feature: its label and place, its choices, and its default value, for example 'Wholesale > Settings > Price tab > "Hide Retail Price" checkbox. Choices: checked, unchecked. Default: unchecked.' A setting of another feature that changes a scope goes in that scope's requirements, with the feature ID.
+Put code names (hooks, option keys, classes) only in "where", "settings" or "requirements", and only when they help a tester find the thing.
 For a setting that turns something off, quote its label and say "checked" or "unchecked". Do not write "on" or "off".
 `;
   return { prompt, feature };
@@ -692,7 +715,8 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
   // apply removes items first: a new text for a removed item would then point at nothing.
   const removing = new Set(pr.removeItems ?? []);
   const f: any = { id: featureId };
-  if (pr.title?.trim()) f.title = pr.title;
+  // The proposal sends a feature title only to change it: a rename, also of a person's title.
+  if (pr.title?.trim()) f.newTitle = pr.title;
   if (pr.description?.trim()) f.description = pr.description;
   for (const [key, kind] of Object.entries(ITEM_KINDS)) {
     const list = ((pr as any)[key] ?? []) as ItemOut[];
@@ -808,6 +832,31 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
     return [{ testId: l.testId, ...(good.length ? { scopes: good } : {}) }];
   });
   if (links.length) f.links = links;
+  // Screenshot changes: only screenshots of this feature, and only scopes that apply can find.
+  const shotIds = new Set((db.prepare('SELECT id FROM screenshots WHERE feature_id = ? AND removed = 0').all(featureId) as any[]).map((x) => x.id as number));
+  const shots = (pr.screenshots ?? []).flatMap((x) => {
+    const n = Number(String(x.id ?? '').replace(/^.*?IMG-/i, ''));
+    if (!shotIds.has(n)) return void dropped.push(`screenshots: no screenshot ${x.id} in F-${featureId}`), [];
+    const scopesOk = (list: string[] | undefined, what: string) =>
+      (list ?? []).filter((k) => {
+        if (varied.has(norm(k))) return void dropped.push(`screenshots: ${x.id} ${what} names the scope "${k}", which has variations. Name its variations (SV-ids) instead`), false;
+        const good = known.has(norm(k));
+        if (!good) dropped.push(`screenshots: ${x.id} ${what} names "${k}", which is not in F-${featureId}`);
+        return good;
+      });
+    const add = scopesOk(x.addScopes, 'addScopes');
+    const off = scopesOk(x.removeScopes, 'removeScopes');
+    const out = {
+      id: n,
+      ...(add.length ? { scopes: add } : {}),
+      ...(off.length ? { removeScopes: off } : {}),
+      ...(x.caption?.trim() ? { newCaption: x.caption.trim() } : {}),
+      ...(x.remove ? { remove: true } : {}),
+      ...(x.stale?.trim() ? { stale: x.stale.trim() } : {}),
+    };
+    return Object.keys(out).length > 1 ? [out] : [];
+  });
+  if (shots.length) f.screenshots = shots;
   if (Object.keys(f).length === 1) return { payload: null, dropped };
   return { payload: { unit: { kind: 'update', ref }, features: [f] }, dropped };
 }

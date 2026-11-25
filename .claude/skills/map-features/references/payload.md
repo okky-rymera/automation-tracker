@@ -20,6 +20,7 @@
       "roles": ["Admin", "Wholesale customer"],
       "requirements": ["WooCommerce is active.", "A wholesale customer is logged in."],
       "where": ["…"],
+      "settings": ["…"],
       "notes": ["…", { "id": 12, "text": "…corrected text of an AI draft item…" }],
       "outOfScope": ["…"],
       "questions": ["…"],
@@ -68,10 +69,12 @@
   new feature, and for a feature that has no priority.
 - `title`, `description`, `priority`, `group`: one value each. The tool fills an
   empty field, and replaces text only while the feature is an AI draft.
+  With an `id`, `title` changes only an AI draft title. To rename a title that
+  a person wrote, because it is wrong, send `newTitle`.
 - `roles` (labels): short names that many features share. They are
   only added. Use the spellings that `features` lists in `labelsInUse`. A name
   with other letter case becomes the existing name.
-- `requirements`, `where`, `notes`, `outOfScope`, `questions` (lists): one sentence for each
+- `requirements`, `where`, `settings`, `notes`, `outOfScope`, `questions` (lists): one sentence for each
   item. A text adds an item; the same text again adds nothing.
   `{ "id": 12, "text": "…" }` corrects an item, and `removeItems` deletes items
   by ID. Both work only on AI draft items. `feature <id>` shows the item IDs.
@@ -80,10 +83,14 @@
 - Scope: matched by `id` (`S-14` or `14`), or else by the same title in that
   feature. A new title makes a new scope. The title of an AI draft scope can be
   changed: give its `id` and the new title. The ID, links and screenshot tags stay.
+  With an `id`, `title` does not change a title that a person wrote or checked.
+  To rename it because it is wrong, send `newTitle` too. The old title is
+  remembered. A title that another scope of the feature has is refused.
   A scope always needs its `title`, also when you send its `id` to change only
   the group. Without it, the tool refuses the payload.
-- Scope `description`: a text replaces an AI draft description. `null`
-  deletes an AI draft description. A person's description stays.
+- Scope `description`: a text replaces the description, also a person's
+  description (only when it is wrong: the review shows the old text with
+  "Change back"). `null` deletes an AI draft description.
 - Scope `group` (optional): the title of a scope group of the feature. The
   app shows the scopes of a group together, like a describe block of tests.
   `feature <id>` lists the groups in `scopeGroups`; a person can add a group
@@ -136,13 +143,19 @@
   scratchpad folder). A relative path is refused. `caption` is required: it
   says what the image shows, and it must be different for each screenshot of
   the feature. `scopes` (optional): scope titles or IDs, as for links.
-  Screenshots are only added. The tool finds a screenshot that is already
-  there by the first caption it got (letter case and extra spaces do not
-  count), also when a person changed the caption since. `feature <id>` shows
-  that first caption as `firstCaption`. For a screenshot that is already
-  there, the tool does not read the file, and it adds only missing scopes
-  (when no person checked it). A screenshot that a person deleted is not
-  added again (the report says so).
+  A screenshot that is there: give its `id` (`IMG-12`, from `feature <id>`).
+  Without an `id`, the tool finds it by the first caption it got. Then send
+  what changes, also on a screenshot that a person checked or uploaded:
+  - `scopes`: tags to add. `removeScopes`: tags to take off.
+  - `newCaption`: a new caption.
+  - `"replace": true` with `file`: a new image. It clears a `stale` mark.
+  - `"remove": true`: delete it.
+  The review shows each change with "Change back". A value that a person
+  changed back, and a screenshot that a person deleted, are not written again
+  (the report says so). After a person changes an image back, `replace` works
+  again only when a later `stale` marks the image as old.
+  > `{ "id": "IMG-12", "scopes": ["S-40"] }`
+  > `{ "id": "IMG-12", "replace": true, "file": "/abs/path/new.png", "newCaption": "Shop page: …" }`
 
 ## Fields: what to write
 
@@ -171,9 +184,28 @@ sentence each.
 Give the last item when the scopes depend on default settings. Then a scope
 with no requirements of its own means "default settings", not "nobody wrote it".
 
+**A setting of another feature that changes a scope** goes in the
+requirements of that scope. Give the label, the value that the scope needs,
+and the feature that owns the setting. Do not copy the setting into the
+`settings` of this feature.
+> F-5 scope "Wholesale customer sees the wholesale price with the regular price crossed out":
+> "The \"Hide Retail Price\" checkbox is unchecked (the default, see F-7)."
+
 **where**: one item for each place a tester finds it.
 > "Product edit screen > General tab > Wholesale Prices fields"
 > "Shop page, product page and cart"
+
+**settings**: one item for each setting that this feature owns. Give its
+place and label, its choices, and its default value. A reader must know the
+choices without the test site. Give a free text or number field its default
+value and its limits. Put a long list of choices in short form.
+> "Wholesale > Settings > Price tab > \"Hide Retail Price\" checkbox. Choices: checked, unchecked. Default: unchecked."
+> "Wholesale > Settings > Price tab > \"Wholesale Price Text\" field. Free text. Default: \"Wholesale Price:\"."
+> "Product edit screen > \"Discount type\" list for each role. Choices: Fixed, Percentage. Default: Fixed."
+
+Leave `settings` empty for a feature that has no setting. A setting that
+belongs to WooCommerce or to another plugin is not a setting of this
+feature: put it in `requirements` or in the requirements of a scope.
 
 **notes**: only what no test can check. A rule that a test can check is a
 **scope**, not a note: then the app shows if a test checks it. Ask "can a
@@ -203,8 +235,9 @@ A fact that you can check is not a question.
 > "The wholesale price does not show in the mini cart widget. Is this intended?"
 > "Without Premium, the column shows no wholesale sale price. Does Premium add it?"
 
-**screenshots**: 1–4 images for a feature that has a screen. The caption names
-the place and what the image shows.
+**screenshots**: each scope with a screen is in at least one image (see
+"Add screenshots" in SKILL.md). One image can show many scopes. The caption
+names the place and what the image shows.
 > "Settings > Prices tab: the option to hide the wholesale price column"
 > "Product list in the admin: the wholesale price column with the role name"
 
@@ -318,6 +351,7 @@ This feature is made up. It shows the form only: do not copy its facts.
       "roles": ["Admin", "Shop manager"],
       "requirements": ["WooCommerce is active.", "A wholesale role exists."],
       "where": ["Plugin settings > Orders tab > \"Order note\" field", "WooCommerce > Orders > order screen"],
+      "settings": ["Plugin settings > Orders tab > \"Order note\" field. Free text. Default: empty (no note)."],
       "notes": ["Staff asked for the note, so they can find wholesale orders without opening each customer."],
       "outOfScope": ["Emails to the customer (see F-30)."],
       "questions": ["An order that an admin makes for a wholesale customer gets no note. Is this intended?"],

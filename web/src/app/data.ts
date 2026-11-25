@@ -233,7 +233,7 @@ function useIssues(project: string): { list: TrackedIssue[]; error: string | nul
     };
   }, [project, n]);
   const list = useMemo(() => (got.project === project ? got.list : []), [got, project]);
-  const creating = list.some((i) => i.status === 'creating');
+  const creating = list.some((i) => i.status === 'creating' || i.planStatus === 'writing');
   useEffect(() => {
     if (!creating) return;
     const timer = setInterval(() => setN((x) => x + 1), 5000);
@@ -368,6 +368,7 @@ export function metrics(f: Feature, byId: Map<string, TestInfo>): Metrics {
 export const LISTS: { key: ItemField; label: string; hint: string; noun: string }[] = [
   { key: 'requirements', label: 'Requirements', hint: 'What must be true before you check any scope: a setting, data, the user.', noun: 'requirement' },
   { key: 'where', label: 'Where', hint: 'The screens and settings that show this feature.', noun: 'screen or setting' },
+  { key: 'settings', label: 'Settings', hint: 'The settings of this feature: where each one is, its choices and its default value.', noun: 'setting' },
   { key: 'notes', label: 'Notes', hint: 'Only what no test can check: a reason, a code fact, a limit.', noun: 'note' },
   { key: 'outOfScope', label: 'Out of scope', hint: 'What this feature does not do.', noun: 'out-of-scope item' },
   { key: 'questions', label: 'Open questions', hint: 'What nobody knows yet. The answer-questions skill can answer them.', noun: 'question' },
@@ -440,6 +441,7 @@ function changesOf(
   const out: Change[] = [];
   const base = api(project);
   const revert = (kind: 'feature' | 'scope', id: number, ...fields: string[]) => () => mutate('POST', `${base}/revert`, { kind, id, fields }, quiet);
+  const revertOne = (kind: 'item' | 'screenshot', id: number) => () => mutate('POST', `${base}/revert`, { kind, id }, quiet);
   const fieldText = (field: string, v: string | null) =>
     field === 'group' ? (v ? groupTitle(Number(v)) : 'No group') : field === 'priority' ? PRI_LABEL[v ?? ''] ?? v ?? '' : (v ?? '');
 
@@ -517,12 +519,37 @@ function changesOf(
   }
 
   // Screenshots and code.
+  const CHANGE_WORD: Record<string, string> = { tags: 'scopes', image: 'image', caption: 'caption' };
   for (const sh of f.screenshots) {
-    if (!sh.aiDraft) continue;
+    const text = sh.caption || `Screenshot IMG-${sh.id}`;
+    if (sh.aiChange.length) {
+      out.push({
+        key: `x:${sh.id}`, sec: 'Screenshots', kind: 'changed', text, before: null,
+        ctx: `IMG-${sh.id} · Changed: ${sh.aiChange.map((c) => CHANGE_WORD[c] ?? c).join(', ')}.`,
+        tab: 'shots',
+        removeLbl: 'Change back', remove: revertOne('screenshot', sh.id),
+      });
+    } else if (sh.aiDraft) {
+      out.push({
+        key: `x:${sh.id}`, sec: 'Screenshots', kind: 'new', text, before: null, ctx: `IMG-${sh.id} · New screenshot.`,
+        tab: 'shots',
+        removeLbl: 'Remove', remove: () => mutate('DELETE', `${base}/screenshots/${sh.id}`, {}, quiet),
+      });
+    }
+    if (sh.stale) {
+      out.push({
+        key: `xs:${sh.id}`, sec: 'Screenshots', kind: 'changed', text, before: null,
+        ctx: `IMG-${sh.id} · Needs a new image: ${sh.stale}`, tab: 'shots',
+        // The person took a new image by hand, or the old one is fine. Only the mark goes: other AI changes stay in the review.
+        fixLbl: 'Image is fine', fix: () => mutate('PATCH', `${base}/screenshots/${sh.id}`, { stale: null }, quiet),
+      });
+    }
+  }
+  for (const sh of f.aiRemovedShots ?? []) {
     out.push({
-      key: `x:${sh.id}`, sec: 'Screenshots', kind: 'new', text: sh.caption || `Screenshot IMG-${sh.id}`, before: null, ctx: `IMG-${sh.id} · New screenshot.`,
-      tab: 'shots',
-      removeLbl: 'Remove', remove: () => mutate('DELETE', `${base}/screenshots/${sh.id}`, {}, quiet),
+      key: `xr:${sh.id}`, sec: 'Screenshots', kind: 'changed', text: sh.caption || `Screenshot IMG-${sh.id}`, before: null,
+      ctx: `IMG-${sh.id} · Deleted by the AI.`, tab: 'shots',
+      removeLbl: 'Change back', remove: revertOne('screenshot', sh.id),
     });
   }
   for (const e of codeMap?.features.find((x) => x.featureId === f.id)?.entries ?? []) {
@@ -544,7 +571,15 @@ function changesOf(
 }
 
 function itemChange(base: string, i: FeatureItem, sec: string, prefix: string, tab: Change['tab'], scopeId?: number): Change {
-  // The AI changes only its own draft items, so an item has no text of a person to change back to.
+  // An item with "before" had text of a person that the AI changed: it can change back.
+  if (i.before !== undefined) {
+    return {
+      key: `i:${i.id}`, sec, kind: 'changed', text: i.text, before: i.before,
+      ctx: `${prefix ? prefix + ' · ' : ''}Changed.`,
+      tab, scopeId,
+      removeLbl: 'Change back', remove: () => mutate('POST', `${base}/revert`, { kind: 'item', id: i.id }, quiet),
+    };
+  }
   return {
     key: `i:${i.id}`, sec, kind: 'new', text: i.text, before: null,
     ctx: `${prefix ? prefix + ' · ' : ''}New item.`,

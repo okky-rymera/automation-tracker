@@ -19,7 +19,7 @@ import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
 import { aiUpdateState, AiUpdateError, retryReview, startAiUpdate } from './ai-update.ts';
-import { forgetIssue, linkIssue, listIssues, startIssue } from './issues.ts';
+import { forgetIssue, linkIssue, listIssues, startIssue, startPlan } from './issues.ts';
 import { listParked, mapLoopState, MapLoopError, mapOlderRuns, mapRunReport, startMapLoop, stopMapLoop, unpark } from './map-loop.ts';
 
 const app = express();
@@ -301,6 +301,8 @@ app.post('/api/projects/:id/features/:fid/issues/link', async (req, res) => {
     res.status(500).json({ error: (e as Error).message });
   }
 });
+// Writes the test plan of an issue that the app made, and puts it into the issue (again, after a failed plan).
+app.post('/api/projects/:id/issues/:iid/plan', edit((req) => startPlan(proj(req), Number(req.params.iid))));
 // Takes the issue off the tracker only. The issue on GitHub stays.
 app.delete('/api/projects/:id/issues/:iid', edit((req) => forgetIssue(P(req), Number(req.params.iid))));
 app.post('/api/projects/:id/rescan', edit((req) => syncProject(proj(req), true)));

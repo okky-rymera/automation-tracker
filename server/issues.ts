@@ -12,6 +12,14 @@
  *
  * Claude runs in an empty temporary folder, with --repo, so the skill's files (.tmp/create-issue)
  * do not go into the plugin repo copy.
+ *
+ * The test plan (writePlan): after the issue is on GitHub, two more Claude runs add the plan to it.
+ *  1. The plan run: the wpdev:plan-test skill in the plugin repo copy, with no test site and no
+ *     questions. It reads the code and tests, the tracker facts of the issue's scopes, and the tracker
+ *     screenshots of those scopes (image files in a temporary folder). It writes plan.md there.
+ *  2. The attach run: the project:create-issue skill ("attach plan" mode) in that temporary folder. It
+ *     puts the plan into the issue in place of the "plan comes later" block, and uploads the images.
+ * The plan run writes only in the temporary folder, so the plugin repo copy stays clean.
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -19,7 +27,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { db, now, tx } from './db.ts';
-import { EditError, featureData } from './features.ts';
+import { EditError, featureData, screenshotData } from './features.ts';
 import { loadProjects, type ProjectConfig } from './projects.ts';
 import { childEnv, processAlive, run, type Job } from './sync.ts';
 import { notePlanUse, readPlanLine } from './plan-limit.ts';
@@ -34,6 +42,9 @@ const MODEL = 'sonnet';
 
 export interface IssuePr { number: number; title: string; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED' }
 export interface IssueRow {
+  /** The test plan: null (no plan yet), writing, added or failed (planError says why). */
+  planStatus: 'writing' | 'added' | 'failed' | null;
+  planError: string | null;
   id: number;
   /** automation-plan: the app made it with the AI · linked: a person added an issue that was on GitHub. */
   kind: string;
@@ -69,6 +80,22 @@ function isIssueRun(pid: number): boolean {
  * the run time limit fails too: its process number can belong to another program now.
  */
 function markGone(projectId: string) {
+  // A plan run whose server process is gone (or that is older than its time limit) failed.
+  for (const r of db.prepare("SELECT id, plan_owner_pid, plan_pid, plan_started_at FROM issues WHERE project_id = ? AND plan_status = 'writing'").all(projectId) as any[]) {
+    if (r.plan_owner_pid === process.pid && livePlans.has(r.id)) continue;
+    const tooOld = !r.plan_started_at || Date.now() - Date.parse(r.plan_started_at) > 2 * PLAN_TIMEOUT_MS + 60_000;
+    if (r.plan_owner_pid !== process.pid && !tooOld && processAlive(r.plan_owner_pid)) continue;
+    if (r.plan_pid && processAlive(r.plan_pid) && isIssueRun(r.plan_pid)) {
+      try {
+        process.kill(-r.plan_pid, 'SIGTERM');
+      } catch {
+        /* gone */
+      }
+    }
+    db.prepare("UPDATE issues SET plan_status = 'failed', plan_error = ?, plan_pid = NULL WHERE id = ?").run(
+      'The plan run stopped before the end (the server stopped). Check the issue on GitHub, then click "Add plan" again.', r.id,
+    );
+  }
   const rows = db.prepare("SELECT id, owner_pid, claude_pid, created_at FROM issues WHERE project_id = ? AND status = 'creating'").all(projectId) as any[];
   for (const r of rows) {
     // This process stops its own runs at the time limit.
@@ -96,6 +123,7 @@ export function listIssues(projectId: string): IssueRow[] {
   return (db.prepare('SELECT * FROM issues WHERE project_id = ? ORDER BY id DESC').all(projectId) as any[]).map((r) => ({
     id: r.id, kind: r.kind, featureId: r.feature_id, scopeIds: scopes.get(r.id) ?? [], repo: r.repo, status: r.status, number: r.number, url: r.url,
     title: r.title, state: r.state, prs: JSON.parse(r.prs), error: r.error, createdAt: r.created_at, syncedAt: r.synced_at,
+    planStatus: r.plan_status ?? null, planError: r.plan_error ?? null,
   }));
 }
 
@@ -215,6 +243,7 @@ No person watches this run. So:
 - Do not ask questions. Do not show a draft. Do not wait for approval. Do not search for duplicate issues.
 - The issue type is an Automation Plan (new test coverage) with NO plan yet. Use the "no plan file exists yet" (plan pending) form of template-automation-plan.md, with the PLAN_PENDING markers.
 - The repository is ${repo}. Pass --repo ${repo} to get_repo_info.sh and to create_issue.sh.
+- Run the skill's scripts by their full path, with no variables: bash ${path.join(skillDir(), 'scripts', 'get_repo_info.sh')} and bash ${path.join(skillDir(), 'scripts', 'create_issue.sh')}. Other forms are refused.
 - Label: automation. No assignee, no milestone, no parent.
 - Create exactly one issue. If create_issue.sh fails, try one more time at most, then stop and report the error.
 
@@ -387,6 +416,12 @@ async function createIssue(p: ProjectConfig, id: number, repo: string, prompt: s
     if (a?.ok && a.number > 0 && typeof a.url === 'string' && a.url.startsWith('https://github.com/')) {
       db.prepare("UPDATE issues SET status = 'created', number = ?, url = ?, title = ?, state = 'OPEN', error = NULL, cost_usd = ? WHERE id = ?").run(a.number, a.url, a.title || null, cost, id);
       await syncIssues(p.id, [id]).catch(() => {}); // the first check: the issue is there, and its state
+      // The test plan comes next. A plan that fails leaves the issue as it is, with "Add plan" to try again.
+      try {
+        startPlan(p, id);
+      } catch (e) {
+        db.prepare("UPDATE issues SET plan_status = 'failed', plan_error = ? WHERE id = ?").run(String((e as Error).message ?? e), id);
+      }
       return;
     }
     // The run failed, but the issue can be on GitHub already (a time or budget stop after the post).
@@ -408,6 +443,238 @@ async function createIssue(p: ProjectConfig, id: number, repo: string, prompt: s
   } finally {
     clearTimeout(timer);
     fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+// ---- The test plan ----
+
+/** One plan run (plan or attach) that takes longer than this is stopped, and fails. */
+const PLAN_TIMEOUT_MS = 20 * 60 * 1000;
+/** Spend limit of each of the two plan runs. */
+const PLAN_BUDGET_USD = '5';
+/** At most this many tracker screenshots go into one plan. */
+const PLAN_MAX_SHOTS = 12;
+
+/** Issue rows whose plan this process writes now. */
+const livePlans = new Set<number>();
+
+/** The folder of an installed plugin of rymera-marketplace ("project" or "wpdev"). */
+function pluginDir(name: string): string {
+  const file = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+  try {
+    const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const dir = (d.plugins ?? d)[`${name}@rymera-marketplace`]?.[0]?.installPath ?? '';
+    if (dir && fs.existsSync(dir)) return dir;
+  } catch {
+    /* not installed */
+  }
+  throw new EditError(`The "${name}@rymera-marketplace" plugin is not installed (see ${file}).`);
+}
+
+const PLAN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ok', 'error'],
+  properties: {
+    ok: { type: 'boolean', description: 'true when the step is done' },
+    error: { type: 'string', description: 'Why the step failed. Empty on success.' },
+  },
+};
+
+/**
+ * Starts the test plan of an issue that the app made ("Add plan", or right after the issue was created).
+ * Returns at once. The two runs go on in the background.
+ */
+export function startPlan(p: ProjectConfig, issueId: number): { id: number } {
+  const r = db.prepare('SELECT * FROM issues WHERE id = ? AND project_id = ?').get(issueId, p.id) as any;
+  if (!r) throw new EditError(`Issue row ${issueId} is not in this project`);
+  if (r.kind !== 'automation-plan') throw new EditError('Only an issue that the app made gets a plan. This issue was added from GitHub.');
+  if (r.status !== 'created' || !r.number) throw new EditError('The issue is not on GitHub yet.');
+  if (r.plan_status === 'writing') throw new EditError('The plan of this issue is being written now.');
+  if (!r.feature_id) throw new EditError('The issue has no feature.');
+  pluginDir('wpdev');
+  skillDir();
+  db.prepare("UPDATE issues SET plan_status = 'writing', plan_error = NULL, plan_owner_pid = ?, plan_started_at = ? WHERE id = ?").run(process.pid, now(), r.id);
+  livePlans.add(r.id);
+  writePlan(p, r)
+    .then(() => db.prepare("UPDATE issues SET plan_status = 'added', plan_error = NULL WHERE id = ?").run(r.id))
+    .catch((e) => db.prepare("UPDATE issues SET plan_status = 'failed', plan_error = ? WHERE id = ?").run(String((e as Error).message ?? e), r.id))
+    .finally(() => {
+      livePlans.delete(r.id);
+      db.prepare('UPDATE issues SET plan_pid = NULL WHERE id = ?').run(r.id);
+    });
+  return { id: r.id };
+}
+
+/** The tracker facts of the issue's scopes, and the screenshots of those scopes written as files in dir/screenshots. */
+function planFacts(p: ProjectConfig, r: any, dir: string) {
+  const f = featureData(p.id).features.find((x: any) => x.id === r.feature_id);
+  if (!f) throw new EditError(`F-${r.feature_id} is not in this project`);
+  const issueIds = new Set((db.prepare('SELECT scope_id FROM issue_scopes WHERE issue_id = ?').all(r.id) as any[]).map((x) => x.scope_id as number));
+  const ids = new Set(issueIds);
+  // A variation of the issue brings its scope; a scope of the issue brings its variations.
+  for (const s of f.scopes) if (ids.has(s.id) && s.parentId !== null) ids.add(s.parentId);
+  const inIssue = (s: any) => ids.has(s.id) && s.parentId === null;
+  const items = (list: any[]) => list.map((i: any) => i.text);
+  const scopes = f.scopes.filter(inIssue).map((s: any) => {
+    const vars = f.scopes.filter((v: any) => v.parentId === s.id && (ids.has(v.id) || !f.scopes.some((x: any) => x.parentId === s.id && ids.has(x.id))));
+    const tests = (sid: number) => f.links.filter((l: any) => !l.missing && l.scopeIds.includes(sid)).map((l: any) => `${l.testId} ${l.title ?? ''}`.trim());
+    return {
+      id: `S-${s.id}`,
+      sentence: s.title,
+      description: s.description,
+      requirements: items(s.requirements),
+      ...(s.columns ? { variations: vars.map((v: any) => ({ id: `SV-${v.id}`, ...Object.fromEntries(s.columns.map((c: string, i: number) => [c, v.values?.[i] ?? ''])), tests: tests(v.id) })) } : { tests: tests(s.id) }),
+    };
+  });
+  const facts = {
+    feature: {
+      id: `F-${f.id}`, title: f.title, description: f.description, roles: f.roles,
+      requirements: items(f.requirements), settings: items(f.settings), where: items(f.where), notes: items(f.notes), outOfScope: items(f.outOfScope),
+    },
+    scopesOfThisIssue: scopes,
+    otherScopesOfTheFeature: f.scopes.filter((s: any) => s.parentId === null && !inIssue(s) && !s.toRemove).map((s: any) => `S-${s.id} ${s.title}`),
+  };
+  // Screenshots: those that show a scope or variation of the issue first, then those of the whole feature.
+  // Only the scopes and variations of the issue: a sibling variation is outside the issue.
+  const all = issueIds;
+  const shots = [
+    ...f.screenshots.filter((x: any) => x.scopeIds.some((id: number) => all.has(id))),
+    ...f.screenshots.filter((x: any) => !x.scopeIds.length),
+  ].slice(0, PLAN_MAX_SHOTS);
+  fs.mkdirSync(path.join(dir, 'screenshots'), { recursive: true });
+  const shotList = shots.map((x: any) => {
+    const mime = (db.prepare('SELECT mime FROM screenshots WHERE id = ?').get(x.id) as any).mime as string;
+    const file = `img-${x.id}.${mime.split('/')[1]?.replace('jpeg', 'jpg') || 'png'}`;
+    fs.writeFileSync(path.join(dir, 'screenshots', file), screenshotData(x.id));
+    const tags = x.scopeIds.map((id: number) => (f.scopes.find((s: any) => s.id === id)?.parentId ? `SV-${id}` : `S-${id}`));
+    return { file: `screenshots/${file}`, caption: x.caption, shows: tags.length ? tags : ['the feature in general'] };
+  });
+  return { facts, shotList };
+}
+
+function planPrompt(r: any, dir: string, wpdev: string, facts: any, shots: any[]): string {
+  return `Use the Skill tool to load the wpdev:plan-test skill. Then follow it to write ONE test plan for GitHub issue #${r.number} (${r.url}), "${r.title}".
+
+No person watches this run, and there is no test site. So change the skill's steps like this:
+- Do not ask questions, and do not wait for a confirmation. The scope is confirmed: the scopes below ("scopesOfThisIssue"), with their variations. Make the sub-scenarios from them. Add a sub-scenario only for a case that the facts or the code show.
+- Do not open a browser or a test site. Skip check_playwright_cli.js and resolve_base_url.js. Step 3 uses the tracker facts and the screenshots below in place of the UI walk. Open each image file with the Read tool, to see the screens.
+- Do not call resolve_plan_path.js. Write the plan to ${dir}/plan.md. The screenshots are already in ${dir}/screenshots/. In the plan, show the screenshot of a group as ![<caption>](./<file>) with a file from the list below. Name an image file only in such an image link, never in plain text (the attach step uploads each file that the plan names). Do not take, copy or make other images.
+- The **Issue:** line of the plan is [#${r.number} — ${r.title}](${r.url}).
+- The current folder is the plugin repo. Run node ${wpdev}/scripts/analyze_codebase.js and node ${wpdev}/skills/plan-test/scripts/scan_existing_specs.js as the skill says. Read the plugin code and the tests as you need.
+- Do not write any file outside ${dir}. Do not change the plugin code or the tests.
+- The tracker facts are the documentation of the plugin. Trust them, but check a fact in the code when it matters for a step or an expected result. Use the IDs (S-…, SV-…) in the plan, so a person can find the scope in the tracker.
+
+Facts from the automation tracker (JSON):
+${JSON.stringify(facts, null, 2)}
+
+Screenshots from the tracker (file in ${dir}: caption: what it shows):
+${shots.length ? shots.map((x) => `- ${x.file}: ${x.caption} (shows ${x.shows.join(', ')})`).join('\n') : '- none'}
+
+When the plan is saved, give ok true in the structured output. If you could not write it, give ok false and the reason.
+`;
+}
+
+function attachPrompt(r: any, dir: string): string {
+  return `Use the Skill tool to load the project:create-issue skill. Then follow its "Attach / Refresh Plan Mode" to put the test plan into the existing GitHub issue #${r.number} of ${r.repo}.
+
+No person watches this run. So:
+- Do not ask questions, and do not wait for approval. Keep the issue title as it is.
+- The repository is ${r.repo}. Pass --repo ${r.repo} to get_repo_info.sh and to each gh command.
+- Run the scripts by their full path, with no variables: bash ${path.join(skillDir(), 'scripts', 'get_repo_info.sh')} and node ${path.join(path.dirname(path.dirname(skillDir())), 'scripts', 'fingerprint.js')} create-issue --footer. Other forms are refused.
+- The plan file is ./plan.md in the current folder. Its images are in ./screenshots/, and the plan refers to them as ./screenshots/<file>.
+- Replace the block between <!-- PLAN_PENDING_START --> and <!-- PLAN_PENDING_END --> (or the <!-- PLAN_START -->…<!-- PLAN_END --> block, when there is one). Leave every other part of the body as it is.
+- Upload each image that the plan shows as ![alt](./screenshots/<file>) with --attach "./screenshots/<file>#<alt>" in the same gh issue edit call, run from the current folder. Upload no other file: a file that the body does not show goes to the end of the issue.
+- Edit the issue one time. If gh issue edit fails, try one more time at most, then stop and report the error.
+
+When the issue has the plan, give ok true in the structured output. Else give ok false and the reason.
+`;
+}
+
+/** Runs one headless Claude step of the plan. Returns the cost. Throws with the reason when the step failed. */
+async function planStep(id: number, what: string, cwd: string, prompt: string, tools: string[], addDirs: string[]): Promise<number | null> {
+  const args = [
+    '-p', '--model', MODEL, '--output-format', 'stream-json', '--verbose',
+    '--json-schema', JSON.stringify(PLAN_SCHEMA),
+    '--max-budget-usd', PLAN_BUDGET_USD,
+    '--permission-mode', 'dontAsk',
+    '--allowedTools', ...tools,
+    ...addDirs.flatMap((d) => ['--add-dir', d]),
+    '--strict-mcp-config', '--no-session-persistence',
+  ];
+  const env = childEnv();
+  for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
+  const job: Job = { syncId: 0, child: null, cancelled: false, abort: new AbortController() };
+  let out: any = null;
+  let planStop: string | null = null;
+  const stop = () => {
+    try {
+      if (job.child?.pid) process.kill(-job.child.pid, 'SIGTERM');
+    } catch {
+      /* gone */
+    }
+  };
+  const onLine = (l: string, stream: 'stdout' | 'stderr') => {
+    if (stream !== 'stdout' || !l.startsWith('{')) return;
+    const plan = readPlanLine(l, MODEL);
+    notePlanUse(plan);
+    if (plan) {
+      if (plan.stop && !planStop) (planStop = plan.stop), stop();
+      return;
+    }
+    if (l.includes('"type":"result"')) {
+      try {
+        const v = JSON.parse(l);
+        if (v?.type === 'result') out = v;
+      } catch {
+        /* not JSON */
+      }
+    }
+  };
+  const started = run(job, 'claude', args, { cwd, env, quiet: true, input: prompt, onLine });
+  db.prepare('UPDATE issues SET plan_pid = ? WHERE id = ?').run(job.child?.pid ?? null, id);
+  let timedOut = false;
+  const timer = setTimeout(() => ((timedOut = true), stop()), PLAN_TIMEOUT_MS);
+  try {
+    const res = await started.catch((e) => ({ code: null, signal: null, out: String(e?.message ?? e) }));
+    const cost = typeof out?.total_cost_usd === 'number' ? out.total_cost_usd : null;
+    const a = out?.structured_output;
+    if (a?.ok) return cost;
+    const why = timedOut
+      ? `The ${what} took longer than ${PLAN_TIMEOUT_MS / 60000} minutes and was stopped.`
+      : planStop ?? (a?.error || out?.result || res.out.split('\n').filter(Boolean).slice(-5).join('\n') || 'Claude gave no answer.');
+    throw new Error(`The ${what} failed: ${why}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function writePlan(p: ProjectConfig, r: any) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracker-plan-'));
+  const wpdev = pluginDir('wpdev');
+  const project = path.dirname(path.dirname(skillDir()));
+  let cost = 0;
+  try {
+    const { facts, shotList } = planFacts(p, r, dir);
+    // 1. The plan, in the plugin repo copy. It can read the repo, and write only in dir.
+    cost += (await planStep(r.id, 'plan run', p.path, planPrompt(r, dir, wpdev, facts, shotList), [
+      'Skill', 'Read', 'Glob', 'Grep', 'TodoWrite',
+      `Edit(/${dir}/**)`, // covers Write too
+      `Bash(node ${path.join(wpdev, 'scripts', 'analyze_codebase.js')}:*)`,
+      `Bash(node ${path.join(wpdev, 'skills', 'plan-test', 'scripts', 'scan_existing_specs.js')}:*)`,
+      'Bash(git rev-parse:*)', 'Bash(git log:*)', 'Bash(ls:*)',
+    ], [dir])) ?? 0;
+    if (!fs.existsSync(path.join(dir, 'plan.md'))) throw new Error('The plan run said it was done, but it wrote no plan.md.');
+    // 2. Into the issue, from dir (the skill's .tmp files stay there).
+    cost += (await planStep(r.id, 'attach run', dir, attachPrompt(r, dir), [
+      ...allowedTools(),
+      'Bash(gh issue edit:*)',
+      `Bash(node ${path.join(project, 'scripts', 'fingerprint.js')}:*)`,
+    ], [])) ?? 0;
+    await syncIssues(p.id, [r.id]).catch(() => {});
+  } finally {
+    db.prepare('UPDATE issues SET plan_cost_usd = ? WHERE id = ?').run(cost || null, r.id);
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 

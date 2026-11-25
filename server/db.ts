@@ -224,7 +224,7 @@ const MIGRATIONS: string[] = [
   CREATE TABLE feature_items (
     id INTEGER PRIMARY KEY,
     feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,              -- rule | out_of_scope | where | question
+    kind TEXT NOT NULL,              -- rule | out_of_scope | where | setting | question
     text TEXT NOT NULL,
     sort INTEGER NOT NULL DEFAULT 0,
     ai_draft INTEGER NOT NULL DEFAULT 0
@@ -854,6 +854,54 @@ const MIGRATIONS: string[] = [
   DROP TABLE code_decisions;
   ALTER TABLE code_decisions_new RENAME TO code_decisions;
   ALTER TABLE feature_code ADD COLUMN fingerprint TEXT;
+  `,
+  // The AI can change data that a person wrote or checked. A person sees each change in the review and
+  // can use "Change back".
+  //  - ai_rejected: a value that a person changed back. The AI does not write it again on that row.
+  //    kind: feature, scope, item or screenshot. value_key: the value in lower case (for a screenshot tag, the scope ID).
+  //  - screenshots.ai_change: what the AI changed since a person checked the screenshot (JSON list:
+  //    tags, image, caption, removed). NULL: no change waits for a review.
+  //  - screenshots.stale: why the image is old (the AI review after a sync). A new image clears it.
+  //  - screenshot_before: the screenshot before the first AI change, for "Change back". data and mime
+  //    are set only when the AI replaced the image.
+  `
+  CREATE TABLE ai_rejected (
+    kind TEXT NOT NULL,
+    row_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    value_key TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (kind, row_id, field, value_key)
+  );
+  ALTER TABLE screenshots ADD COLUMN ai_change TEXT;
+  ALTER TABLE screenshots ADD COLUMN stale TEXT;
+  CREATE TABLE screenshot_before (
+    screenshot_id INTEGER PRIMARY KEY REFERENCES screenshots(id) ON DELETE CASCADE,
+    caption TEXT NOT NULL,
+    scope_ids TEXT NOT NULL,
+    data BLOB,
+    mime TEXT
+  );
+  `,
+  // image_at: when the image last changed (the AI replaced it). The browser copy of the image uses it.
+  `
+  ALTER TABLE screenshots ADD COLUMN image_at TEXT;
+  `,
+  // The test plan of an AI issue (server/issues.ts). plan_status: NULL (no plan yet), writing, added or
+  // failed (plan_error says why). plan_owner_pid: the server process that runs it; plan_pid: its claude process.
+  `
+  ALTER TABLE issues ADD COLUMN plan_status TEXT;
+  ALTER TABLE issues ADD COLUMN plan_error TEXT;
+  ALTER TABLE issues ADD COLUMN plan_cost_usd REAL;
+  ALTER TABLE issues ADD COLUMN plan_owner_pid INTEGER;
+  ALTER TABLE issues ADD COLUMN plan_pid INTEGER;
+  ALTER TABLE issues ADD COLUMN plan_started_at TEXT;
+  `,
+  // ai_made = 1: an AI skill made the feature group, and no person changed it. When "Change back" takes
+  // the last feature out of such a group, the group goes (features.ts dropEmptyAiFeatureGroup).
+  // Groups from before: made by a person, so no group is deleted by mistake.
+  `
+  ALTER TABLE feature_groups ADD COLUMN ai_made INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 

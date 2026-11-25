@@ -44,11 +44,17 @@ npm run -s map -- reset    <project> <kind> <ref>       # process that unit agai
 Do not write to the database in any other way (no `sqlite3` writes, no app API
 calls). The tool keeps the rules that protect people's work:
 
-- It does not change or remove text that a person wrote or checked. It can fill empty fields. Each field
-  has its own AI mark, so filling an empty field does not give the right to change the other fields.
-- Roles, list items (requirements too), scopes, the scopes of a link, the code of a feature and screenshots are only added.
+- It can change text that a person wrote or checked: feature and scope fields, and list items
+  (`{ "id", "text" }`). It keeps the old text, and the review shows it with "Change back".
+  Change a person's text only when the code or the test site proves it wrong, or when it breaks a
+  writing rule that a reader needs (for example a wrong label). Never change it only for style.
+- It does not write again a value that a person changed back. The report says so: do not send it again.
+- It deletes only AI draft list items. A person's item can get new text, but it is not deleted.
+- It can change any screenshot, also one that a person checked or uploaded: add or take off tags,
+  give a new caption, replace the image, or delete it. The review shows each change with "Change back".
+- Roles, scopes, the scopes of a link and the code of a feature are only added.
 - It does not add again code that a person removed from a feature.
-- It does not add again a screenshot that a person deleted (it matches by caption).
+- It does not add again or change a screenshot that a person deleted.
 - It does not add again a link that a person removed, and it does not change a link that a person made.
 - It does not add again a scope that a person deleted or moved to another feature (it matches by title or S-id).
   The report says so, and the tool skips the requirements, links and screenshots of that scope in the payload.
@@ -63,8 +69,9 @@ calls). The tool keeps the rules that protect people's work:
 Links come only from people and from this skill. `@feature:` tags in the tests
 do not make links, but they are a good hint for which feature a test belongs to.
 
-The tool tells you in its `report` when it kept a person's text. Tell the user
-about these items: the person may want your suggestion.
+The tool tells you in its `report` when it changed a person's text or
+screenshot, and when it refused a value that a person changed back. Tell the
+user about these items.
 
 ## The loop
 
@@ -162,8 +169,8 @@ not only a copy of test titles.
   - A person must decide, for example "Is this behavior intended, or is it a bug?"
   - The answer needs something that you do not have, for example a paid
     add-on that is not on the test site.
-  - Text that a person wrote or checked is now wrong. The tool cannot change
-    it, so the question says what is wrong and what the code does.
+  - You are not sure that text of a person is wrong. When you are sure,
+    change it (see above), and say so in the report.
 - **Check each question before you send it.** Read the scopes, notes and
   requirements of the feature: they must not answer it already. Write in the
   report what you tried for each question, and why it did not give the answer.
@@ -185,8 +192,8 @@ build on what is there. An AI draft feature can be replaced by your text, so:
 - Send only what you add or make better. A list item you send as text is
   added (the same text again adds nothing). To correct one of your own AI
   draft items, send `{ "id": 12, "text": "…" }`. To delete one, put its ID in
-  `removeItems`. The tool refuses both for items that a person wrote or
-  checked: then name the problem in `questions` and in your report.
+  `removeItems`. For an item that a person wrote or checked, `{ "id", "text" }`
+  works (only when it is wrong), and `removeItems` is refused.
 - Reuse a scope when it means the same thing: give its `id` (`S-4`). A new
   title makes a new scope, so a reworded copy makes a near copy.
 - **Before you make a scope, read the title and the requirements of each
@@ -274,6 +281,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | roles | Labels: who uses or sees it ("Admin", "Wholesale customer") |
 | requirements | List: what must be true for every scope: plugins, settings, data, the logged-in user |
 | where | List: admin screens, settings tabs, shop pages, REST routes |
+| settings | List: each setting that the feature owns: place and label, choices, default value |
 | notes | List: only what no test can check: reasons, code facts, limits. A testable rule is a scope |
 | outOfScope | List: what it does not do; name the feature that does it if there is one |
 | questions | List: only what a person must decide, or what you tried and could not prove |
@@ -281,6 +289,40 @@ What goes in each field, in short (details and examples in `references/payload.m
 | links | Each test, with the scopes it checks |
 | code | The plugin files or functions that do the feature |
 | screenshots | Images of the feature: a PNG file, a caption, and the scopes it shows |
+
+**Write the feature so a person does not need the test site.** The tracker is
+the documentation of the plugin. A person or the AI must learn how the feature
+works from it alone, without the plugin. The AI that writes a test plan reads
+only the tracker. So for each feature that you add to or change:
+
+- **Settings:** list each setting that the feature owns in `settings`, with
+  its place, its choices and its default value.
+- **Settings of other features:** when a setting of another feature changes
+  a scope, put the setting and the value that the scope needs in the scope's
+  requirements, with the feature ID. Example: S-733 "Wholesale customer sees
+  the wholesale price with the regular price crossed out" needs the
+  requirement 'The "Hide Retail Price" checkbox is unchecked (the default,
+  see F-7).' Search the plugin code
+  for the options that the feature's code reads, to find these settings.
+- **Cases:** check each case below that applies to the feature. For each
+  case, write a scope (or a variation) for what happens, or an `outOfScope`
+  item that says why it does not apply. Do not leave a case out with no word:
+  then a reader cannot tell "it does not apply" from "nobody checked".
+  - Product types: simple product, variable product (set on the variation,
+    and set on the parent product), and other types that the code handles.
+  - Page types: classic cart and checkout, and the cart and checkout blocks.
+    Shop page, product page, cart, checkout and order screens. The mini cart
+    (classic) and the mini cart block. Product lists of block themes (the
+    All Products and Product Collection blocks).
+  - Roles: each role that the feature changes, and the roles that it must
+    not change.
+- **Exact result:** a scope title gives the result in short. When the title
+  and the screenshots do not give the exact result, write a scope description:
+  the exact text of a message, label or button, the number that shows, or
+  where a link goes.
+- **Screenshots:** see "Add screenshots" below.
+- **"To remove":** skip each scope and feature that has `toRemove`. A person
+  decided that it goes. Do not add text, cases or screenshots to it.
 
 Link every test in the unit that checks a feature, **to the scopes it checks**.
 A link with no scope says only "this test is about the feature", which tells a
@@ -399,14 +441,23 @@ shows it faster than text.
   1. Look at the existing images. Export them with a read-only command (no writes):
      `npm run -s map -- screenshots <project> <id> <scratchpad>`. It lists each file with its caption.
      Then open the PNG files with the Read tool.
-  2. If an image shows the scope, send that screenshot again with its
-     caption (or its `firstCaption`) and the scope in `scopes`. The tool adds
-     only the tag. It does not need the file for a screenshot that is there.
-  3. If no image shows it, take a new screenshot.
-- **What:** 1–4 screenshots for each feature. Take the place where a person
-  sets it up (the settings or the edit screen), and the result that the user
-  sees (for example, the shop page with the wholesale price). One screenshot
-  for each scope is not necessary.
+  2. If an image shows the scope, send that screenshot with its `id`
+     (`IMG-12`) and the scope in `scopes`. The tool adds only the tag, also
+     on a screenshot that a person checked. Do not take a copy of it.
+  3. If an image is old (the screen changed), take a new picture and send it
+     with the `id`, `"replace": true` and the `file`.
+  4. If no image shows it, take a new screenshot.
+- **What:** each scope with a screen must be in at least one screenshot.
+  Take more than one screenshot when one image cannot show the scope, for
+  example:
+  - the setting and its result are on two screens: take the settings screen
+    and the result that the user sees (for example, the shop page with the
+    wholesale price),
+  - the screen changes after a click: take the screen before and after,
+  - each variation of the scope shows on another page: take each page.
+  One image can show many scopes. Tag each scope that it shows, so you do not
+  take the same picture again. A scope with no screen (an email, a REST API
+  route, a background task) gets no screenshot.
 - **How:** use `playwright-cli` on the test site, as `references/running-tests.md`
   says. Its safety rules apply. Set the window to 1280×800
   (`playwright-cli resize 1280 800`). Scroll so that the part that matters is
@@ -433,17 +484,23 @@ shows it faster than text.
   after the screenshot.
 - **Caption:** say what the image shows, in plain words, for example
   "Settings > Prices: the option to hide the wholesale price column". Each
-  caption in a feature must be different. The tool uses the caption to find a
-  screenshot that is already there, so the same caption adds nothing. A person
-  can change a caption: `feature <project> <id>` then shows the caption you
-  sent as `firstCaption`. Use that one to refer to the screenshot.
+  caption in a feature must be different. Refer to a screenshot that is there
+  by its `id` (`IMG-12`). A screenshot with no `id` and a new caption is a new
+  screenshot.
 - **Scopes:** give the scopes whose result the image shows. Leave them out for
   an image of the feature in general.
+- **Simulated screens:** a screen that the real site cannot reach easily (a
+  session that expires, a server error) can be shown by faking the server
+  answer in the browser, as the Cypress tests do. Start the caption of such an
+  image with "(simulated)". Prefer the real screen when you can reach it.
 
-The tool only adds screenshots. It does not change an image that is there. If a
-screenshot you added before is wrong, say so in the report: a person deletes
-it in the app. `feature <project> <id>` shows deleted screenshots with
-`removed: true`. Do not send their captions again.
+To change a screenshot that is there, send its `id` with what changes:
+`scopes` (tags to add), `removeScopes` (wrong tags), `newCaption`,
+`"replace": true` with a `file`, or `"remove": true` for a screenshot that
+shows nothing of the feature now. A `stale` text on a screenshot in
+`feature <project> <id>` means that a code change made the image old: take a
+new picture and replace it. `feature <project> <id>` shows deleted screenshots
+with `removed: true`. Do not send them again.
 
 If `apply` fails, nothing was saved. Read the error, fix the payload, run it again.
 
@@ -457,7 +514,7 @@ Tell the user, in plain words:
 - the code you put in each feature (files and functions)
 - the screenshots you added or tagged, with their captions and scopes, or why a scope has none
 - each open question you added, what you tried, and why a person must answer it
-- any person's text that the tool kept
+- each text or screenshot of a person that you changed, and why it was wrong
 - the progress (`status`): for example "Cypress: 5 of 82 files done"
 
 Then stop. Say the command or phrase to do the next unit.
@@ -491,13 +548,36 @@ third-party plugin (WooCommerce Product Bundles) or another plugin of the
 same company (Premium, Lead Capture, Order Form, Payments). A person must
 install that plugin to test it, so it must not hide inside a core feature.
 
+- Before you write a scope, ask: "What must the test site have for this
+  scope?" If only another plugin can make that thing, the scope needs that
+  plugin, also when its title does not name the plugin. Examples: a second
+  wholesale role (only Premium adds roles), a field or setting that only the
+  other plugin adds, or a screen of the other plugin.
 - Put such a feature in the group "Integration/<plugin name>", for example
   "Integration/Wholesale Prices Premium". Use the existing Integration group
   for the plugin when there is one.
+- A scope that checks what the plugin does when the other plugin is active
+  also needs that plugin. It goes in an Integration feature, also when it is
+  about an upsell. Example: "The Wholesale menu shows no 'Upgrade To Premium'
+  item when Wholesale Prices Premium is active". The "Upsells" group keeps
+  only whole upsell pages or popups. A scope that needs the other plugin
+  never goes there.
+- Group integration scopes by what they check, not by the core feature they
+  came from. Do not make one feature for each scope. Example: the menu and
+  the Plugins screen both lose their "Upgrade To Premium" link. Both scopes
+  go in one feature, "Upgrade links go away when Premium is active". Use an
+  existing Integration feature when one checks the same thing.
+- Some scopes work with any one of several plugins. Example: the free-version
+  notice bar goes away when Premium, Lead Capture or Order Form is active.
+  Write one scope, and name all the plugins in its requirements. Put it in
+  the group of the plugin that most stores have. For Wholesale Suite, this
+  is "Integration/Wholesale Prices Premium". Do not copy the scope into each
+  plugin's group.
 - Do not add "With Premium …" scopes to a core feature. Make or use a
-  separate feature in the Integration group, for example "Wholesale price
-  for each Premium wholesale role" next to the core "Per-product wholesale
-  price".
+  separate feature in the Integration group. An Integration feature can sit
+  next to one core feature when all its scopes check one thing. Example:
+  "Wholesale price for each Premium wholesale role" next to the core
+  "Per-product wholesale price".
 - Some scopes show the locked field or the upsell when the other plugin is
   not active. Put these scopes in the same Integration feature. Example:
   "Without Lead Capture, the Register Text field is locked". A whole upsell
@@ -558,10 +638,10 @@ its ID, or by its exact title. A changed title without an ID makes a new
 scope, and the test links are split between the two.
 
 - To reword a scope that the AI wrote, send its `id` with the new title.
-- Do not reword a scope that a person wrote or checked. Send its title exactly
-  as it is, or send only its `id`.
-- To send a screenshot again, use its `firstCaption` from `feature <id>`
-  exactly. A reworded caption can add a screenshot that a person deleted.
+- A scope title that a person wrote or checked changes only when it is wrong.
+  Then send its `id`, its title, and the new title in `newTitle`. A changed
+  `title` alone does not rename it.
+- To send a screenshot again, use its `id` (`IMG-12`).
 
 Use these words, and only these words, for these things:
 
@@ -589,8 +669,8 @@ that the plugin does.
   must not exist.
 - Do not quote that text in new scope titles, descriptions or screenshot
   captions. Write "the upsell page" or "the upgrade popup", not its heading.
-- Keep the caption of a screenshot that is there already. The tool matches
-  screenshots by caption, so a new caption adds a copy.
+- To change the caption of a screenshot that is there, send its `id` and
+  `newCaption`. A new caption with no `id` adds a copy.
 - Write scopes for what the screen does:
   - when it shows or hides,
   - what opens it,
@@ -612,6 +692,9 @@ that the plugin does.
   group. It shows when that plugin is not active, so you can test it without
   that plugin. This is an exception to "Integration groups". A locked field
   inside a screen of an Integration feature stays in that Integration feature.
+  Some scopes check that the upsell goes away when the plugin is active.
+  These scopes are not part of this exception. They go in an Integration
+  feature.
 
 **Settings that turn something off** ("Hide …", "Disable …", "Do not …"): do
 not write "the setting is on" or "off" anywhere. Quote the label and say

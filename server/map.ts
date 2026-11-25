@@ -43,7 +43,7 @@ import { db, json, now, tx } from './db.ts';
 import { leftOutSpec, leftOutTest } from './cypress-rules.ts';
 import { getProject, hashFiles, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, idNumber, NEW_SCOPE_ID, variationTitle, columnWord, columnList, variationValues, valuesKey, newVariation, resetVariations, moveEvidence, variationsOf, scopeRow, scopeLabel, jsonList, MAX_COLUMNS, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore } from './features.ts';
+import { EditError, edits, idNumber, NEW_SCOPE_ID, variationTitle, columnWord, columnList, variationValues, valuesKey, newVariation, resetVariations, moveEvidence, variationsOf, scopeRow, scopeLabel, jsonList, MAX_COLUMNS, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore, isRejected, buryScope } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -471,6 +471,7 @@ function features(p: ProjectConfig) {
       id: f.id,
       title: f.title,
       group: groups.find((g) => g.id === f.group_id)?.title ?? null,
+      priority: f.priority || null,
       aiFields: json(f.ai_fields),
       ...(f.remove_reason ? { toRemove: f.remove_reason } : {}),
       ...(f.description ? { description: f.description.length > 160 ? `${f.description.slice(0, 160)}… (cut: see "feature")` : f.description } : {}),
@@ -499,12 +500,15 @@ function screenshotsOf(fid: number) {
     .prepare('SELECT ss.screenshot_id AS shot, s.id, s.parent_id, s.title FROM screenshot_scopes ss JOIN scopes s ON s.id = ss.scope_id WHERE s.feature_id = ? ORDER BY s.id')
     .all(fid) as any[])
     tags.set(r.shot, [...(tags.get(r.shot) ?? []), `${scopeLabel(r)} ${r.title}`]);
-  return (db.prepare('SELECT id, caption, match_key, source, checked, removed FROM screenshots WHERE feature_id = ? ORDER BY sort, id').all(fid) as any[]).map((x) => ({
+  return (db.prepare('SELECT id, caption, match_key, source, checked, removed, ai_change, stale FROM screenshots WHERE feature_id = ? ORDER BY sort, id').all(fid) as any[]).map((x) => ({
+    id: `IMG-${x.id}`,
     caption: x.caption,
     ...(x.match_key !== null && x.match_key !== captionKey(x.caption) ? { firstCaption: x.match_key } : {}),
     source: x.source,
     checked: !!x.checked,
     removed: !!x.removed,
+    ...(x.ai_change !== null ? { aiChange: json(x.ai_change) } : {}),
+    ...(x.stale ? { stale: x.stale } : {}),
     scopes: tags.get(x.id) ?? [],
   }));
 }
@@ -573,6 +577,8 @@ interface LinkIn {
 interface FeatureIn {
   id?: number;
   title?: string;
+  /** A rename. "title" with "id" only names the feature: it changes only an AI draft title. */
+  newTitle?: string;
   group?: string;
   description?: string;
   priority?: string;
@@ -583,6 +589,8 @@ interface FeatureIn {
   notes?: ItemIn[];
   outOfScope?: ItemIn[];
   where?: ItemIn[];
+  /** The settings of the feature: one item for each, with its place, its choices and its default value. */
+  settings?: ItemIn[];
   questions?: ItemIn[];
   /** IDs of list items to delete (only AI draft items), scope requirements too. */
   removeItems?: number[];
@@ -603,6 +611,8 @@ interface FeatureIn {
 interface ScopeIn {
   id?: number | string;
   title: string;
+  /** A rename. "title" with "id" only names the scope: it changes only an AI draft title. */
+  newTitle?: string;
   /** null deletes an AI draft description. */
   description?: string | null;
   /** Group name: scopes about one topic of the feature show together, like a describe block of tests. */
@@ -620,9 +630,23 @@ interface ScopeIn {
   columns?: string[];
 }
 interface ShotIn {
-  file: string;
-  caption: string;
+  /** IMG-12 or 12: a screenshot that is there. Else the caption finds it, or a new one is added. */
+  id?: string | number;
+  /** A local image file: for a new screenshot, or with replace: true. */
+  file?: string;
+  /** The caption of a new screenshot, or the first caption of one that is there. */
+  caption?: string;
+  /** Scopes that the image shows: they are added as tags. */
   scopes?: (string | number)[];
+  /** Tags to take off. */
+  removeScopes?: (string | number)[];
+  newCaption?: string;
+  /** true: the image of "file" replaces the image. */
+  replace?: boolean;
+  /** true: delete the screenshot. */
+  remove?: boolean;
+  /** Why the image is old (for example after a code change). A new image clears it. */
+  stale?: string;
 }
 interface Payload {
   /**
@@ -840,21 +864,30 @@ function findGroup(p: ProjectConfig, title: string): number | undefined {
 }
 function createGroup(p: ProjectConfig, t: string): number {
   const n = (db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM feature_groups WHERE project_id = ?').get(p.id) as any).n;
-  return Number(db.prepare('INSERT INTO feature_groups (project_id, title, sort) VALUES (?, ?, ?)').run(p.id, t, n).lastInsertRowid);
+  // Only the AI skills call this: the group is AI-made until a person changes it.
+  return Number(db.prepare('INSERT INTO feature_groups (project_id, title, sort, ai_made) VALUES (?, ?, ?, 1)').run(p.id, t, n).lastInsertRowid);
 }
 
 /**
- * Sets one field only if it is empty, or if the AI skill wrote it and no person
- * checked it (the field is in ai). Adds the field to ai when it writes. Returns true when it changed.
+ * Sets one field. The AI can change a value that a person wrote or checked too: the value from before
+ * is kept, and the review shows it with "Change back". A title of a person changes only on an explicit
+ * rename (newTitle). A value that a person changed back before is not written again (ai_rejected).
+ * Adds the field to ai when it writes. Returns true when it changed.
  */
-function setText(table: 'features' | 'scopes', row: any, ai: Set<string>, field: string, col: string, value: string | number | null, label: string, report: string[]) {
+function setText(table: 'features' | 'scopes', row: any, ai: Set<string>, field: string, col: string, value: string | number | null, label: string, report: string[], rename = false) {
   if (value === '' || value === null || value === undefined || row[col] === value) return false;
   const empty = row[col] === '' || row[col] === null;
-  if (!empty && !ai.has(field)) {
-    report.push(`${label}: kept the ${field} that a person wrote or checked. Suggested ${field} was not saved.`);
+  // A title also names the row: the AI sends it with the ID, so a new wording is not a rename. A person's title changes only with newTitle.
+  if (field === 'title' && !rename && !row.isNew && !empty && !ai.has('title')) {
+    report.push(`${label}: kept the title that a person wrote or checked. Suggested title "${value}" was not saved. To rename it because it is wrong, send "newTitle".`);
     return false;
   }
-  if (!empty) report.push(`${label}: replaced the earlier AI draft ${field}.`);
+  if (!row.isNew && isRejected(table === 'features' ? 'feature' : 'scope', row.id, field, value)) {
+    report.push(`${label}: did not set the ${field} to "${value}": a person changed this value back before.`);
+    return false;
+  }
+  if (!empty && !ai.has(field)) report.push(`${label}: changed the ${field} that a person wrote or checked. The review shows the old value, with "Change back".`);
+  else if (!empty) report.push(`${label}: replaced the earlier AI draft ${field}.`);
   else if (!row.isNew) report.push(`${label}: filled the empty ${field}. It shows as AI draft until a person checks it.`);
   // The value from before, so a person can change it back. A row that this apply made has none.
   if (!row.isNew) keepBefore(table === 'features' ? 'feature' : 'scope', row.id, field, row[col], !ai.has(field));
@@ -893,16 +926,22 @@ function writeFeature(p: ProjectConfig, f: FeatureIn, report: string[]): number 
   }
   const label = `F-${row.id}`;
   const ai = new Set<string>(json(row.ai_fields));
-  if (f.id && f.title) setText('features', row, ai, 'title', 'title', str(f.title, 2000), label, report);
+  if (f.id && (f.newTitle || f.title)) {
+    const t = str(f.newTitle || f.title, 2000);
+    const same = db.prepare('SELECT id FROM features WHERE project_id = ? AND lower(title) = lower(?) AND id <> ?').get(p.id, t, row.id) as any;
+    if (same && (ai.has('title') || f.newTitle)) report.push(`${label}: did not change the title to "${t}": F-${same.id} has this title.`);
+    else setText('features', row, ai, 'title', 'title', t, label, report, !!f.newTitle);
+  }
   setText('features', row, ai, 'description', 'description', str(f.description), label, report);
   setText('features', row, ai, 'priority', 'priority', priority, label, report);
-  if (groupTitle) {
-    // Make a new group only when the feature can take it: else a refused change leaves an empty group.
+  if (groupTitle && !row.isNew && isRejected('feature', row.id, 'group', groupTitle)) {
+    report.push(`${label}: did not put it in group "${groupTitle}": a person changed this group back before.`);
+  } else if (groupTitle) {
     let g = findGroup(p, groupTitle);
-    const canSet = row.group_id === null || ai.has('group');
-    if (g === undefined && canSet) g = createGroup(p, groupTitle);
-    if (g !== undefined) setText('features', row, ai, 'group', 'group_id', g, label, report);
-    else report.push(`${label}: kept the group that a person wrote or checked. Suggested group "${groupTitle}" was not saved.`);
+    const made = g === undefined;
+    if (made) g = createGroup(p, groupTitle);
+    // A refused change must not leave a new, empty group.
+    if (!setText('features', row, ai, 'group', 'group_id', g!, label, report) && made) db.prepare('DELETE FROM feature_groups WHERE id = ?').run(g!);
   }
   saveAi('features', row, ai);
   return row.id;
@@ -962,12 +1001,18 @@ function writeItems(fid: number, kind: string, values: ItemIn[], report: string[
       const t = str(v.text, 2000);
       if (!t || t === row.text) continue;
       const clash = requirementClash(fid, scopeId, kind, t, row.id);
-      if (!row.ai_draft) report.push(`${label}: kept the ${kind} item #${row.id} that a person wrote or checked.`);
-      else if (kind === 'question' && answeredBefore(fid, t)) report.push(`${label}: did not change question #${row.id} to "${t}": that question was answered before.`);
+      if (kind === 'question' && answeredBefore(fid, t)) report.push(`${label}: did not change question #${row.id} to "${t}": that question was answered before.`);
       else if (clash) report.push(`${label}: did not change item #${row.id} to "${t}": ${clash}`);
+      else if (isRejected('item', row.id, 'text', t)) report.push(`${label}: did not change item #${row.id} to "${t}": a person changed this text back before.`);
       else {
-        db.prepare('UPDATE feature_items SET text = ? WHERE id = ?').run(t, row.id);
-        report.push(`${label}: changed AI draft ${kind} item #${row.id}.`);
+        // The text of a person: keep it for "Change back", and mark the item as an AI change.
+        keepBefore('item', row.id, 'text', row.text, !row.ai_draft);
+        db.prepare('UPDATE feature_items SET text = ?, ai_draft = 1 WHERE id = ?').run(t, row.id);
+        report.push(
+          row.ai_draft
+            ? `${label}: changed AI draft ${kind} item #${row.id}.`
+            : `${label}: changed ${kind} item #${row.id} that a person wrote or checked. The review shows the old text, with "Change back".`,
+        );
       }
     } else throw new EditError(`A ${kind} item must be text or { "id", "text" }`);
   }
@@ -977,7 +1022,9 @@ function removeItems(fid: number, ids: number[], report: string[]) {
   for (const id of new Set(ids.map(Number))) {
     const row = db.prepare('SELECT * FROM feature_items WHERE id = ? AND feature_id = ?').get(Number(id), fid) as any;
     if (!row) throw new EditError(`No list item #${id} in F-${fid}`);
-    if (!row.ai_draft) report.push(`F-${fid}: kept item #${id}: a person wrote or checked it. Name the problem in "questions".`);
+    // A delete cannot be changed back, so the AI deletes only its own drafts. It can change the text of a person.
+    const person = !row.ai_draft || !!db.prepare("SELECT 1 FROM ai_before WHERE kind = 'item' AND row_id = ? AND field = 'text'").get(row.id);
+    if (person) report.push(`F-${fid}: kept item #${id}: a person wrote or checked it. Change its text with { "id", "text" }, or name the problem in "questions".`);
     else {
       db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
       dropBefore('item', row.id);
@@ -1079,9 +1126,20 @@ function writeScope(fid: number, s: ScopeIn, report: string[]): number | null {
   }
   const label = `S-${row.id}`;
   const ai = new Set<string>(json(row.ai_fields));
-  if (setText('scopes', row, ai, 'title', 'title', title, label, report) && row.columns !== null) {
-    // The titles of the variations come from the scope title.
-    resetVariations(scopeRow(row.id), title, (v) => v);
+  const rename = str(s.newTitle, 2000);
+  const next = rename || title;
+  const clash = next.toLowerCase() !== String(row.title).toLowerCase()
+    ? (db.prepare('SELECT id, parent_id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?) AND id <> ?').get(fid, next, row.id) as any)
+    : null;
+  if (clash && (ai.has('title') || rename)) report.push(`${label}: did not change the title to "${next}": ${scopeLabel(clash)} has this title.`);
+  else {
+    const oldTitle = String(row.title);
+    if (setText('scopes', row, ai, 'title', 'title', next, label, report, !!rename)) {
+      // Remember the old title, as for a rename by a person: the AI skill finds scopes by title.
+      if (oldTitle.trim().toLowerCase() !== next.toLowerCase()) buryScope(fid, row.id, oldTitle);
+      // The titles of the variations come from the scope title.
+      if (row.columns !== null) resetVariations(scopeRow(row.id), next, (v) => v);
+    }
   }
   if (s.description === null) clearScopeDescription(row, ai, label, report);
   else setText('scopes', row, ai, 'description', 'description', str(s.description), label, report);
@@ -1123,17 +1181,21 @@ function writeScopeGroup(fid: number, row: any, ai: Set<string>, title: unknown,
   const known = aiScopeGroup(fid, title, label, report, false);
   if (known === undefined || (known !== null && known === row.group_id)) return;
   const name = (id: number | null) => (id === null ? null : ((db.prepare('SELECT title FROM scope_groups WHERE id = ?').get(id) as any)?.title as string));
-  if (!ai.has('group') && (row.group_id !== null || row.group_by_person)) {
-    const was = row.group_id === null ? 'no group' : `group "${name(row.group_id)}"`;
-    report.push(`${label}: kept ${was}, which a person chose or checked. Suggested group "${title.trim()}" was not saved.`);
+  // A refused group is remembered by its title (the ID of an AI group changes when it is made again). Old rows have the ID.
+  const knownTitle = known === null ? null : ((db.prepare('SELECT title FROM scope_groups WHERE id = ?').get(known) as any)?.title as string | undefined);
+  if (isRejected('scope', row.id, 'group', title.trim()) || (knownTitle && isRejected('scope', row.id, 'group', knownTitle)) || (known !== null && isRejected('scope', row.id, 'group', known))) {
+    report.push(`${label}: did not put it in group "${title.trim()}": a person changed this group back before.`);
     return;
   }
+  const byPerson = !ai.has('group') && (row.group_id !== null || row.group_by_person);
   const gid = known ?? scopeGroupId(fid, title, true)!;
   const before = name(row.group_id);
   report.push(
-    before
-      ? `${label}: moved from the AI draft group "${before}" to "${name(gid)}".`
-      : `${label}: put in group "${name(gid)}". It shows as AI draft until a person checks it.`,
+    byPerson
+      ? `${label}: moved from ${before ? `group "${before}"` : 'no group'}, which a person chose or checked, to "${name(gid)}". The review shows the old group, with "Change back".`
+      : before
+        ? `${label}: moved from the AI draft group "${before}" to "${name(gid)}".`
+        : `${label}: put in group "${name(gid)}". It shows as AI draft until a person checks it.`,
   );
   keepBefore('scope', row.id, 'group', row.group_id, !ai.has('group'));
   db.prepare('UPDATE scopes SET group_id = ? WHERE id = ? OR parent_id = ?').run(gid, row.id, row.id);
@@ -1278,55 +1340,156 @@ function resolveScopes(fid: number, keys: (string | number)[], scopeIds: Map<str
   return [...new Set(ids.filter((id): id is number => id !== null))];
 }
 
-/**
- * Adds a screenshot from a local image file. The caption names what it shows. Its fixed form (captionKey)
- * is the match key: the skill does not add a second screenshot with the same key to a feature, also
- * after a person changed the caption. For an AI screenshot that no person checked, missing scope tags
- * are added; else they are only suggested. The image file is read only for a new screenshot.
- */
-function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map<string, number | null>, report: string[]) {
-  const caption = str(x?.caption, 500);
-  if (!caption) throw new EditError(`A screenshot of F-${fid} has no caption. Say what it shows`);
-  const key = captionKey(caption);
-  const keys = list<string | number>(x.scopes, `scopes of screenshot "${caption}"`);
-  const want = resolveScopes(fid, keys, scopeIds, `Screenshot "${caption}"`, report);
-  if (keys.length && !want.length) return void report.push(`F-${fid} screenshot "${caption}": not added, because a person deleted, moved or marked "To remove" all its scopes.`);
-  const label = `F-${fid} screenshot "${caption}"`;
-
-  const cur = db.prepare('SELECT * FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1').get(fid, key) as any;
-  if (cur?.removed) return void report.push(`${label}: a person deleted it before. Not added again.`);
-  if (cur) {
-    const named = captionKey(cur.caption) === key ? '' : ` (a person changed the caption to "${cur.caption}")`;
-    const have = new Set((db.prepare('SELECT scope_id FROM screenshot_scopes WHERE screenshot_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
-    const missing = want.filter((s) => !have.has(s));
-    if (!missing.length) return void report.push(`${label}: already there${named}. Image not changed.`);
-    if (cur.checked) return void report.push(`${label}: a person checked it${named}. Not changed. Suggested scopes: ${names(missing)}.`);
-    addScopeTags('screenshot_scopes', cur.id, missing);
-    return void report.push(`${label}: already there${named}. Added ${names(missing)}. Image not changed.`);
-  }
-
-  // A new screenshot: now the file must be there.
-  const file = str(x.file, 4000);
+/** Reads a local image file for a screenshot: its bytes and type. */
+function readImage(file: string, caption: string): { data: Buffer; mime: string } {
   if (!path.isAbsolute(file)) throw new EditError(`Screenshot "${caption}": give the full path of the image file, not "${file}"`);
   const stat = fs.existsSync(file) ? fs.statSync(file) : null;
   if (!stat?.isFile()) throw new EditError(`Screenshot "${caption}": no image file "${file}"`);
   if (stat.size > SCREENSHOT_MAX_BYTES) throw new EditError(`Screenshot "${caption}": the image is too large (10 MB or less)`);
-  let data: Buffer;
-  let mime: string;
   try {
-    data = fs.readFileSync(file);
-    mime = imageType(data);
+    const data = fs.readFileSync(file);
+    return { data, mime: imageType(data) };
   } catch (e) {
     throw new EditError(`Screenshot "${caption}" (${file}): ${(e as Error).message}`);
   }
-  const id = Number(
-    db
-      .prepare("INSERT INTO screenshots (project_id, feature_id, caption, mime, sort, source, match_key) VALUES (?, ?, ?, ?, ?, 'ai', ?)")
-      .run(p.id, fid, caption, mime, nextSort('screenshots', 'feature_id = ?', fid), key).lastInsertRowid,
-  );
-  db.prepare('INSERT INTO screenshot_images (screenshot_id, data) VALUES (?, ?)').run(id, data);
-  addScopeTags('screenshot_scopes', id, want);
-  report.push(`${label}: added${want.length ? ` with ${names(want)}` : ' (no scope)'}.`);
+}
+
+/**
+ * Adds a screenshot from a local image file, or changes one that is there.
+ *  - A screenshot that is there: found by its ID (IMG-12 or 12), or by the first caption it got (captionKey),
+ *    also after a person changed the caption. A person's own upload has no first caption: use its ID.
+ *  - The AI can change any screenshot, also one that a person checked or uploaded: add tags (scopes),
+ *    take tags off (removeScopes), give a new caption (newCaption), replace the image (replace: true with
+ *    file), delete it (remove: true), or mark the image as old (stale: why). The screenshot from before the
+ *    first change is kept (screenshot_before), and the review shows the change with "Change back".
+ *  - Not changed: a screenshot that a person deleted, and a value that a person changed back before.
+ */
+function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map<string, number | null>, report: string[]) {
+  const byId = x?.id !== undefined && x?.id !== null && String(x.id).trim() !== '';
+  let cur: any;
+  if (byId) {
+    const n = Number(String(x.id).trim().replace(/^.*?IMG-/i, ''));
+    cur = db.prepare('SELECT * FROM screenshots WHERE id = ? AND feature_id = ?').get(n, fid);
+    if (!cur) throw new EditError(`F-${fid} has no screenshot IMG-${n}`);
+  }
+  const caption = str(x?.caption, 500) || (cur?.caption as string) || '';
+  if (!caption) throw new EditError(`A screenshot of F-${fid} has no caption. Say what it shows`);
+  const key = captionKey(caption);
+  cur ??= db.prepare('SELECT * FROM screenshots WHERE feature_id = ? AND match_key = ? ORDER BY removed, id LIMIT 1').get(fid, key);
+  const keys = list<string | number>(x.scopes, `scopes of screenshot "${caption}"`);
+  const want = resolveScopes(fid, keys, scopeIds, `Screenshot "${caption}"`, report);
+  const label = cur ? `F-${fid} screenshot IMG-${cur.id} "${cur.caption}"` : `F-${fid} screenshot "${caption}"`;
+  if (!cur && keys.length && !want.length) return void report.push(`${label}: not added, because a person deleted, moved or marked "To remove" all its scopes.`);
+
+  if (!cur) {
+    if (x.remove || x.stale || list(x.removeScopes, 'removeScopes').length || x.newCaption) throw new EditError(`${label}: no such screenshot to change. Give its ID (IMG-…) or its first caption`);
+    const { data, mime } = readImage(str(x.file, 4000), caption);
+    const id = Number(
+      db
+        .prepare("INSERT INTO screenshots (project_id, feature_id, caption, mime, sort, source, match_key) VALUES (?, ?, ?, ?, ?, 'ai', ?)")
+        .run(p.id, fid, caption, mime, nextSort('screenshots', 'feature_id = ?', fid), key).lastInsertRowid,
+    );
+    db.prepare('INSERT INTO screenshot_images (screenshot_id, data) VALUES (?, ?)').run(id, data);
+    addScopeTags('screenshot_scopes', id, want);
+    return void report.push(`${label}: added as IMG-${id}${want.length ? ` with ${names(want)}` : ' (no scope)'}.`);
+  }
+  // A person deleted it: the row stays only as a marker.
+  if (cur.removed && cur.ai_change === null) return void report.push(`${label}: a person deleted it before. Not added again or changed.`);
+  // The AI deleted it, and a person did not review the delete yet.
+  if (cur.removed) return void report.push(`${label}: the AI deleted it, and the delete waits for a person's review. Not changed.`);
+  // An AI screenshot that no person checked is still a draft: a change keeps it a draft, with no "Change back".
+  const draft = cur.source === 'ai' && !cur.checked && cur.ai_change === null;
+
+  const done: string[] = [];
+  const firstReport = report.length;
+  const changes = new Set<string>(cur.ai_change === null ? [] : json(cur.ai_change));
+  const changesBefore = changes.size;
+  // The screenshot from before the first AI change, for "Change back".
+  const keepState = () => {
+    if (draft) return;
+    if (db.prepare('SELECT 1 FROM screenshot_before WHERE screenshot_id = ?').get(cur.id)) return;
+    const tags = (db.prepare('SELECT scope_id FROM screenshot_scopes WHERE screenshot_id = ? ORDER BY scope_id').all(cur.id) as any[]).map((r) => r.scope_id);
+    db.prepare('INSERT INTO screenshot_before (screenshot_id, caption, scope_ids) VALUES (?, ?, ?)').run(cur.id, cur.caption, JSON.stringify(tags));
+  };
+  const have = new Set((db.prepare('SELECT scope_id FROM screenshot_scopes WHERE screenshot_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
+
+  // Tags to add.
+  const add = want.filter((s) => !have.has(s));
+  const refused = add.filter((s) => isRejected('screenshot', cur.id, 'tag', s));
+  if (refused.length) report.push(`${label}: did not add ${names(refused)}: a person took this tag off before.`);
+  const toAdd = add.filter((s) => !refused.includes(s));
+  if (toAdd.length) {
+    keepState();
+    addScopeTags('screenshot_scopes', cur.id, toAdd);
+    changes.add('tags');
+    done.push(`added ${names(toAdd)}`);
+  }
+  // Tags to take off.
+  const offKeys = list<string | number>(x.removeScopes, `removeScopes of screenshot "${caption}"`);
+  const offAll = resolveScopes(fid, offKeys, scopeIds, `Screenshot "${caption}"`, report).filter((s) => have.has(s));
+  const keepOn = offAll.filter((s) => isRejected('screenshot', cur.id, 'tag-off', s));
+  if (keepOn.length) report.push(`${label}: did not take off ${names(keepOn)}: a person put this tag back before.`);
+  const off = offAll.filter((s) => !keepOn.includes(s));
+  if (off.length) {
+    keepState();
+    const del = db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ? AND scope_id = ?');
+    for (const s of off) del.run(cur.id, s);
+    changes.add('tags');
+    done.push(`took off ${names(off)}`);
+  }
+  // A new caption. The first caption stays the match key.
+  const newCaption = str(x.newCaption, 500);
+  if (newCaption && newCaption !== cur.caption) {
+    if (isRejected('screenshot', cur.id, 'caption', newCaption)) report.push(`${label}: did not change the caption to "${newCaption}": a person changed it back before.`);
+    else {
+      keepState();
+      db.prepare('UPDATE screenshots SET caption = ? WHERE id = ?').run(newCaption, cur.id);
+      changes.add('caption');
+      done.push(`new caption "${newCaption}"`);
+    }
+  }
+  // A new image.
+  if (x.replace && !cur.stale && isRejected('screenshot', cur.id, 'image', 'replace')) {
+    report.push(`${label}: did not replace the image: a person changed the image back before. Send "stale" with the reason when the image is old now.`);
+  } else if (x.replace) {
+    const { data, mime } = readImage(str(x.file, 4000), caption);
+    keepState();
+    // Keep the first image only: a second replace before a review keeps the image of the person.
+    db.prepare('UPDATE screenshot_before SET data = (SELECT data FROM screenshot_images WHERE screenshot_id = ?), mime = ? WHERE screenshot_id = ? AND data IS NULL').run(cur.id, cur.mime, cur.id);
+    db.prepare('UPDATE screenshot_images SET data = ? WHERE screenshot_id = ?').run(data, cur.id);
+    db.prepare('UPDATE screenshots SET mime = ?, image_at = ?, stale = NULL WHERE id = ?').run(mime, new Date().toISOString(), cur.id);
+    changes.add('image');
+    done.push('replaced the image');
+  }
+  // Old image: the AI review after a sync marks it, a new image clears it.
+  const stale = str(x.stale, 1000);
+  if (stale && !done.includes('replaced the image') && stale !== cur.stale) {
+    db.prepare('UPDATE screenshots SET stale = ? WHERE id = ?').run(stale, cur.id);
+    done.push(`marked as old: ${stale}`);
+  }
+  // Delete. The image stays until a person checks the delete, so "Change back" can bring it back.
+  if (x.remove && !cur.removed) {
+    if (isRejected('screenshot', cur.id, 'removed', 1)) report.push(`${label}: not deleted: a person brought it back before.`);
+    else {
+      keepState();
+      db.prepare('UPDATE screenshots SET removed = 1 WHERE id = ?').run(cur.id);
+      // A draft that the AI deletes is gone for good (a marker row, as for a person's delete).
+      if (draft) {
+        db.prepare('DELETE FROM screenshot_images WHERE screenshot_id = ?').run(cur.id);
+        db.prepare('DELETE FROM screenshot_scopes WHERE screenshot_id = ?').run(cur.id);
+      }
+      else changes.add('removed');
+      done.push('deleted it');
+    }
+  }
+  if (!done.length) {
+    if (report.length === firstReport) report.push(`${label}: already there. Not changed.`);
+    return;
+  }
+  if (changes.size && !draft) db.prepare('UPDATE screenshots SET ai_change = ? WHERE id = ?').run(JSON.stringify([...changes].sort()), cur.id);
+  const changedNow = changes.size > changesBefore || done.some((d) => d.startsWith('replaced') || d.startsWith('new caption') || d.startsWith('added') || d.startsWith('took off'));
+  const person = changedNow && (cur.source !== 'ai' || cur.checked) ? ' A person checked or uploaded it: the review shows the change, with "Change back".' : '';
+  report.push(`${label}: ${done.join(', ')}.${person}`);
 }
 
 function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<string, number | null>, report: string[]) {
