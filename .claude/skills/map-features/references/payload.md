@@ -64,7 +64,8 @@
 - Feature `id`: give it to add to an existing feature. Leave it out for a new
   feature. A new feature with the same title as an existing one is refused.
 - Every field except `title` (for a new feature) is optional. Leave out what
-  you do not know or do not change.
+  you do not know or do not change. Exception: always send `priority` for a
+  new feature, and for a feature that has no priority.
 - `title`, `description`, `priority`, `group`: one value each. The tool fills an
   empty field, and replaces text only while the feature is an AI draft.
 - `roles` (labels): short names that many features share. They are
@@ -207,9 +208,22 @@ the place and what the image shows.
 > "Settings > Prices tab: the option to hide the wholesale price column"
 > "Product list in the admin: the wholesale price column with the role name"
 
-**priority**: how bad a failure is for a store. `high`: stores lose money or
-orders, or customers see wrong prices. `medium`: a feature does not work, with a
-workaround. `low`: display or text. Leave empty when unsure.
+**priority**: how many people use the feature, and how bad a failure is for a
+store. Always choose one level. Use these rules in this order:
+
+1. A feature in an `Integration/<plugin>` group is `low`. This rule has no
+   exceptions, also for a security check.
+2. `high`: most customers or store owners use it, or a failure causes harm:
+   the store loses money, the wrong people see prices, a security check fails,
+   or the site breaks. Examples: the per-product wholesale price, "Disable
+   coupons for wholesale customers", "Only admins can save wholesale settings".
+3. `medium`: store owners use it often, and a failure is an inconvenience or a
+   display error. Examples: the wholesale price text, quick edit of wholesale
+   prices, the filter of the orders list by wholesale role.
+4. `low`: all other features: upsells, onboarding, licenses, help pages, review
+   requests and small admin helpers. Examples: "Upsell pages for other
+   plugins", the Getting Started page, the plugin row links on the Plugins
+   screen.
 
 **scopes**: the separate things the feature does, like the scenarios of a
 test. Each has a result a tester can see. One scope = one thing to check.

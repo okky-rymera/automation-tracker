@@ -270,7 +270,7 @@ What goes in each field, in short (details and examples in `references/payload.m
 | title | The feature in a few plain words, as a store owner says it |
 | group | The product feature it belongs to, for example "Wholesale Price" (see Groups). Not a screen type like "Settings" |
 | description | 1–3 sentences: what it does and why a store owner uses it |
-| priority | high / medium / low: how bad a failure is for stores. Leave empty if unsure |
+| priority | high / medium / low: how many people use it and how bad a failure is. Integration groups are always low. Always choose one (see references/payload.md) |
 | roles | Labels: who uses or sees it ("Admin", "Wholesale customer") |
 | requirements | List: what must be true for every scope: plugins, settings, data, the logged-in user |
 | where | List: admin screens, settings tabs, shop pages, REST routes |
