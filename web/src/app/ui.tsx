@@ -345,6 +345,30 @@ export function useEscapeClose(onClose: () => void) {
   return ref;
 }
 
+/**
+ * A screenshot at full size over the page. A click or Escape closes it. It takes the focus when it opens,
+ * and gives the focus back to the button that opened it. Its Escape runs before the Escape of a popup
+ * under it, so only the image closes.
+ */
+export function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    ref.current?.focus();
+    const on = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      e.preventDefault();
+      onClose();
+    };
+    addEventListener('keydown', on, true);
+    return () => {
+      removeEventListener('keydown', on, true);
+      if (opener?.isConnected) opener.focus();
+    };
+  }, [onClose]);
+  return <button ref={ref} className="lightbox" onClick={onClose} aria-label="Close the image"><img src={src} alt="" /></button>;
+}
+
 export function Dialog({ title, sub, onClose, children, foot, filter, onFilter, wide }: {
   title: string; sub?: ReactNode; onClose: () => void; children: ReactNode; foot?: ReactNode; filter?: string; onFilter?: (v: string) => void; wide?: boolean;
 }) {

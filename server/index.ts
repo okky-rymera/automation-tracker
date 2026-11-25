@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
+import sharp from 'sharp';
 import { FRAMEWORKS, ROOT, getProject, importProjectsJson, loadProjects, safeRepoPath, writeCoverageConfig, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
 import { EditError, edits, featureData, screenshotData, screenshotInfo, sweepBefore, sweepReviewed } from './features.ts';
@@ -385,17 +386,42 @@ app.delete('/api/projects/:id/parked-units', edit((req) => {
 app.post(SCREENSHOT_UPLOAD, edit((req) => edits.addScreenshot(P(req), req.params.fid, req.body)));
 app.patch('/api/projects/:id/screenshots/:sid', edit((req) => edits.updateScreenshot(P(req), req.params.sid, req.body)));
 app.delete('/api/projects/:id/screenshots/:sid', edit((req) => edits.deleteScreenshot(P(req), req.params.sid)));
+/** The size of the small copy: 2 times the 56 x 35 pixels of a picture on a scope row, for sharp screens. */
+const SMALL = { width: 112, height: 70 };
+/** Small copies that the server made, by tag. About 3 KB each. The oldest goes first after 2000. */
+const smallCopies = new Map<string, Buffer>();
+async function smallCopy(tag: string, id: number): Promise<Buffer> {
+  const have = smallCopies.get(tag);
+  if (have) return have;
+  // The top left of the image, as the scope row shows it. Animated GIFs give their first frame.
+  const out = await sharp(screenshotData(id)).resize({ ...SMALL, fit: 'cover', position: 'left top' }).webp({ quality: 80 }).toBuffer();
+  smallCopies.set(tag, out);
+  if (smallCopies.size > 2000) smallCopies.delete(smallCopies.keys().next().value!);
+  return out;
+}
+
 /**
  * The image of a screenshot. The browser keeps a copy, but asks each time if the copy is still good
  * (a restored backup can give an ID another image). The tag is the ID and upload time, so the
  * answer "still good" (304) does not read the image.
+ * With ?size=small, the answer is a small WebP copy (112 x 70) for the pictures on the scope rows.
  */
-app.get('/api/projects/:id/screenshots/:sid', (req, res) => {
+app.get('/api/projects/:id/screenshots/:sid', async (req, res) => {
   const info = screenshotInfo(P(req), req.params.sid);
   if (!info) return res.status(404).json({ error: 'Unknown screenshot' });
-  const etag = `"${info.id}-${info.createdAt.replace(/\D/g, '')}"`;
+  const small = req.query.size === 'small';
+  const tag = `${info.id}-${info.createdAt.replace(/\D/g, '')}${small ? '-s' : ''}`;
+  const etag = `"${tag}"`;
   res.set({ ETag: etag, 'Cache-Control': 'private, no-cache', 'X-Content-Type-Options': 'nosniff' });
   if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  if (small) {
+    try {
+      return res.type('image/webp').send(await smallCopy(tag, info.id));
+    } catch (e) {
+      // An image that sharp cannot read: send the full image, so the row still shows it.
+      console.error(`Screenshot ${info.id}: no small copy:`, (e as Error).message);
+    }
+  }
   const data = screenshotData(info.id);
   res.type(info.mime).send(Buffer.from(data.buffer, data.byteOffset, data.byteLength)); // no copy of the bytes
 });

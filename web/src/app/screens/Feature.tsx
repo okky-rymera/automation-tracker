@@ -1,8 +1,8 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { featureTotal, mutate, pct, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot, type TrackedIssue } from '../../api';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { featureTotal, mutate, pct, screenshotSmallUrl, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot, type TrackedIssue } from '../../api';
 import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, featureIssues, issueOpen, scopeIdLabel, scopeIssues, anyScopeLabel, scopeCountText, scopeLinks, scopesForIssue, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
-import { AddRow, Dialog, IdBtn, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, type PickRow } from '../ui';
+import { AddRow, Dialog, IdBtn, Lightbox, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
 
 const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', settings: 'setting', questions: 'question' };
@@ -235,6 +235,7 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
   const [flt, setFlt] = useState<'all' | 'gaps' | 'review' | 'remove'>('all');
   const [adding, setAdding] = useState(false);
   const [addingGroup, setAddingGroup] = useState(false);
+  const shotsBy = useMemo(() => shotsByScope(f.screenshots), [f.screenshots]);
   const status = (id: number) => scopeStatus(f, id, t.testById);
   const marked = (s: ScopeX) => scopeToRemove(f, s);
   // A scope with variations counts as its variations.
@@ -309,7 +310,7 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
                 ><ITrash s={14} /></button>
               )}
             </div>
-            {list.map((s) => <ScopeRow key={s.id} t={t} f={f} s={s} open={openCard === s.id} onOpen={() => openTo(s.id)} />)}
+            {list.map((s) => <ScopeRow key={s.id} t={t} f={f} s={s} shotsBy={shotsBy} open={openCard === s.id} onOpen={() => openTo(s.id)} />)}
           </div>
         );
       })}
@@ -352,7 +353,7 @@ function ScopesTab({ t, i, openScope }: { t: Tracker; i: FeatureInfo; openScope:
  * coverage and its tests. A line opens in place for the tests and screenshots of that variation. The scope
  * keeps the title, description, requirements, group and move: a variation has none of them.
  */
-function ScopeRow({ t, f, s, open, onOpen }: { t: Tracker; f: FeatureX; s: ScopeX; open: boolean; onOpen: () => void }) {
+function ScopeRow({ t, f, s, shotsBy, open, onOpen }: { t: Tracker; f: FeatureX; s: ScopeX; shotsBy: Map<number, Screenshot[]>; open: boolean; onOpen: () => void }) {
   return (
     <div className={`scope${scopeToRemove(f, s) ? ' scope-marked' : ''}`} id={`scope-${s.id}`}>
       <div className="scope-head-wrap">
@@ -363,6 +364,53 @@ function ScopeRow({ t, f, s, open, onOpen }: { t: Tracker; f: FeatureX; s: Scope
           <INext s={14} />
         </button>
       </div>
+      {!scopeToRemove(f, s) && <RowShots p={t.project} shots={rowShots(f, s, shotsBy)} hasVars={!!s.columns} onMore={onOpen} />}
+    </div>
+  );
+}
+
+/** The screenshots of each scope or variation ID. The scopes tab makes it one time for all its rows. */
+function shotsByScope(shots: Screenshot[]): Map<number, Screenshot[]> {
+  const by = new Map<number, Screenshot[]>();
+  for (const sh of shots) for (const id of sh.scopeIds) {
+    const list = by.get(id);
+    if (list) list.push(sh); else by.set(id, [sh]);
+  }
+  return by;
+}
+
+/** The screenshots of a scope and of its variations that are not marked "To remove", each one time. */
+function rowShots(f: FeatureX, s: ScopeX, shotsBy: Map<number, Screenshot[]>): Screenshot[] {
+  if (!s.columns) return shotsBy.get(s.id) ?? [];
+  const vars = (variationsOf(f, s.id) as ScopeX[]).filter((v) => !scopeToRemove(f, v));
+  const seen = new Map<number, Screenshot>();
+  for (const id of [s.id, ...vars.map((v) => v.id)]) for (const sh of shotsBy.get(id) ?? []) seen.set(sh.id, sh);
+  return [...seen.values()];
+}
+
+const ROW_SHOTS = 6;
+
+/**
+ * Small screenshots on a scope row, so a person sees them without opening the scope. A click shows one
+ * at full size. After 6, a "+N" button opens the scope. Nothing when the scope has no screenshots.
+ * The popup of a scope with variations shows the screenshots of a variation only when its line is open.
+ */
+function RowShots({ p, shots, hasVars, onMore }: { p: string; shots: Screenshot[]; hasVars: boolean; onMore: () => void }) {
+  const [big, setBig] = useState<number | null>(null);
+  const closeBig = useCallback(() => setBig(null), []);
+  if (!shots.length) return null;
+  const more = shots.length - ROW_SHOTS;
+  return (
+    <div className="row-shots">
+      {shots.slice(0, ROW_SHOTS).map((sh) => (
+        <button key={sh.id} className="row-shot" onClick={() => setBig(sh.id)} title={sh.caption || `IMG-${sh.id}: show full size`}>
+          <img src={screenshotSmallUrl(p, sh.id)} alt={sh.caption || `Screenshot IMG-${sh.id}`} loading="lazy" />
+        </button>
+      ))}
+      {more > 0 && <button className="row-shot row-shot-more" onClick={onMore} title={hasVars ? 'Open the scope. The screenshots are on each variation.' : 'Open the scope to see all screenshots'}>+{more}</button>}
+      {big !== null && (
+        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
+      )}
     </div>
   );
 }
@@ -421,6 +469,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
   const [mq, setMq] = useState('');
   const shots = f.screenshots.filter((x) => x.scopeIds.includes(s.id));
   const [big, setBig] = useState<number | null>(null);
+  const closeBig = useCallback(() => setBig(null), []);
   const tags = <ScopeStatusTags t={t} f={f} s={s} />;
   const q = mq.trim().toLowerCase();
   const have = new Set(links.map((l) => l.testId));
@@ -576,7 +625,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
           </div>
         </div>
       {big !== null && (
-        <button className="lightbox" onClick={() => setBig(null)} aria-label="Close the image"><img src={screenshotUrl(p, big)} alt="" /></button>
+        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
       )}
       {modal === 'link' && (
         <LinkPicker t={t} have={have} title={`Link a test to S-${s.id}`} sub={`${s.title}. Tests in no feature come first.`} onClose={() => setModal(null)}
@@ -739,6 +788,7 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
   const shots = f.screenshots.filter((x) => x.scopeIds.includes(v.id));
   const [linking, setLinking] = useState(false);
   const [big, setBig] = useState<number | null>(null);
+  const closeBig = useCallback(() => setBig(null), []);
   const columns = s.columns ?? [];
   const shown = (v.values ?? []).filter(Boolean).join(', ');
   const setValue = (i: number, x: string) => act(() => mutate('PATCH', url, { values: columns.map((_, k) => (k === i ? x : (v.values?.[k] ?? ''))) }), 'Value changed');
@@ -793,7 +843,7 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
         >Delete variation</button>
       </div>
       {big !== null && (
-        <button className="lightbox" onClick={() => setBig(null)} aria-label="Close the image"><img src={screenshotUrl(p, big)} alt="" /></button>
+        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
       )}
       {linking && (
         <LinkPicker t={t} have={new Set(links.map((l) => l.testId))} title={`Link a test to SV-${v.id}`} sub={`${v.title}. Tests in no feature come first.`} onClose={() => setLinking(false)}
@@ -1059,6 +1109,7 @@ function ShotsTab({ t, f }: { t: Tracker; f: FeatureX }) {
   const base = `/api/projects/${p}`;
   const file = useRef<HTMLInputElement>(null);
   const [big, setBig] = useState<number | null>(null);
+  const closeBig = useCallback(() => setBig(null), []);
   const [tagging, setTagging] = useState<Screenshot | null>(null);
   const upload = async (files: FileList | File[] | null) => {
     for (const fl of Array.from(files ?? [])) {
@@ -1106,7 +1157,7 @@ function ShotsTab({ t, f }: { t: Tracker; f: FeatureX }) {
       <button className="shot-add" onClick={() => file.current?.click()}><IPlus s={16} />Add a screenshot (or paste one)</button>
       <input ref={file} type="file" accept="image/*" multiple hidden onChange={(e) => (void upload(e.target.files), (e.target.value = ''))} />
       {big !== null && (
-        <button className="lightbox" onClick={() => setBig(null)} aria-label="Close the image"><img src={screenshotUrl(p, big)} alt="" /></button>
+        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
       )}
       {tagging && (
         <ScopeTags f={f} title={`Scopes that IMG-${tagging.id} shows`} sub="No scope: the image shows the feature in general." ids={tagging.scopeIds}

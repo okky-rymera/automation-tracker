@@ -150,6 +150,8 @@ export interface Screenshot {
 /** A screenshot that the AI deleted, until a person checks the delete. */
 export interface RemovedScreenshot { id: number; caption: string; scopeIds: number[] }
 export const screenshotUrl = (project: string, id: number) => `/api/projects/${project}/screenshots/${id}`;
+/** A small copy (112 x 70, the top left of the image) for the pictures on the scope rows. */
+export const screenshotSmallUrl = (project: string, id: number) => `${screenshotUrl(project, id)}?size=small`;
 
 /** One sentence in a feature or scope list (requirements, notes, out of scope, where, settings, open questions). */
 export interface FeatureItem {
