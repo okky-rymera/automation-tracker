@@ -685,10 +685,11 @@ async function writePlan(p: ProjectConfig, r: any) {
  * One GraphQL call for each repo. Linked PRs: the "Development" PRs of the issue (a PR that says
  * "Fixes #12", or that a person linked), merged and closed ones too.
  */
-export async function syncIssues(projectId: string, ids?: number[]): Promise<{ checked: number }> {
+export async function syncIssues(projectId: string, ids?: number[]): Promise<{ checked: number; notFound: number }> {
   const rows = (ids
     ? db.prepare(`SELECT id, repo, number FROM issues WHERE project_id = ? AND status = 'created' AND id IN (${ids.map(() => '?').join(',')})`).all(projectId, ...ids)
     : db.prepare("SELECT id, repo, number FROM issues WHERE project_id = ? AND status = 'created' AND COALESCE(state, 'OPEN') = 'OPEN'").all(projectId)) as any[];
+  let notFound = 0;
   const byRepo = new Map<string, any[]>();
   for (const r of rows) byRepo.set(r.repo, [...(byRepo.get(r.repo) ?? []), r]);
   for (const [repo, list] of byRepo) {
@@ -700,12 +701,27 @@ export async function syncIssues(projectId: string, ids?: number[]): Promise<{ c
       // The check time is set too, so the next check is the next day, not the next minute.
       if (!v) {
         db.prepare('UPDATE issues SET error = ?, synced_at = ? WHERE id = ?').run(NOT_FOUND, at, r.id);
+        notFound++;
         continue;
       }
       db.prepare('UPDATE issues SET state = ?, title = ?, url = ?, prs = ?, error = CASE WHEN error = ? THEN NULL ELSE error END, synced_at = ? WHERE id = ?').run(v.state, v.title, v.url, JSON.stringify(v.prs), NOT_FOUND, at, r.id);
     }
   }
-  return { checked: rows.length };
+  return { checked: rows.length, notFound };
+}
+
+/**
+ * Checks all open issues of a project, with only one check for each project at a time. A second call
+ * while a check runs (the daily timer, or one more click on "Check GitHub") gets the result of that check.
+ */
+const running = new Map<string, Promise<{ checked: number; notFound: number }>>();
+export function syncOpenIssues(projectId: string) {
+  let run = running.get(projectId);
+  if (!run) {
+    run = syncIssues(projectId).finally(() => running.delete(projectId));
+    running.set(projectId, run);
+  }
+  return run;
 }
 
 const NOT_FOUND = 'Not found on GitHub at the last check: the issue was deleted, or you cannot see its repo now.';
@@ -813,7 +829,7 @@ export async function syncDueIssues(log: (l: string) => void = console.log) {
         .get(p.id, before);
       if (!due) continue;
       try {
-        const r = await syncIssues(p.id);
+        const r = await syncOpenIssues(p.id);
         log(`Issue check: ${p.id}, ${r.checked} open issue${r.checked === 1 ? '' : 's'}`);
       } catch (e) {
         // Mark the check as done, so a GitHub error does not repeat each minute. It tries again the next day.

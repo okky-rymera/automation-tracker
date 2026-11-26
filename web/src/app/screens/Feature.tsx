@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { featureTotal, mutate, pct, screenshotSmallUrl, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot, type TrackedIssue } from '../../api';
 import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, featureIssues, issueOpen, scopeIdLabel, scopeIssues, anyScopeLabel, scopeCountText, scopeLinks, scopesForIssue, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
-import { AddRow, Dialog, IdBtn, Lightbox, InlineText, INext, IPlus, IPrev, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, type PickRow } from '../ui';
+import { AddRow, Dialog, IdBtn, Lightbox, InlineText, INext, IPlus, IPrev, IRefresh, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, useSay, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
 
 const ITEM_KIND: Record<ItemField, string> = { requirements: 'requirement', notes: 'note', outOfScope: 'out_of_scope', where: 'where', settings: 'setting', questions: 'question' };
@@ -186,6 +186,7 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
                 ><IPlus />Create test issue</button>
               )}
               <button className="btn btn-ghost btn-sm add-btn" onClick={() => addIssue(act, `${url}/issues/link`, {}, `F-${f.id}`)} title="Add an issue that is on GitHub to this feature" aria-label="Add an issue"><IPlus />Add</button>
+              <CheckIssuesButton project={p} />
             </>}
           />
         </div>
@@ -595,6 +596,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
                     <span style={{ display: 'inline-flex', gap: 4 }}>
                       {!scopeToRemove(f, s) && <button className="btn btn-ghost btn-sm add-btn" onClick={createIssue} title="A GitHub issue to write tests for this scope, made by the AI with no test plan"><IPlus />Create test issue</button>}
                       <button className="btn btn-ghost btn-sm add-btn" onClick={() => addIssue(act, `${base}/features/${f.id}/issues/link`, { scopeId: s.id }, `S-${s.id}`)} title="Add an issue that is on GitHub to this scope" aria-label="Add an issue"><IPlus />Add</button>
+                      <CheckIssuesButton project={p} />
                     </span>
                   </div>
                   <IssueList t={t} f={f} issues={issues} bare />
@@ -1243,6 +1245,28 @@ function addIssue(act: ReturnType<typeof useAct>, url: string, body: object, wha
 
 const PR_TAG: Record<string, [string, string]> = { OPEN: ['tag-new', 'Open'], MERGED: ['tag-ai', 'Merged'], CLOSED: ['tag-ro', 'Closed'] };
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+
+/** Checks all open issues of the project on GitHub now: one call for each repo, so it costs the same as one issue. */
+function CheckIssuesButton({ project }: { project: string }) {
+  const say = useSay();
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const { checked: n, notFound } = await mutate<{ checked: number; notFound: number }>('POST', `/api/projects/${project}/issues/sync`);
+      say(!n ? 'No open issues to check' : `Checked ${n} open issue${n === 1 ? '' : 's'} on GitHub${notFound ? `, ${notFound} not found on GitHub` : ''}`);
+    } catch (e) {
+      say((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button className="btn btn-ghost btn-sm add-btn" onClick={run} disabled={busy} title="Check the state and linked PRs of all open issues of the project on GitHub now, not only the issues here. The app also does this at the daily sync interval (24 hours by default)." aria-label="Check the issues on GitHub">
+      <IRefresh />{busy ? 'Checking…' : 'Check GitHub'}
+    </button>
+  );
+}
 
 /**
  * GitHub issues that the app made for scopes with no test: the issue, its state, and its linked pull

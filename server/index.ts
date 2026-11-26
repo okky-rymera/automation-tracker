@@ -20,7 +20,7 @@ import { runTestOwners } from './run-tests.ts';
 import { featureCodeCoverage, mappedCodeTotals } from './feature-code.ts';
 import { cancelSync, startSync, syncState, SyncError, type TestMode } from './sync.ts';
 import { aiUpdateState, AiUpdateError, retryReview, startAiUpdate } from './ai-update.ts';
-import { forgetIssue, linkIssue, listIssues, startIssue, startPlan } from './issues.ts';
+import { forgetIssue, linkIssue, listIssues, startIssue, startPlan, syncOpenIssues } from './issues.ts';
 import { listParked, mapLoopState, MapLoopError, mapOlderRuns, mapRunReport, startMapLoop, stopMapLoop, unpark } from './map-loop.ts';
 
 const app = express();
@@ -300,6 +300,16 @@ app.post('/api/projects/:id/features/:fid/issues/link', async (req, res) => {
     if (e instanceof EditError) return res.status(400).json({ error: e.message });
     console.error(e);
     res.status(500).json({ error: (e as Error).message });
+  }
+});
+// Checks the state and linked PRs of all open issues of the project on GitHub now, as the daily check does.
+// Only one check runs for each project: a second call gets the result of the check that runs.
+app.post('/api/projects/:id/issues/sync', async (req, res) => {
+  try {
+    res.json(await syncOpenIssues(P(req)));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: `Could not check the issues on GitHub: ${(e as Error).message}` });
   }
 });
 // Writes the test plan of an issue that the app made, and puts it into the issue (again, after a failed plan).
