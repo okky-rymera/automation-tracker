@@ -77,7 +77,8 @@
 - `requirements`, `where`, `settings`, `notes`, `outOfScope`, `questions` (lists): one sentence for each
   item. A text adds an item; the same text again adds nothing.
   `{ "id": 12, "text": "…" }` corrects an item, and `removeItems` deletes items
-  by ID. Both work only on AI draft items. `feature <id>` shows the item IDs.
+  by ID. Both work on every item, also one that a person wrote: the review shows the
+  change, with "Change back". `feature <id>` shows the item IDs.
   The old `needs` and `rules` fields are refused: use `requirements`, and
   scopes or `notes`.
 - Scope: matched by `id` (`S-14` or `14`), or else by the same title in that
@@ -118,6 +119,12 @@
   feature). For a scope with variations, name the variations: `SV-44`, or the
   title "<scope title> (<values>)". Leave it out only when the test checks the
   feature in general.
+- Link `removeScopes`: scopes that the test does not check. They come off the link.
+  Link `"remove": true`: the test does not check this feature. The link is removed.
+  Both work on every link, also one that a person made: the review shows the change.
+- `deleteScopes` (feature): S-ids, SV-ids or titles of scopes that are wrong now
+  (the plugin does not do it, or another scope says the same). The scope goes with
+  its variations and requirements. The review shows the delete, with "Change back".
 - To add only links, send a feature with just `id` and `links`.
 - `leftOut` (top level, test units only): each test of the file that fits no
   feature, with a reason. Each test of the file needs a link or a `leftOut`
@@ -136,7 +143,7 @@
   entry that a person removed is not added again (the report says so).
   `scopes` (optional): the scopes that this code does, as titles or IDs, as for
   links. Leave it out only for code that does the feature in general. Scope tags
-  are only added; on an entry that a person tagged, the report only suggests.
+  are added, also on an entry that a person tagged: the review shows the change.
 
 - `screenshots`: images of the feature. `file` is the full path of a local
   PNG, JPEG, WebP or GIF file of 10 MB or less (save it in the session

@@ -77,14 +77,29 @@ export function dropBefore(kind: BeforeKind, rowId: number, fields?: string[]) {
   const del = db.prepare('DELETE FROM ai_before WHERE kind = ? AND row_id = ? AND field = ?');
   for (const f of fields) del.run(kind, rowId, f);
 }
+/**
+ * Marks an AI change on a link or code entry, so the review shows it as "Changed", with "Change back" (db step 44).
+ * old: the old values of the fields that change now (test, scopes, removed). A field that has an old value
+ * already keeps it: "Change back" goes back to the value from before the first AI change.
+ * An AI draft (source ai, not checked, no mark) gets no mark: the review shows it as "New" already.
+ */
+export function markAiChange(table: 'links' | 'feature_code', id: number, old: Record<string, unknown>) {
+  const r = db.prepare(`SELECT source, checked, ai_change FROM ${table} WHERE id = ?`).get(id) as any;
+  if (!r || (r.source === 'ai' && !r.checked && r.ai_change === null)) return;
+  const cur = r.ai_change === null ? {} : JSON.parse(r.ai_change);
+  for (const [k, v] of Object.entries(old)) if (!(k in cur)) cur[k] = v;
+  db.prepare(`UPDATE ${table} SET ai_change = ? WHERE id = ?`).run(JSON.stringify(cur), id);
+}
+/** A list of scope IDs in the form that ai_rejected keeps. */
+export const scopeSetKey = (ids: number[]) => [...new Set(ids)].sort((a, b) => a - b).join(',');
 /** A value in the form that ai_rejected keeps. */
 export const valueKey = (v: unknown) => String(v ?? '').trim().toLowerCase();
 /** True when a person changed this value back before: the AI does not write it again on this row. */
-export function isRejected(kind: BeforeKind | 'screenshot', rowId: number, field: string, value: unknown): boolean {
+export function isRejected(kind: BeforeKind | 'screenshot' | 'link' | 'code', rowId: number, field: string, value: unknown): boolean {
   return !!db.prepare('SELECT 1 FROM ai_rejected WHERE kind = ? AND row_id = ? AND field = ? AND value_key = ?').get(kind, rowId, field, valueKey(value));
 }
 /** Remembers a value that a person changed back ("Change back"). */
-export function rejectValue(kind: BeforeKind | 'screenshot', rowId: number, field: string, value: unknown) {
+export function rejectValue(kind: BeforeKind | 'screenshot' | 'link' | 'code', rowId: number, field: string, value: unknown) {
   db.prepare('INSERT OR IGNORE INTO ai_rejected (kind, row_id, field, value_key, at) VALUES (?, ?, ?, ?, ?)').run(kind, rowId, field, valueKey(value), now());
 }
 /**
@@ -113,7 +128,9 @@ export function sweepBefore() {
        (kind = 'item' AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.id = ai_rejected.row_id))
        OR (kind = 'feature' AND NOT EXISTS (SELECT 1 FROM features f WHERE f.id = ai_rejected.row_id))
        OR (kind = 'scope' AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.id = ai_rejected.row_id))
-       OR (kind = 'screenshot' AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.id = ai_rejected.row_id))`,
+       OR (kind = 'screenshot' AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.id = ai_rejected.row_id))
+       OR (kind = 'link' AND NOT EXISTS (SELECT 1 FROM links l WHERE l.id = ai_rejected.row_id))
+       OR (kind = 'code' AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.id = ai_rejected.row_id))`,
   ).run();
   db.prepare(
     `DELETE FROM ai_before WHERE
@@ -130,8 +147,9 @@ export function sweepBefore() {
 const NO_OPEN_MARKS = `f.ai_fields = '[]'
   AND NOT EXISTS (SELECT 1 FROM feature_items i WHERE i.feature_id = f.id AND i.ai_draft = 1)
   AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.feature_id = f.id AND s.ai_fields <> '[]')
-  AND NOT EXISTS (SELECT 1 FROM links l WHERE l.feature_id = f.id AND l.source = 'ai' AND l.checked = 0 AND l.removed = 0)
-  AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND c.source = 'ai' AND c.checked = 0 AND c.removed = 0)
+  AND NOT EXISTS (SELECT 1 FROM links l WHERE l.feature_id = f.id AND ((l.source = 'ai' AND l.checked = 0 AND l.removed = 0) OR l.ai_change IS NOT NULL))
+  AND NOT EXISTS (SELECT 1 FROM feature_code c WHERE c.feature_id = f.id AND ((c.source = 'ai' AND c.checked = 0 AND c.removed = 0) OR c.ai_change IS NOT NULL))
+  AND NOT EXISTS (SELECT 1 FROM ai_deleted d WHERE d.feature_id = f.id)
   AND NOT EXISTS (SELECT 1 FROM screenshots x WHERE x.feature_id = f.id AND ((x.source = 'ai' AND x.checked = 0 AND x.removed = 0) OR x.ai_change IS NOT NULL))`;
 
 /**
@@ -213,10 +231,10 @@ export function featureData(projectId: string) {
     .all(projectId) as any[];
   const links = db
     .prepare(
-      `SELECT l.id, l.test_id AS testId, l.feature_id, l.source, l.checked,
+      `SELECT l.id, l.test_id AS testId, l.feature_id, l.source, l.checked, l.removed, l.ai_change,
               t.framework, t.title, t.file, t.removed_at AS testRemovedAt
        FROM links l LEFT JOIN tests t ON t.project_id = l.project_id AND t.id = l.test_id
-       WHERE l.project_id = ? AND l.removed = 0 ORDER BY t.framework, t.file, t.line`,
+       WHERE l.project_id = ? AND (l.removed = 0 OR l.ai_change IS NOT NULL) ORDER BY t.framework, t.file, t.line`,
     )
     .all(projectId) as any[];
 
@@ -232,9 +250,14 @@ export function featureData(projectId: string) {
   const labelsBy = byKey(labels, (l) => l.feature_id);
   const linksBy = byKey(links, (l) => l.feature_id);
   const code = db
-    .prepare("SELECT feature_id, COUNT(*) AS n, SUM(source = 'ai' AND checked = 0) AS ai FROM feature_code WHERE project_id = ? AND removed = 0 GROUP BY feature_id")
+    .prepare("SELECT feature_id, COUNT(*) AS n, SUM((source = 'ai' AND checked = 0) OR ai_change IS NOT NULL) AS ai FROM feature_code WHERE project_id = ? AND removed = 0 GROUP BY feature_id")
     .all(projectId) as any[];
   const codeBy = new Map(code.map((r) => [r.feature_id, r]));
+  // Code that the AI took out of a feature and no person checked yet: only the review shows it.
+  const removedCodeBy = byKey(
+    (db.prepare("SELECT id, feature_id, file, function, ai_change FROM feature_code WHERE project_id = ? AND removed = 1 AND ai_change IS NOT NULL ORDER BY file, function").all(projectId) as any[]),
+    (r) => r.feature_id,
+  );
   // Screenshots without the image bytes: the app loads each image from its own URL.
   const shots = db
     .prepare('SELECT id, feature_id, caption, sort, source, checked, removed, ai_change, stale FROM screenshots WHERE project_id = ? AND (removed = 0 OR ai_change IS NOT NULL) ORDER BY sort, id')
@@ -246,6 +269,11 @@ export function featureData(projectId: string) {
     (r) => r.screenshot_id,
   );
   const shotsBy = byKey(shots, (s) => s.feature_id);
+  const deletedBy = byKey(
+    (db.prepare('SELECT d.id, d.feature_id, d.kind, d.row_id AS rowId, d.title, d.at FROM ai_deleted d JOIN features f ON f.id = d.feature_id WHERE f.project_id = ? ORDER BY d.id').all(projectId) as any[]),
+    (d) => d.feature_id,
+  ) as Map<number, any[]>;
+  for (const list of deletedBy.values()) for (const d of list) delete d.feature_id;
   // "Before" values of the AI changes. Only a field that has its AI mark now shows one.
   const before = new Map<string, Record<string, string | null>>();
   for (const r of db
@@ -290,13 +318,22 @@ export function featureData(projectId: string) {
       const toRemove = toRemoveRow({ remove_reason, remove_at, remove_by });
       return { ...s, columns: columns === null ? null : jsonList(columns), values: s.parentId === null ? null : jsonList(var_values), requirements, aiFields, aiDraft: aiFields.length > 0, before: beforeOf('scope', s.id, aiFields), toRemove };
     });
-    f.links = (linksBy.get(f.id) ?? []).map(({ feature_id, checked, ...l }) => ({
+    const myLinks = (linksBy.get(f.id) ?? []).map(({ feature_id, checked, removed, ai_change, ...l }) => ({
       ...l,
       checked: !!checked,
+      removed: !!removed,
       scopeIds: linkScopes.get(l.id) ?? [],
       framework: l.framework ?? (l.testId.startsWith('CY-') ? 'cypress' : 'playwright'),
       missing: !l.framework || !!l.testRemovedAt,
+      // The old values from before the AI change (test, scopes, removed). null: no AI change waits.
+      aiChange: ai_change === null ? null : JSON.parse(ai_change),
     }));
+    f.links = myLinks.filter((l) => !l.removed).map(({ removed, ...l }) => l);
+    // Links that the AI removed and no person checked yet: only the review shows them.
+    f.aiRemovedLinks = myLinks.filter((l) => l.removed).map(({ removed, ...l }) => ({ ...l, scopeIds: (l.aiChange?.scopes as number[] | undefined) ?? [] }));
+    f.aiRemovedCode = (removedCodeBy.get(f.id) ?? []).map((r: any) => ({ id: r.id, file: r.file, function: r.function, scopeIds: JSON.parse(r.ai_change).scopes ?? [] }));
+    // Items and scopes that the AI deleted and no person checked yet.
+    f.aiDeleted = deletedBy.get(f.id) ?? [];
     const myShots = shotsBy.get(f.id) ?? [];
     f.screenshots = myShots.filter((s) => !s.removed).map(({ feature_id, source, checked, removed, ai_change, stale, ...s }) => ({
       ...s,
@@ -311,7 +348,7 @@ export function featureData(projectId: string) {
     f.aiRemovedShots = myShots.filter((s) => s.removed).map((s) => ({ id: s.id, caption: s.caption, scopeIds: (shotScopes.get(s.id) ?? []).map((r) => r.scope_id) }));
   }
 
-  const linked = new Set(links.map((l) => l.testId));
+  const linked = new Set(links.filter((l) => !l.removed).map((l) => l.testId));
   const all = db.prepare('SELECT id, framework FROM tests WHERE project_id = ? AND removed_at IS NULL').all(projectId) as any[];
   const unlinked = { playwright: 0, cypress: 0 };
   for (const t of all) if (!linked.has(t.id)) unlinked[t.framework as 'playwright' | 'cypress']++;
@@ -758,6 +795,167 @@ function revertItem(p: string, id: unknown) {
   });
 }
 
+/**
+ * "Change back" of a link or code entry that the AI changed or removed: the test, scopes and "removed" from
+ * before the first AI change come back. The AI value that goes is remembered (ai_rejected).
+ */
+function revertRow(p: string, kind: 'link' | 'code', id: unknown) {
+  const table = kind === 'link' ? 'links' : 'feature_code';
+  const tags = kind === 'link' ? { table: 'link_scopes', col: 'link_id' } : { table: 'code_scopes', col: 'code_id' };
+  const r = db.prepare(`SELECT * FROM ${table} WHERE id = ? AND project_id = ?`).get(Number(id), p) as any;
+  if (!r) throw new EditError(kind === 'link' ? 'Link not found in this project' : 'Unknown code entry');
+  if (r.ai_change === null) throw new EditError('This row has no AI change to change back');
+  const old = JSON.parse(r.ai_change);
+  return tx(() => {
+    if (kind === 'link' && typeof old.test === 'string' && old.test !== r.test_id) {
+      if (db.prepare('SELECT 1 FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p, old.test, r.feature_id))
+        throw new EditError(`Test ${old.test} has another link to F-${r.feature_id} now. Change the link by hand.`);
+      rejectValue('link', r.id, 'test', r.test_id);
+      db.prepare('UPDATE links SET test_id = ? WHERE id = ?').run(old.test, r.id);
+    }
+    if (Array.isArray(old.scopes)) {
+      const cur = (db.prepare(`SELECT scope_id FROM ${tags.table} WHERE ${tags.col} = ?`).all(r.id) as any[]).map((x) => x.scope_id as number);
+      if (!old.removed) rejectValue(kind, r.id, 'scopes', scopeSetKey(cur));
+      db.prepare(`DELETE FROM ${tags.table} WHERE ${tags.col} = ?`).run(r.id);
+      // Only scopes that are still in the feature: a scope that a person deleted does not come back.
+      const add = db.prepare(`INSERT OR IGNORE INTO ${tags.table} (${tags.col}, scope_id) SELECT ?, id FROM scopes WHERE id = ? AND feature_id = ?`);
+      for (const s of old.scopes as number[]) add.run(r.id, s, r.feature_id);
+    }
+    if (old.removed) {
+      rejectValue(kind, r.id, 'removed', 1);
+      db.prepare(`UPDATE ${table} SET removed = 0 WHERE id = ?`).run(r.id);
+    }
+    db.prepare(`UPDATE ${table} SET ai_change = NULL WHERE id = ?`).run(r.id);
+    return { ok: true };
+  });
+}
+
+/** Rows of a table as plain objects, for a copy in ai_deleted. */
+const rowsWhere = (table: string, col: string, ids: number[]) =>
+  ids.length ? (db.prepare(`SELECT * FROM ${table} WHERE ${col} IN (${ids.map(() => '?').join(',')})`).all(...ids) as any[]) : [];
+/** Inserts a row from a copy. orIgnore: a row whose other end is gone now (a deleted link or screenshot) is left out. */
+function insertRow(table: string, row: Record<string, unknown>, orIgnore = false) {
+  const cols = Object.keys(row);
+  db.prepare(`INSERT ${orIgnore ? 'OR IGNORE ' : ''}INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => row[c] as any));
+}
+
+/**
+ * The AI deletes a list item that a person wrote or checked. A copy goes in ai_deleted, so the review shows
+ * the delete as "Changed", with "Change back".
+ */
+export function aiDeleteItem(fid: number, row: any) {
+  const before = db.prepare("SELECT * FROM ai_before WHERE kind = 'item' AND row_id = ?").all(row.id);
+  const rejected = db.prepare("SELECT * FROM ai_rejected WHERE kind = 'item' AND row_id = ?").all(row.id);
+  db.prepare('INSERT INTO ai_deleted (feature_id, kind, row_id, title, data, at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    fid, 'item', row.id, row.text, JSON.stringify({ item: row, before, rejected }), now(),
+  );
+  db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
+  dropBefore('item', row.id);
+}
+
+/**
+ * The AI deletes a scope (with its variations, requirements and tags on links, code, screenshots and issues).
+ * A copy goes in ai_deleted, so "Change back" makes it again with the same IDs. Scope IDs are never used again
+ * (NEW_SCOPE_ID), so the IDs are free.
+ */
+export function aiDeleteScope(projectId: string, sid: number) {
+  const row = scopeRow(sid);
+  const ids = [sid, ...(row.columns !== null ? variationsOf(sid).map((v) => v.id) : [])];
+  const data = {
+    scopes: rowsWhere('scopes', 'id', ids),
+    // A variation: its parent loses its columns when it is the last one.
+    parentColumns: row.parentId !== null ? (db.prepare('SELECT columns FROM scopes WHERE id = ?').get(row.parentId) as any).columns : null,
+    items: rowsWhere('feature_items', 'scope_id', ids),
+    linkScopes: rowsWhere('link_scopes', 'scope_id', ids),
+    codeScopes: rowsWhere('code_scopes', 'scope_id', ids),
+    screenshotScopes: rowsWhere('screenshot_scopes', 'scope_id', ids),
+    issueScopes: rowsWhere('issue_scopes', 'scope_id', ids),
+    // Old values and "changed back" values of the scopes and their requirements: the delete sweeps them.
+    before: [
+      ...(db.prepare(`SELECT * FROM ai_before WHERE kind = 'scope' AND row_id IN (${ids.map(() => '?').join(',')})`).all(...ids) as any[]),
+      ...(db.prepare(`SELECT b.* FROM ai_before b JOIN feature_items i ON i.id = b.row_id WHERE b.kind = 'item' AND i.scope_id IN (${ids.map(() => '?').join(',')})`).all(...ids) as any[]),
+    ],
+    rejected: [
+      ...(db.prepare(`SELECT * FROM ai_rejected WHERE kind = 'scope' AND row_id IN (${ids.map(() => '?').join(',')})`).all(...ids) as any[]),
+      ...(db.prepare(`SELECT r.* FROM ai_rejected r JOIN feature_items i ON i.id = r.row_id WHERE r.kind = 'item' AND i.scope_id IN (${ids.map(() => '?').join(',')})`).all(...ids) as any[]),
+    ],
+    // Old titles that the feature remembers (renames): the delete adds rows, and "Change back" keeps only these.
+    gone: rowsWhere('scope_titles_gone', 'scope_id', ids),
+  };
+  db.prepare('INSERT INTO ai_deleted (feature_id, kind, row_id, title, data, at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    row.featureId, 'scope', sid, row.title, JSON.stringify(data), now(),
+  );
+  edits.deleteScope(projectId, String(sid));
+}
+
+/**
+ * Inserts a list item from a copy. Item IDs can be used again (no AUTOINCREMENT): when the old ID is taken now,
+ * the item gets a new ID. Returns the ID it got.
+ */
+function insertItem(it: any): number {
+  if (!db.prepare('SELECT 1 FROM feature_items WHERE id = ?').get(it.id)) {
+    insertRow('feature_items', it);
+    return it.id;
+  }
+  const { id, ...rest } = it;
+  const cols = Object.keys(rest);
+  return Number(db.prepare(`INSERT INTO feature_items (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => rest[c] as any)).lastInsertRowid);
+}
+/** Puts back copied ai_before or ai_rejected rows. Item rows follow the new ID of their item. */
+function insertMarks(table: 'ai_before' | 'ai_rejected', rows: any[], itemIds: Map<number, number>) {
+  for (const r of rows ?? []) insertRow(table, r.kind === 'item' && itemIds.has(r.row_id) ? { ...r, row_id: itemIds.get(r.row_id) } : r, true);
+}
+
+/** "Change back" of a list item or scope that the AI deleted: it comes back with its IDs, and the AI does not delete it again. */
+function restoreDeleted(p: string, id: unknown) {
+  const d = db.prepare('SELECT d.* FROM ai_deleted d JOIN features f ON f.id = d.feature_id WHERE d.id = ? AND f.project_id = ?').get(idNumber(id), p) as any;
+  if (!d) throw new EditError('Unknown deleted item or scope');
+  const data = JSON.parse(d.data);
+  return tx(() => {
+    if (d.kind === 'item') {
+      const it = data.item;
+      if (it.scope_id !== null && !db.prepare('SELECT 1 FROM scopes WHERE id = ?').get(it.scope_id))
+        throw new EditError(`The scope S-${it.scope_id} of this requirement is deleted now. Add the requirement by hand.`);
+      const ids = new Map([[it.id as number, insertItem(it)]]);
+      insertMarks('ai_before', data.before, ids);
+      insertMarks('ai_rejected', data.rejected, ids);
+      rejectValue('item', ids.get(it.id)!, 'deleted', 1);
+    } else {
+      for (const sc of data.scopes as any[]) {
+        // A variation whose scope is deleted now has no place to come back to.
+        if (sc.id === d.row_id && sc.parent_id !== null && !db.prepare('SELECT 1 FROM scopes WHERE id = ?').get(sc.parent_id))
+          throw new EditError(`The scope S-${sc.parent_id} of this variation is deleted now. Add the variation by hand.`);
+        if (sc.parent_id === null && db.prepare('SELECT 1 FROM scopes WHERE feature_id = ? AND lower(title) = lower(?) AND id <> ?').get(sc.feature_id, sc.title, sc.id))
+          throw new EditError(`F-${sc.feature_id} has a scope "${sc.title}" now. Rename or delete it first.`);
+      }
+      // The parent first, then the variations.
+      const sorted = [...(data.scopes as any[])].sort((a, b) => (a.parent_id === null ? 0 : 1) - (b.parent_id === null ? 0 : 1));
+      for (const sc of sorted) {
+        if (sc.group_id !== null && !db.prepare('SELECT 1 FROM scope_groups WHERE id = ?').get(sc.group_id)) sc.group_id = null;
+        insertRow('scopes', sc);
+        db.prepare('DELETE FROM scope_titles_gone WHERE feature_id = ? AND scope_id = ?').run(sc.feature_id, sc.id);
+      }
+      for (const g of data.gone ?? []) insertRow('scope_titles_gone', g, true);
+      // The scope lost its columns with its last variation: they come back. Columns that a person changed since then stay.
+      if (data.parentColumns !== null)
+        db.prepare('UPDATE scopes SET columns = ? WHERE id = (SELECT parent_id FROM scopes WHERE id = ?) AND columns IS NULL').run(data.parentColumns, d.row_id);
+      const ids = new Map<number, number>();
+      for (const it of data.items) ids.set(it.id, insertItem(it));
+      // A tag whose link, code entry, screenshot or issue is gone now stays out.
+      for (const [table, col] of [['link_scopes', 'link_id'], ['code_scopes', 'code_id'], ['screenshot_scopes', 'screenshot_id'], ['issue_scopes', 'issue_id']] as const) {
+        const parent = { link_scopes: 'links', code_scopes: 'feature_code', screenshot_scopes: 'screenshots', issue_scopes: 'issues' }[table];
+        const key = { link_scopes: 'linkScopes', code_scopes: 'codeScopes', screenshot_scopes: 'screenshotScopes', issue_scopes: 'issueScopes' }[table];
+        for (const r of data[key] ?? []) if (db.prepare(`SELECT 1 FROM ${parent} WHERE id = ?`).get(r[col])) insertRow(table, r, true);
+      }
+      insertMarks('ai_before', data.before, ids);
+      insertMarks('ai_rejected', data.rejected, ids);
+      rejectValue('scope', d.row_id, 'deleted', 1);
+    }
+    db.prepare('DELETE FROM ai_deleted WHERE id = ?').run(d.id);
+    return { ok: true };
+  });
+}
+
 /** "Change back" of a screenshot that the AI changed or deleted. */
 function revertScreenshot(p: string, id: unknown) {
   const s = db.prepare('SELECT * FROM screenshots WHERE id = ? AND project_id = ? AND ai_change IS NOT NULL').get(idNumber(id), p) as any;
@@ -844,6 +1042,10 @@ export const edits = {
       db.prepare("UPDATE scopes SET ai_fields = '[]', group_by_person = 1 WHERE feature_id = ?").run(f);
       db.prepare("UPDATE links SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       db.prepare("UPDATE feature_code SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
+      // The AI changes are accepted. A link or code that the AI removed stays removed, as if a person removed it.
+      db.prepare('UPDATE links SET ai_change = NULL WHERE feature_id = ?').run(f);
+      db.prepare('UPDATE feature_code SET ai_change = NULL WHERE feature_id = ?').run(f);
+      db.prepare('DELETE FROM ai_deleted WHERE feature_id = ?').run(f);
       db.prepare("UPDATE screenshots SET checked = 1 WHERE feature_id = ? AND source = 'ai'").run(f);
       acceptScreenshots('feature_id', f);
       db.prepare('UPDATE features SET reviewed_at = ?, review_wanted = 0 WHERE id = ?').run(now(), f);
@@ -1411,7 +1613,7 @@ export const edits = {
     const scopeId = b.scopeId ? evidenceScope(scopeOf(p, f, b.scopeId)) : null;
     tx(() => {
       db.prepare(`INSERT INTO links (project_id, test_id, feature_id, source) VALUES (?, ?, ?, 'manual')
-        ON CONFLICT (project_id, test_id, feature_id) DO UPDATE SET removed = 0, source = 'manual'`).run(p, testId, f);
+        ON CONFLICT (project_id, test_id, feature_id) DO UPDATE SET removed = 0, source = 'manual', ai_change = NULL`).run(p, testId, f);
       const link = (db.prepare('SELECT id FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p, testId, f) as any).id;
       if (scopeId) db.prepare('INSERT OR IGNORE INTO link_scopes (link_id, scope_id) VALUES (?, ?)').run(link, scopeId);
     });
@@ -1423,6 +1625,7 @@ export const edits = {
    * When the new test already has a link to the same feature, the two links merge:
    * a manual source wins over AI, and a check stays. A link that a person removed on the new test
    * stays removed: the old link does not bring it back.
+   * With b.featureId, only the active link to that feature moves (the AI update checks one feature at a time).
    */
   moveTestLinks(p: string, b: any) {
     const from = need(b.from, 'Old test ID');
@@ -1432,8 +1635,11 @@ export const edits = {
     if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL').get(p, to)) {
       throw new EditError(`Unknown test ${to}, or it is not in the repo now`);
     }
-    const links = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ?').all(p, from) as any[];
-    if (!links.length) throw new EditError(`Test ${from} has no links`);
+    const fid = b.featureId === undefined || b.featureId === null ? null : idNumber(b.featureId);
+    const links = (fid === null
+      ? db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ?').all(p, from)
+      : db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ? AND removed = 0').all(p, from, fid)) as any[];
+    if (!links.length) throw new EditError(fid === null ? `Test ${from} has no links` : `Test ${from} has no active link to F-${fid}`);
     return tx(() => {
       let merged = 0;
       for (const l of links) {
@@ -1465,7 +1671,8 @@ export const edits = {
    */
   updateLink(p: string, id: string, b: any) {
     const l = ownLink(p, id);
-    if (b.check && !('scopeIds' in b)) return void db.prepare('UPDATE links SET checked = 1 WHERE id = ?').run(l.id);
+    // A person checked or set the link: an AI change on it is accepted.
+    if (b.check && !('scopeIds' in b)) return void db.prepare('UPDATE links SET checked = 1, ai_change = NULL WHERE id = ?').run(l.id);
     if (!Array.isArray(b.scopeIds)) throw new EditError('scopeIds must be a list');
     const ids: number[] = [...new Set<number>(b.scopeIds.map((s: unknown) => evidenceScope(scopeOf(p, l.feature_id, s))))];
     tx(() => {
@@ -1473,7 +1680,7 @@ export const edits = {
       db.prepare('DELETE FROM link_scopes WHERE link_id = ?').run(l.id);
       const add = db.prepare('INSERT INTO link_scopes (link_id, scope_id) VALUES (?, ?)');
       for (const s of ids) add.run(l.id, s);
-      db.prepare("UPDATE links SET source = 'manual' WHERE id = ?").run(l.id);
+      db.prepare("UPDATE links SET source = 'manual', ai_change = NULL WHERE id = ?").run(l.id);
     });
   },
   // Screenshots. Body of add: { image: data URL, caption?, scopeIds? }.
@@ -1549,7 +1756,9 @@ export const edits = {
     const kind = b?.kind as BeforeKind | 'screenshot';
     if (kind === 'item') return revertItem(p, b?.id);
     if (kind === 'screenshot') return revertScreenshot(p, b?.id);
-    if (kind !== 'feature' && kind !== 'scope') throw new EditError('kind must be feature, scope, item or screenshot');
+    if ((kind as string) === 'link' || (kind as string) === 'code') return revertRow(p, kind as unknown as 'link' | 'code', b?.id);
+    if ((kind as string) === 'deleted') return restoreDeleted(p, b?.id);
+    if (kind !== 'feature' && kind !== 'scope') throw new EditError('kind must be feature, scope, item, screenshot, link, code or deleted');
     const list: string[] = Array.isArray(b?.fields) ? b.fields.map(String) : [String(b?.field ?? '')];
     if (!list.length) throw new EditError('Send "field" or a list of "fields"');
     const allowed: readonly string[] = kind === 'feature' ? FEATURE_AI_FIELDS : SCOPE_AI_FIELDS;
@@ -1609,7 +1818,9 @@ export const edits = {
     if ('scopeIds' in b && !Array.isArray(b.scopeIds)) throw new EditError('scopeIds must be a list');
     const ids: number[] = 'scopeIds' in b ? [...new Set<number>(b.scopeIds.map((s: unknown) => evidenceScope(scopeOf(p, r.feature_id, s))))] : [];
     tx(() => {
-      if (b.check === true) db.prepare('UPDATE feature_code SET checked = 1 WHERE id = ?').run(r.id);
+      // A person checked or set the code: an AI change on it is accepted.
+      if (b.check === true) db.prepare('UPDATE feature_code SET checked = 1, ai_change = NULL WHERE id = ?').run(r.id);
+      if ('scopeIds' in b) db.prepare('UPDATE feature_code SET ai_change = NULL WHERE id = ?').run(r.id);
       if ('scopeIds' in b) {
         db.prepare('DELETE FROM code_scopes WHERE code_id = ?').run(r.id);
         const add = db.prepare('INSERT INTO code_scopes (code_id, scope_id) VALUES (?, ?)');
@@ -1623,13 +1834,13 @@ export const edits = {
   deleteFeatureCode(p: string, id: string) {
     const r = db.prepare('SELECT id FROM feature_code WHERE id = ? AND project_id = ? AND removed = 0').get(Number(id), p) as any;
     if (!r) throw new EditError('Unknown code entry');
-    db.prepare('UPDATE feature_code SET removed = 1 WHERE id = ?').run(r.id);
+    db.prepare('UPDATE feature_code SET removed = 1, ai_change = NULL WHERE id = ?').run(r.id);
   },
   deleteLink(p: string, id: string) {
     const l = ownLink(p, id);
     // Keep the row as a marker, so the AI skill does not add the link again.
     tx(() => {
-      db.prepare('UPDATE links SET removed = 1 WHERE id = ?').run(l.id);
+      db.prepare('UPDATE links SET removed = 1, ai_change = NULL WHERE id = ?').run(l.id);
       db.prepare('DELETE FROM link_scopes WHERE link_id = ?').run(l.id);
     });
   },

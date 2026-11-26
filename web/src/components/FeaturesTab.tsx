@@ -41,8 +41,11 @@ const needsReview = (f: Feature) =>
   f.aiDraft ||
   f.scopes.some((s) => s.aiDraft || s.requirements.some((i) => i.aiDraft)) ||
   ITEM_FIELDS.some((k) => f[k].some((i) => i.aiDraft)) ||
-  f.links.some(aiLink) ||
+  f.links.some((l) => aiLink(l) || !!l.aiChange) ||
+  (f.aiRemovedLinks?.length ?? 0) > 0 ||
+  (f.aiDeleted?.length ?? 0) > 0 ||
   f.code.aiToCheck > 0 ||
+  (f.aiRemovedCode?.length ?? 0) > 0 ||
   f.screenshots.some((s) => s.aiDraft) ||
   (f.aiRemovedShots?.length ?? 0) > 0;
 

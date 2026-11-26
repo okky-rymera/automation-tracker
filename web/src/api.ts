@@ -90,6 +90,25 @@ export interface FeatureLink {
   file: string | null;
   /** True when the test is not in the repo now (deleted or renamed). */
   missing: boolean;
+  /** The AI changed this link since a person checked it: the old values. null: no AI change waits. */
+  aiChange: LinkChange | null;
+}
+/** Old values of an AI change on a link or code entry. */
+export interface LinkChange {
+  /** The old test ID: the AI moved the link from this test (a renamed test). */
+  test?: string;
+  /** The old scope IDs. */
+  scopes?: number[];
+  /** The AI removed the link. */
+  removed?: boolean;
+}
+/** A list item or scope that the AI deleted. "Change back" makes it again. */
+export interface AiDeleted {
+  id: number;
+  kind: 'item' | 'scope';
+  rowId: number;
+  title: string;
+  at: string;
 }
 
 /** A group of scopes in one feature, like a describe block of tests. */
@@ -184,6 +203,12 @@ export interface Feature extends Record<ItemField, FeatureItem[]>, Record<LabelF
   links: FeatureLink[];
   screenshots: Screenshot[];
   aiRemovedShots: RemovedScreenshot[];
+  /** Links that the AI removed and no person checked yet. scopeIds: the scopes it had. */
+  aiRemovedLinks?: FeatureLink[];
+  /** Code that the AI took out of the feature and no person checked yet. scopeIds: the scopes it had. */
+  aiRemovedCode?: { id: number; file: string; function: string; scopeIds: number[] }[];
+  /** List items and scopes that the AI deleted and no person checked yet. */
+  aiDeleted?: AiDeleted[];
   /** Mapped code: number of entries, and AI entries that no person checked. */
   code: { entries: number; aiToCheck: number };
   /** When a person last reviewed the feature. null: never. */
@@ -206,6 +231,8 @@ export interface CodeEntry {
   checked: boolean;
   /** The scopes of the feature that this code does. */
   scopeIds: number[];
+  /** The AI changed this entry since a person checked it: the old scopes. null: no AI change waits. */
+  aiChange: { scopes?: number[] } | null;
   /** False: the file is not in the plugin repo now. */
   inRepo: boolean;
   /** False: the coverage run has no such file or function (code changed, or a new file). */

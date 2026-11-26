@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { featureTotal, mutate, pct, screenshotSmallUrl, screenshotUrl, type CodeEntry, type FeatureItem, type FeatureLink, type ItemField, type Screenshot, type TrackedIssue } from '../../api';
-import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, featureIssues, issueOpen, scopeIdLabel, scopeIssues, anyScopeLabel, scopeCountText, scopeLinks, scopesForIssue, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
+import { KIND_LABEL, LISTS, PRI_LABEL, ST_LABEL, ST_TAG, countedScopes, featureIssues, issueOpen, linkChangeText, scopeIdLabel, scopeIssues, anyScopeLabel, scopeCountText, scopeLinks, scopesForIssue, scopeStatus, scopeToRemove, variationsOf, type FeatureInfo, type FeatureX, type ScopeX, type Tracker } from '../data';
 import { go, link, setQuery, withBack, type Route } from '../route';
 import { AddRow, Dialog, IdBtn, Lightbox, InlineText, INext, IPlus, IPrev, IRefresh, ITrash, IX, Menu, Picker, Seg, useAct, useEscapeClose, useSay, type PickRow } from '../ui';
 import { listOrder } from './FeatureList';
@@ -224,7 +224,8 @@ function Feature({ t, i, route }: { t: Tracker; i: FeatureInfo; route: Route }) 
 /* ================= Scopes ================= */
 
 const scopeChanged = (f: FeatureX, s: ScopeX) =>
-  s.aiFields.length > 0 || s.requirements.some((r) => r.aiDraft) || f.links.some((l) => l.scopeIds.includes(s.id) && (l.missing || (l.source === 'ai' && !l.checked)));
+  s.aiFields.length > 0 || s.requirements.some((r) => r.aiDraft) || f.links.some((l) => l.scopeIds.includes(s.id) && (l.missing || !!l.aiChange || (l.source === 'ai' && !l.checked))) ||
+  (f.aiRemovedLinks ?? []).some((l) => l.scopeIds.includes(s.id));
 /** The scope, or one of its variations, has a change to review. */
 const cardChanged = (f: FeatureX, s: ScopeX) => scopeChanged(f, s) || variationsOf(f, s.id).some((v) => scopeChanged(f, v as ScopeX));
 
@@ -969,6 +970,8 @@ function TestRow({ t, f, l, scopeId }: { t: Tracker; f: FeatureX; l: FeatureLink
       </span>
       {l.missing ? (
         <span className="tag tag-fail" title="The test is not in the repo now. It was deleted or renamed.">{KIND_LABEL.gone}</span>
+      ) : l.aiChange ? (
+        <span className="tag tag-changed" title={linkChangeText(f, l)}>Changed</span>
       ) : l.source === 'ai' && !l.checked ? (
         <span className="tag tag-new" title="Linked since the last review.">New</span>
       ) : null}
@@ -1070,7 +1073,9 @@ function CodeTab({ t, f }: { t: Tracker; f: FeatureX }) {
               <div className="gr cols-fn lc-row" role="row" key={e.id} style={{ borderBottom: '1px solid var(--line)' }}>
                 <div role="cell" className="mono" style={{ overflowWrap: 'anywhere', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                   {e.function || '(whole file)'}
-                  {e.source === 'ai' && !e.checked && <span className="tag tag-new">New</span>}
+                  {e.aiChange ? (
+                    <span className="tag tag-changed" title={`Scopes before: ${(e.aiChange.scopes ?? []).map((x) => scopeIdLabel(f, x)).join(', ') || 'the whole feature'}.`}>Changed</span>
+                  ) : e.source === 'ai' && !e.checked && <span className="tag tag-new">New</span>}
                   {!e.inRepo && <span className="tag tag-fail">Not in the repo</span>}
                   {e.inRepo && !e.measured && <span className="tag tag-none" title="The coverage run has no such file or function. The code changed, or the file is new.">Not measured</span>}
                   {e.scopeIds.map((id) => <span key={id} className="tag tag-ro" title={f.scopes.find((s) => s.id === id)?.title}>{scopeIdLabel(f, id)}</span>)}

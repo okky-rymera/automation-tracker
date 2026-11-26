@@ -903,6 +903,27 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE feature_groups ADD COLUMN ai_made INTEGER NOT NULL DEFAULT 0;
   `,
+  // 44: the AI can change links, code, list items and scopes that a person made or checked. The review shows
+  // each change with the "Changed" mark and "Change back" (features.ts).
+  //  - links.ai_change, feature_code.ai_change: the old values from before the first AI change since a person
+  //    checked the row (JSON object: test = the old test ID, scopes = the old scope IDs, removed = true when the
+  //    AI removed the row). NULL: no change waits for a review.
+  //  - ai_deleted: a list item or scope that the AI deleted, with its data, so "Change back" can make it again.
+  //    "Mark as reviewed" deletes the row.
+  `
+  ALTER TABLE links ADD COLUMN ai_change TEXT;
+  ALTER TABLE feature_code ADD COLUMN ai_change TEXT;
+  CREATE TABLE ai_deleted (
+    id INTEGER PRIMARY KEY,
+    feature_id INTEGER NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('item', 'scope')),
+    row_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    data TEXT NOT NULL,
+    at TEXT NOT NULL
+  );
+  CREATE INDEX ai_deleted_feature ON ai_deleted(feature_id);
+  `,
 ];
 
 function open(): DatabaseSync {

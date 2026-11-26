@@ -47,7 +47,7 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Add a requirement or list item | `POST .../features/:fid/items` with `{ "kind", "text", "scopeId"? }` |
 | Link a test | `POST .../links` with `{ "testId", "scopeId" }` or `{ "testId", "featureId" }` |
 | Set the scopes of a link | `PATCH .../links/:lid` with `{ "scopeIds": [] }` |
-| Move all links of a renamed test | `POST .../links/move-test` with `{ "from": "<old test ID>", "to": "<new test ID>" }` |
+| Move all links of a renamed test | `POST .../links/move-test` with `{ "from": "<old test ID>", "to": "<new test ID>", "featureId"? }`. With `featureId`, only the active link to that feature moves |
 | Create a GitHub issue to write tests (only when the user asks: it posts to GitHub) | `POST .../features/:fid/issues` with `{ "scopeId": <id> }` for one scope, or `{}` for all scopes of the feature with no test and no open issue. The AI writes it with the create-issue skill, with no plan, in 1 to 2 minutes |
 | Add an issue that is on GitHub to a feature or scope | `POST .../features/:fid/issues/link` with `{ "issue": "1162" \| "owner/repo#12" \| "<issue link>", "scopeId"? }`. A number is an issue of the plugin repo. The app checks the issue on GitHub first |
 | List the issues, or take one off the tracker | `GET .../issues`, or `DELETE .../issues/:iid` (the issue on GitHub stays) |

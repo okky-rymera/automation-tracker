@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   featureTotal, mutate, onReload, pct, reloadAll, useApi,
   type CypressScenario, type Feature, type FeatureCodeMap, type FeatureData, type FeatureItem, type FeatureLink, type ItemField,
-  type LineCounts, type PlaywrightTest, type ProjectSummary, type Scope, type TestDecision, type TrackedIssue,
+  type LineCounts, type LinkChange, type PlaywrightTest, type ProjectSummary, type Scope, type TestDecision, type TrackedIssue,
 } from '../api';
 
 /* ------------------------------------------------------------------ */
@@ -322,6 +322,17 @@ export function scopeStatus(f: Feature, scopeId: number, byId: Map<string, TestI
 /** The scope has the "To remove" mark, or its feature has it, or (a variation) its scope has it. */
 export const scopeToRemove = (f: Feature, s: Scope) =>
   !!(f.toRemove || s.toRemove || (s.parentId !== null && f.scopes.find((x) => x.id === s.parentId)?.toRemove));
+/** What the AI changed on a link, in words: the old test, the old scopes, or the remove. */
+export function linkChangeText(f: Feature, l: { aiChange: LinkChange | null; scopeIds: number[] }): string {
+  const c = l.aiChange;
+  if (!c) return '';
+  const scopes = (ids: number[]) => (ids.length ? ids.map((x) => scopeIdLabel(f, x)).join(', ') : 'the whole feature');
+  const out: string[] = [];
+  if (c.removed) out.push('Removed by the AI.');
+  if (c.test) out.push(`Moved from ${c.test} (renamed test).`);
+  if (c.scopes && !c.removed) out.push(`Scopes before: ${scopes(c.scopes)}.`);
+  return out.join(' ');
+}
 /** The ID as people see it: S-12 for a scope, SV-40 for a variation. */
 export const scopeIdLabel = (f: Feature, id: number) => `${f.scopes.find((s) => s.id === id)?.parentId != null ? 'SV' : 'S'}-${id}`;
 /** The variations of scope id, in order. */
@@ -504,6 +515,13 @@ function changesOf(
         fix: to ? () => mutate('POST', `${base}/links/move-test`, { from: l.testId, to: to.id }, quiet) : undefined,
         removeLbl: 'Unlink', remove: () => mutate('DELETE', `${base}/links/${l.id}`, {}, quiet),
       });
+    } else if (l.aiChange) {
+      out.push({
+        key: `l:${l.id}`, sec: 'Tests', kind: 'changed', text: t?.title ?? l.title ?? l.testId,
+        before: l.aiChange.test ?? (l.aiChange.scopes ? (l.aiChange.scopes.map((x) => scopeIdLabel(f, x)).join(', ') || 'the whole feature') : null),
+        ctx: `${l.testId} → ${where} · ${linkChangeText(f, l)}`, tab: 'scopes', scopeId: sid,
+        removeLbl: 'Change back', remove: () => mutate('POST', `${base}/revert`, { kind: 'link', id: l.id }, quiet),
+      });
     } else if (l.source === 'ai' && !l.checked) {
       out.push({
         key: `l:${l.id}`, sec: 'Tests', kind: 'new', text: t?.title ?? l.title ?? l.testId, before: null,
@@ -516,6 +534,23 @@ function changesOf(
         ctx: `${l.testId} → ${where} · The test code changed in the last sync. Check that it still checks the scope.`, tab: 'scopes', scopeId: sid,
       });
     }
+  }
+
+  for (const l of f.aiRemovedLinks ?? []) {
+    const t = byId.get(l.testId);
+    out.push({
+      key: `lr:${l.id}`, sec: 'Tests', kind: 'changed', text: t?.title ?? l.title ?? l.testId, before: null,
+      ctx: `${l.testId} → ${l.scopeIds.length ? l.scopeIds.map((x) => scopeIdLabel(f, x)).join(', ') : 'the whole feature'} · ${linkChangeText(f, l)}`,
+      tab: 'scopes', scopeId: l.scopeIds[0],
+      removeLbl: 'Change back', remove: () => mutate('POST', `${base}/revert`, { kind: 'link', id: l.id }, quiet),
+    });
+  }
+  for (const d of f.aiDeleted ?? []) {
+    out.push({
+      key: `d:${d.id}`, sec: d.kind === 'scope' ? 'Scopes' : 'Lists', kind: 'changed', text: d.title, before: null,
+      ctx: `${d.kind === 'scope' ? `S-${d.rowId}` : `Item #${d.rowId}`} · Deleted by the AI.`, tab: d.kind === 'scope' ? 'scopes' : 'details',
+      removeLbl: 'Change back', remove: () => mutate('POST', `${base}/revert`, { kind: 'deleted', id: d.id }, quiet),
+    });
   }
 
   // Screenshots and code.
@@ -552,12 +587,30 @@ function changesOf(
       removeLbl: 'Change back', remove: revertOne('screenshot', sh.id),
     });
   }
+  const scopeList = (ids: number[]) => ids.map((x) => scopeIdLabel(f, x)).join(', ') || 'the whole feature';
   for (const e of codeMap?.features.find((x) => x.featureId === f.id)?.entries ?? []) {
+    if (e.aiChange) {
+      out.push({
+        key: `c:${e.id}`, sec: 'Code', kind: 'changed', text: e.function ? `${e.function}` : `${e.file} (whole file)`,
+        before: e.aiChange.scopes ? scopeList(e.aiChange.scopes) : null,
+        ctx: `${e.file} · Scopes before: ${scopeList(e.aiChange.scopes ?? [])}. Scopes now: ${scopeList(e.scopeIds)}.`,
+        tab: 'code',
+        removeLbl: 'Change back', remove: () => mutate('POST', `${base}/revert`, { kind: 'code', id: e.id }, quiet),
+      });
+      continue;
+    }
     if (e.source !== 'ai' || e.checked) continue;
     out.push({
       key: `c:${e.id}`, sec: 'Code', kind: 'new', text: e.function ? `${e.function}` : `${e.file} (whole file)`, before: null, ctx: `${e.file} · New code in the feature.`,
       tab: 'code',
       removeLbl: 'Remove', remove: () => mutate('DELETE', `${base}/feature-code/${e.id}`, {}, quiet),
+    });
+  }
+  for (const e of f.aiRemovedCode ?? []) {
+    out.push({
+      key: `cr:${e.id}`, sec: 'Code', kind: 'changed', text: e.function ? `${e.function}` : `${e.file} (whole file)`, before: null,
+      ctx: `${e.file} · Taken out of the feature by the AI. Scopes before: ${scopeList(e.scopeIds)}.`, tab: 'code',
+      removeLbl: 'Change back', remove: () => mutate('POST', `${base}/revert`, { kind: 'code', id: e.id }, quiet),
     });
   }
   if (!out.length && f.reviewWanted) {

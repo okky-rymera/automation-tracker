@@ -24,18 +24,20 @@ export interface CodeRow {
   checked: boolean;
   /** The scopes of the feature that this code does (code_scopes). */
   scopeIds: number[];
+  /** The AI changed this entry since a person checked it: the old values (scopes). null: no AI change waits. */
+  aiChange: { scopes?: number[] } | null;
 }
 
 export function codeRows(projectId: string, featureId?: number): CodeRow[] {
   const rows = db
     .prepare(
-      `SELECT id, feature_id AS featureId, file, function, source, checked,
+      `SELECT id, feature_id AS featureId, file, function, source, checked, ai_change,
          (SELECT group_concat(scope_id) FROM code_scopes cs WHERE cs.code_id = feature_code.id) AS scopes
        FROM feature_code
        WHERE project_id = ? AND removed = 0 ${featureId ? 'AND feature_id = ?' : ''} ORDER BY file, function`,
     )
     .all(...(featureId ? [projectId, featureId] : [projectId])) as any[];
-  return rows.map(({ scopes, ...r }) => ({ ...r, checked: !!r.checked, scopeIds: scopes ? String(scopes).split(',').map(Number) : [] }));
+  return rows.map(({ scopes, ai_change, ...r }) => ({ ...r, checked: !!r.checked, scopeIds: scopes ? String(scopes).split(',').map(Number) : [], aiChange: ai_change ? JSON.parse(ai_change) : null }));
 }
 
 const zero = (): LineCounts => ({

@@ -20,14 +20,15 @@
  *   npm run -s map -- screenshots <project> <feature id> <folder>   (writes the images of the feature, to look at them)
  *
  * Output is JSON, so the skill can read it. Rules that protect people's work:
- *  - Text that a person wrote or checked is never replaced or removed. Empty fields can be filled.
- *    Each field has its own AI mark (ai_fields), so filling one empty field gives no right to change another.
- *  - Labels, list items, scopes and link scopes are only added.
+ *  - Text that a person wrote or checked can change. The review shows the old text, with "Change back".
+ *    Each field has its own AI mark (ai_fields).
+ *  - Labels are only added. List items, scopes, links and link scopes can be deleted or taken off too
+ *    (removeItems, deleteScopes, links "remove" and "removeScopes"). A change to what a person made or
+ *    checked gets the "Changed" mark in the review, with "Change back" (features.ts markAiChange, aiDelete*).
  *  - A link that a person removed is never added again.
  *  - Links made here have source "ai", so the app can show them as AI links.
- *  - Mapped code (feature_code) is only added. Code that a person removed is never added again.
- *    One exception, for code units only: "removeCode" takes out code that the AI added and no person
- *    checked, so the AI can move code that changed (server/code-work.ts "check" items).
+ *  - Mapped code (feature_code) can be added and taken out (removeCode), also a person's, with the mark.
+ *    Code that a person removed is never added again.
  *  - A library or unused decision is refused for code that a person put in a feature or checked.
  *  - One exception to the first rule: with unit kind "answer", "answeredQuestions" deletes open questions,
  *    also a person's. The person asked the answer-questions skill to answer them. The automatic AI update
@@ -43,7 +44,7 @@ import { db, json, now, tx } from './db.ts';
 import { leftOutSpec, leftOutTest } from './cypress-rules.ts';
 import { getProject, hashFiles, importProjectsJson, repoFile, safeRepoPath, testRepoPath, type ProjectConfig } from './projects.ts';
 import { syncProject } from './scan.ts';
-import { EditError, edits, idNumber, NEW_SCOPE_ID, variationTitle, columnWord, columnList, variationValues, valuesKey, newVariation, resetVariations, moveEvidence, variationsOf, scopeRow, scopeLabel, jsonList, MAX_COLUMNS, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore, isRejected, buryScope } from './features.ts';
+import { EditError, edits, idNumber, markAiChange, aiDeleteItem, aiDeleteScope, scopeSetKey, NEW_SCOPE_ID, variationTitle, columnWord, columnList, variationValues, valuesKey, newVariation, resetVariations, moveEvidence, variationsOf, scopeRow, scopeLabel, jsonList, MAX_COLUMNS, ITEM_KINDS, LABEL_KINDS, SCOPE_ITEM_KIND, PRIORITIES, SCREENSHOT_MAX_BYTES, captionKey, imageType, labelValue, labelsInUse, nextSort, requirementClash, scopeGroupId, findScopeGroup, dropEmptyAiGroup, keepBefore, dropBefore, sweepBefore, isRejected, buryScope } from './features.ts';
 import { loadCoverage, resolveView } from './coverage.ts';
 import { runTestOwners } from './run-tests.ts';
 import { functionNames } from './feature-code.ts';
@@ -389,10 +390,19 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: M
       continue;
     }
     for (const fn of fns.length ? fns : ['']) {
-      const cur = db.prepare('SELECT id, removed, source, fingerprint FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
+      const cur = db.prepare('SELECT id, removed, source, fingerprint, ai_change FROM feature_code WHERE feature_id = ? AND file = ? AND function = ?').get(fid, file, fn) as any;
       const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
-      if (cur?.removed) {
+      if (cur?.removed && cur.ai_change === null) {
         report.push(`F-${fid} code ${what}: a person removed it. Not added again.`);
+        continue;
+      }
+      // The AI took this code out before, and no person checked it yet: the AI puts it back.
+      if (cur?.removed) {
+        const ch = JSON.parse(cur.ai_change);
+        delete ch.removed;
+        db.prepare('UPDATE feature_code SET removed = 0, ai_change = ? WHERE id = ?').run(Object.keys(ch).length ? JSON.stringify(ch) : null, cur.id);
+        addScopeTags('code_scopes', cur.id, want);
+        report.push(`F-${fid} code ${what}: back in the feature.`);
         continue;
       }
       // The code now: a new entry gets it, and sending an entry again confirms it (server/code-work.ts "check").
@@ -407,38 +417,72 @@ function writeCode(p: ProjectConfig, fid: number, entries: CodeIn[], scopeIds: M
         db.prepare('UPDATE feature_code SET fingerprint = ? WHERE id = ?').run(fp, cur.id);
         report.push(`F-${fid} code ${what}: checked again after a change. It stays in the feature.`);
       }
-      const have = new Set((db.prepare('SELECT scope_id FROM code_scopes WHERE code_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
+      const haveList = (db.prepare('SELECT scope_id FROM code_scopes WHERE code_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number);
+      const have = new Set(haveList);
       const missing = want.filter((x) => !have.has(x));
       if (!missing.length) continue;
-      // A person added this code or set its scopes: leave it as it is, and only suggest.
-      if (cur.source === 'manual') {
-        report.push(`F-${fid} code ${what}: a person set its scopes. Not changed. Suggested scopes: ${names(missing)}.`);
+      if (isRejected('code', cur.id, 'scopes', scopeSetKey([...haveList, ...missing]))) {
+        report.push(`F-${fid} code ${what}: did not add ${names(missing)}: a person changed the scopes back before.`);
         continue;
       }
+      // A change to code that a person added or checked: the review shows it as "Changed", with the old scopes.
+      markAiChange('feature_code', cur.id, { scopes: haveList });
       addScopeTags('code_scopes', cur.id, missing);
       report.push(`F-${fid} code ${what}: added scopes ${names(missing)}.`);
     }
   }
 }
 
-/** Takes AI code out of a feature (removeCode). Code that a person added or checked stays. The row goes: the AI can add it again later. */
+/**
+ * Takes code out of a feature (removeCode). AI code that no person checked: the row goes, and the AI can add it
+ * again later. Code that a person added or checked: removed, with the "Changed" mark and "Change back".
+ */
 function removeCode(fid: number, entries: { file: string; function?: string }[], report: string[]) {
   for (const e of entries) {
     const file = str(e?.file, 500);
     const fn = str(e?.function ?? '', 300);
     const what = fn ? `${file} ${fn}` : `${file} (whole file)`;
-    const cur = db.prepare('SELECT id, source, checked FROM feature_code WHERE feature_id = ? AND file = ? AND function = ? AND removed = 0').get(fid, file, fn) as any;
+    const cur = db.prepare('SELECT id, source, checked, ai_change FROM feature_code WHERE feature_id = ? AND file = ? AND function = ? AND removed = 0').get(fid, file, fn) as any;
     if (!cur) {
       report.push(`F-${fid} removeCode ${what}: the feature does not have this code.`);
       continue;
     }
-    if (cur.source === 'manual' || cur.checked) {
-      report.push(`F-${fid} removeCode ${what}: a person ${cur.source === 'manual' ? 'added' : 'checked'} it. Not removed.`);
-      continue;
-    }
+    removeCodeRow(fid, cur, what, report);
+  }
+}
+
+/**
+ * The AI deletes a scope that is wrong now (deleteScopes). It always keeps a copy, so the review shows the delete with
+ * "Change back". A scope marked "To remove" (or a variation of one) is a person's decision: the AI does not delete it.
+ */
+function deleteScopeAi(p: ProjectConfig, fid: number, k: string | number, report: string[]) {
+  const key = String(k).trim();
+  const m = SCOPE_RE.exec(key);
+  const row = (m
+    ? db.prepare('SELECT id, title, remove_reason, parent_id FROM scopes WHERE id = ? AND feature_id = ?').get(Number(m[1]), fid)
+    : db.prepare('SELECT id, title, remove_reason, parent_id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key)) as any;
+  if (!row) return void report.push(`F-${fid} deleteScopes "${key}": no such scope in F-${fid}.`);
+  const label = `F-${fid} ${scopeLabel(scopeRow(row.id))} "${row.title}"`;
+  if (isRejected('scope', row.id, 'deleted', 1)) return void report.push(`${label}: not deleted: a person brought it back before.`);
+  const parentMark = row.parent_id !== null ? (db.prepare('SELECT remove_reason FROM scopes WHERE id = ?').get(row.parent_id) as any)?.remove_reason : null;
+  if (row.remove_reason || parentMark) return void report.push(`${label}: not deleted: a person marked it "To remove". A person deletes it when its tests are gone.`);
+  aiDeleteScope(p.id, row.id);
+  report.push(`${label}: deleted. The review shows it, with "Change back".`);
+}
+
+/** Takes one code entry out of a feature: see removeCode. */
+function removeCodeRow(fid: number, cur: { id: number; source: string; checked: number; ai_change: string | null }, what: string, report: string[]) {
+  if (cur.source === 'ai' && !cur.checked && cur.ai_change === null) {
     db.prepare('DELETE FROM feature_code WHERE id = ?').run(cur.id);
     report.push(`F-${fid} code: removed ${what}.`);
+    return;
   }
+  if (isRejected('code', cur.id, 'removed', 1)) return void report.push(`F-${fid} code ${what}: not removed: a person put it back before.`);
+  const tags = (db.prepare('SELECT scope_id FROM code_scopes WHERE code_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number);
+  markAiChange('feature_code', cur.id, { scopes: tags, removed: true });
+  db.prepare('UPDATE feature_code SET removed = 1 WHERE id = ?').run(cur.id);
+  db.prepare('DELETE FROM code_scopes WHERE code_id = ?').run(cur.id);
+  report.push(`F-${fid} code: removed ${what}. A person added or checked it: the review shows it, with "Change back".`);
 }
 
 // "S-14", "S14", or a copied "F-3/S-14" (the feature part is only a help for people).
@@ -570,9 +614,13 @@ function feature(p: ProjectConfig, id: string | undefined, all = false) {
 type ItemIn = string | { id: number; text: string };
 interface LinkIn {
   testId: string;
-  /** Scopes the test checks: titles or S-ids. */
+  /** Scopes the test checks: titles or S-ids. They are added to the link. */
   scopes?: (string | number)[];
   scope?: string | number;
+  /** Scopes that the test does not check: they come off the link. */
+  removeScopes?: (string | number)[];
+  /** true: the test does not check this feature. The link is removed. */
+  remove?: boolean;
 }
 interface FeatureIn {
   id?: number;
@@ -592,17 +640,24 @@ interface FeatureIn {
   /** The settings of the feature: one item for each, with its place, its choices and its default value. */
   settings?: ItemIn[];
   questions?: ItemIn[];
-  /** IDs of list items to delete (only AI draft items), scope requirements too. */
+  /** IDs of list items to delete, scope requirements too. A person's item gets a copy for "Change back". */
   removeItems?: number[];
   /** Unit kind "answer" only: IDs of open questions that the answer-questions skill answered. Deleted also when a person wrote them. */
   answeredQuestions?: number[];
   scopes?: ScopeIn[];
   links?: LinkIn[];
+  /**
+   * Unit kind "update" only: linked tests that the AI confirmed as renamed. The links of this feature move
+   * from the old test ID to the new one, with their scopes, source and check. The old test must be gone from the repo.
+   */
+  renames?: { from: string; to: string }[];
+  /** Scopes (S-ids, SV-ids or titles) that are wrong now. A scope that a person wrote or checked gets a copy, for "Change back". */
+  deleteScopes?: (string | number)[];
   /** Plugin code of the feature: a whole file, or functions in it. Sending code that the feature has already confirms it (a "check" item). */
   code?: CodeIn[];
   /**
    * Code to take out of this feature, to move it to another feature (or to "library" or "unused") after
-   * it changed. Only code that the AI added: a person's code stays. function "" or no function: the whole-file entry.
+   * it changed. A person's code is taken out with the "Changed" mark. function "" or no function: the whole-file entry.
    */
   removeCode?: { file: string; function?: string }[];
   /** Images of the feature: a local image file, a caption, and the scopes it shows. */
@@ -714,14 +769,9 @@ function apply(p: ProjectConfig, file: string | undefined) {
       const fn = String(it?.function ?? '');
       const known = it && typeof it.file === 'string' ? functionNames(p, it.file) : null;
       if (fn && known && !known.has(fn)) fail(`${what}: ${it.file} has no function "${fn}" in the coverage run. Use the names that "code" lists, or "" for the code outside functions. Nothing was saved.`);
-      // A decision makes the lines library: a person's feature would lose code that the person put there or checked.
-      const person = db
-        .prepare("SELECT c.feature_id AS fid FROM feature_code c WHERE c.project_id = ? AND c.file = ? AND c.removed = 0 AND (c.source = 'manual' OR c.checked = 1) AND (c.function = ? OR c.function = '')")
-        .get(p.id, it?.file, fn) as any;
-      if (person) fail(`${what}: a person put ${it.file} ${fn || '(code outside functions)'} in F-${person.fid} or checked it there. Keep it in a feature: send it in that feature's "code". Nothing was saved.`);
     }
   }
-  if (kind !== 'code' && body.features.some((f) => f?.removeCode !== undefined)) fail('"removeCode" works only for a code unit. Nothing was saved.');
+  if (kind !== 'code' && !update && body.features.some((f) => f?.removeCode !== undefined)) fail('"removeCode" works only for a code unit or an update. Nothing was saved.');
 
   // Files the unit read: the test file, or the code files of the area.
   let files = (unit.files ?? []).map((f) => str(f, 500)).filter(Boolean);
@@ -750,6 +800,7 @@ function apply(p: ProjectConfig, file: string | undefined) {
     for (const s of Array.isArray(inF?.scopes) ? inF.scopes : [])
       if ((s as any)?.rules !== undefined || (s as any)?.notes !== undefined) fail('A scope has only "requirements", no "rules" or "notes". Nothing was saved.');
     if (!answer && inF?.answeredQuestions !== undefined) fail('"answeredQuestions" works only with unit kind "answer". Nothing was saved.');
+    if (unit.kind !== 'update' && inF?.renames !== undefined) fail('"renames" works only with unit kind "update". Nothing was saved.');
     if ((inF as any)?.scopeSets !== undefined) fail('"scopeSets" is gone: a scope has "variations" now. Write the description and requirements on the scope. Nothing was saved.');
     for (const s of Array.isArray(inF?.scopes) ? inF.scopes : [])
       if ((s as any)?.set !== undefined || (s as any)?.values !== undefined || (s as any)?.value !== undefined)
@@ -795,6 +846,9 @@ function apply(p: ProjectConfig, file: string | undefined) {
           if (parent !== null && list<ItemIn>(s.requirements, 'scope requirements').length) report.push(`SV-${sid}: a variation has no requirements. Write them on its scope S-${parent}.`);
           else if (sid !== null) writeItems(fid, SCOPE_ITEM_KIND, list<ItemIn>(s.requirements, 'scope requirements'), report, sid);
         }
+        for (const k of list<string | number>(inF.deleteScopes, 'deleteScopes')) deleteScopeAi(p, fid, k, report);
+        // Renames first: a link in this payload for the new test then adds to the moved link.
+        for (const r of list<{ from: string; to: string }>(inF.renames, 'renames')) moveRenamedLink(p, fid, r, report);
         for (const l of list<LinkIn>(inF.links, 'links')) writeLink(p, fid, l, scopeIds, report);
         removeCode(fid, list<{ file: string; function?: string }>(inF.removeCode, 'removeCode'), report);
         writeCode(p, fid, list<CodeIn>(inF.code, 'code'), scopeIds, report, kind === 'code');
@@ -824,6 +878,18 @@ function apply(p: ProjectConfig, file: string | undefined) {
       }
       const commit = library.length || unused.length ? headCommit(p) : null;
       const named = (l: { file: string; function?: string }) => `${l.file} ${l.function || '(code outside functions)'}`;
+      // A decision makes the lines library or unused: the same code entry in a feature comes out of it.
+      // Code that a person added or checked gets the "Changed" mark, with "Change back" (removeCodeRow).
+      for (const it of [...library, ...unused] as { file: string; function?: string }[]) {
+        if (!it || typeof it.file !== 'string') continue;
+        const fn = String(it.function ?? '');
+        // In a decision, "" is the code outside functions. In a feature, "" is the whole file: not the same code.
+        if (!fn) continue;
+        for (const cur of db.prepare('SELECT id, feature_id, source, checked, ai_change FROM feature_code WHERE project_id = ? AND file = ? AND function = ? AND removed = 0').all(p.id, it.file, fn) as any[]) {
+          removeCodeRow(cur.feature_id, cur, `${it.file} ${fn || '(code outside functions)'}`, report);
+          changed.add(cur.feature_id);
+        }
+      }
       if (library.length) {
         const n = addDecisions(p, 'library', library, 'ai', commit);
         report.push(`Library code: ${n} item${n === 1 ? '' : 's'} (${library.map(named).join(', ')}).`);
@@ -1022,10 +1088,17 @@ function removeItems(fid: number, ids: number[], report: string[]) {
   for (const id of new Set(ids.map(Number))) {
     const row = db.prepare('SELECT * FROM feature_items WHERE id = ? AND feature_id = ?').get(Number(id), fid) as any;
     if (!row) throw new EditError(`No list item #${id} in F-${fid}`);
-    // A delete cannot be changed back, so the AI deletes only its own drafts. It can change the text of a person.
+    // An item that a person wrote or checked: deleted with a copy, so the review shows it with "Change back".
     const person = !row.ai_draft || !!db.prepare("SELECT 1 FROM ai_before WHERE kind = 'item' AND row_id = ? AND field = 'text'").get(row.id);
-    if (person) report.push(`F-${fid}: kept item #${id}: a person wrote or checked it. Change its text with { "id", "text" }, or name the problem in "questions".`);
-    else {
+    if (person) {
+      if (isRejected('item', row.id, 'deleted', 1)) {
+        report.push(`F-${fid}: kept item #${id}: a person brought it back before.`);
+        continue;
+      }
+      aiDeleteItem(fid, row);
+      if (row.kind === 'question') rememberAnswered(fid, row.text);
+      report.push(`F-${fid}: deleted item #${id}, which a person wrote or checked. The review shows it, with "Change back".`);
+    } else {
       db.prepare('DELETE FROM feature_items WHERE id = ?').run(row.id);
       dropBefore('item', row.id);
       // A removed question is answered or wrong: do not ask it again on this feature.
@@ -1494,39 +1567,132 @@ function writeScreenshot(p: ProjectConfig, fid: number, x: ShotIn, scopeIds: Map
 
 function writeLink(p: ProjectConfig, fid: number, l: LinkIn, scopeIds: Map<string, number | null>, report: string[]) {
   const testId = str(l.testId, 100);
+  const cur = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p.id, testId, fid) as any;
+  const tagsOf = (id: number) => (db.prepare('SELECT scope_id FROM link_scopes WHERE link_id = ?').all(id) as any[]).map((r) => r.scope_id as number);
+  // An AI change on a link that a person made or checked gets the "Changed" mark, with the old values.
+  if (l.remove) {
+    if (!cur || cur.removed) return;
+    if (isRejected('link', cur.id, 'removed', 1)) return void report.push(`${testId} -> F-${fid}: not removed: a person brought this link back before.`);
+    // An AI link that no person checked: the row goes, so the AI can link the test again later.
+    if (cur.source === 'ai' && !cur.checked && cur.ai_change === null) {
+      db.prepare('DELETE FROM links WHERE id = ?').run(cur.id);
+      report.push(`${testId} -> F-${fid}: link removed (an AI link that no person checked).`);
+      return;
+    }
+    markAiChange('links', cur.id, { scopes: tagsOf(cur.id), removed: true });
+    db.prepare('UPDATE links SET removed = 1 WHERE id = ?').run(cur.id);
+    db.prepare('DELETE FROM link_scopes WHERE link_id = ?').run(cur.id);
+    report.push(`${testId} -> F-${fid}: link removed.`);
+    return;
+  }
   if (!db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL').get(p.id, testId))
     throw new EditError(`Unknown test ${testId}. Use the test IDs that "next" or "code" gave`);
   const keys = [...list<string | number>(l.scopes, `scopes of ${testId}`), ...(l.scope !== undefined && l.scope !== null ? [l.scope] : [])];
   const want = resolveScopes(fid, keys, scopeIds, `Link ${testId}`, report);
-  if (keys.length && !want.length) {
-    report.push(`${testId} -> F-${fid}: link not added or changed, because a person deleted, moved or marked "To remove" all its scopes. Link it by hand if it still belongs here.`);
+  const offKeys = list<string | number>(l.removeScopes, `removeScopes of ${testId}`);
+  // Scopes to take off: any scope of the feature, also one marked "To remove" (taking a tag off only cleans up).
+  const off = offKeys.flatMap((k) => {
+    const key = String(k).trim();
+    const m = SCOPE_RE.exec(key);
+    const row = (m
+      ? db.prepare('SELECT id FROM scopes WHERE id = ? AND feature_id = ?').get(Number(m[1]), fid)
+      : db.prepare('SELECT id FROM scopes WHERE feature_id = ? AND lower(title) = lower(?)').get(fid, key)) as { id: number } | undefined;
+    if (!row) report.push(`Link ${testId}: removeScopes "${key}" is not a scope of F-${fid}.`);
+    return row ? [row.id] : [];
+  });
+  if (keys.length && !want.length && !off.length) {
+    report.push(`${testId} -> F-${fid}: link not added or changed, because none of its scopes is in F-${fid} now.`);
     return;
   }
   const addScopes = (linkId: number, ids: number[]) => addScopeTags('link_scopes', linkId, ids);
 
-  const cur = db.prepare('SELECT * FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p.id, testId, fid) as any;
   if (!cur) {
     const id = Number(db.prepare("INSERT INTO links (project_id, test_id, feature_id, source) VALUES (?, ?, ?, 'ai')").run(p.id, testId, fid).lastInsertRowid);
     addScopes(id, want);
     report.push(`${testId} -> F-${fid}${want.length ? ` / ${names(want)}` : ' (no scope)'}: new link.`);
     return;
   }
-  if (cur.removed) {
+  if (cur.removed && cur.ai_change === null) {
     report.push(`${testId} -> F-${fid}: a person removed this link before. Not added again.`);
     return;
   }
-  const have = new Set((db.prepare('SELECT scope_id FROM link_scopes WHERE link_id = ?').all(cur.id) as any[]).map((r) => r.scope_id as number));
-  const missing = want.filter((s) => !have.has(s));
-  if (!missing.length) return;
-  // A person made or changed this link: leave it as it is, and only suggest.
-  if (cur.source === 'manual') {
-    report.push(`${testId} -> F-${fid}: a person made this link. Not changed. Suggested scopes: ${names(missing)}.`);
+  const have = tagsOf(cur.id);
+  const next = [...new Set([...have.filter((s) => !off.includes(s)), ...want])];
+  // Every scope comes off: the test checks nothing of this feature now. A link with no scope would count for
+  // the whole feature, so the link is removed.
+  if (!cur.removed && have.length && !next.length) return writeLink(p, fid, { testId, remove: true }, scopeIds, report);
+  // The AI removed this link before, and no person checked it yet: the AI brings it back.
+  const back = !!cur.removed;
+  if (!back && scopeSetKey(next) === scopeSetKey(have)) return;
+  if (!back && isRejected('link', cur.id, 'scopes', scopeSetKey(next))) {
+    report.push(`${testId} -> F-${fid}: did not set the scopes to ${names(next)}: a person changed them back before.`);
     return;
   }
-  addScopes(cur.id, missing);
-  // New AI scopes on the link: a person must check the link again.
-  db.prepare('UPDATE links SET checked = 0 WHERE id = ?').run(cur.id);
-  report.push(`${testId} -> F-${fid}: added ${names(missing)}.`);
+  markAiChange('links', cur.id, { scopes: have });
+  if (back) {
+    db.prepare('UPDATE links SET removed = 0 WHERE id = ?').run(cur.id);
+    // Only the old values stay: "removed" is not a change now.
+    const ch = JSON.parse((db.prepare('SELECT ai_change FROM links WHERE id = ?').get(cur.id) as any).ai_change ?? '{}');
+    delete ch.removed;
+    db.prepare('UPDATE links SET ai_change = ? WHERE id = ?').run(Object.keys(ch).length ? JSON.stringify(ch) : null, cur.id);
+  }
+  db.prepare('DELETE FROM link_scopes WHERE link_id = ?').run(cur.id);
+  addScopes(cur.id, next);
+  const added = next.filter((s) => !have.includes(s));
+  const taken = have.filter((s) => !next.includes(s));
+  report.push(`${testId} -> F-${fid}:${back ? ' link back,' : ''}${added.length ? ` added ${names(added)}` : ''}${added.length && taken.length ? ',' : ''}${taken.length ? ` took off ${names(taken)}` : ''}.`);
+}
+
+/**
+ * Moves the link of a renamed test (old ID gone from the repo) to its new ID, for one feature.
+ * A wrong pair is skipped with a note: it must not lose the rest of the AI answer.
+ */
+function moveRenamedLink(p: ProjectConfig, fid: number, r: { from: string; to: string }, report: string[]) {
+  const from = str(r?.from, 100);
+  const to = str(r?.to, 100);
+  const label = `Rename ${from || '?'} -> ${to || '?'} on F-${fid}`;
+  if (db.prepare('SELECT 1 FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL').get(p.id, from)) {
+    report.push(`${label}: not moved, because ${from} is still in the repo.`);
+    return;
+  }
+  const old = db.prepare('SELECT id FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ? AND removed = 0').get(p.id, from, fid) as any;
+  if (!old) return void report.push(`${label}: not moved: F-${fid} has no active link to ${from}.`);
+  if (isRejected('link', old.id, 'test', to) || isRejected('link', old.id, 'removed', 1)) {
+    report.push(`${label}: not moved: a person changed this move back before.`);
+    return;
+  }
+  const target = db.prepare('SELECT id, removed, ai_change FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p.id, to, fid) as any;
+  // A person removed the new test's link: the AI does not add it again.
+  if (target?.removed && target.ai_change === null) {
+    report.push(`${label}: not moved, because a person removed the link of ${to} to F-${fid}. Move or link it by hand if it belongs here.`);
+    return;
+  }
+  if (target) {
+    // The new test has a link already (also one that the AI removed): its link gets the scopes of the old link,
+    // and the old link is removed. Each change has its own "Changed" mark, so "Change back" undoes each one.
+    const tags = (db.prepare('SELECT scope_id FROM link_scopes WHERE link_id = ?').all(old.id) as any[]).map((x) => `S-${x.scope_id}`);
+    writeLink(p, fid, { testId: to, scopes: tags }, new Map(), report);
+    if (target.removed && !tags.length) {
+      // writeLink brings back a removed link only with scopes: an old link for the whole feature brings it back here.
+      const back = db.prepare('SELECT ai_change FROM links WHERE id = ?').get(target.id) as any;
+      const ch = JSON.parse(back.ai_change ?? '{}');
+      delete ch.removed;
+      db.prepare('UPDATE links SET removed = 0, ai_change = ? WHERE id = ?').run(Object.keys(ch).length ? JSON.stringify(ch) : null, target.id);
+    }
+    writeLink(p, fid, { testId: from, remove: true }, new Map(), report);
+    report.push(`${label}: the link of ${to} got the scopes of the old link, and the old link is removed.`);
+    return;
+  }
+  try {
+    edits.moveTestLinks(p.id, { from, to, featureId: fid });
+    // The review shows the move as "Changed", with the old test ID and "Change back".
+    const moved = db.prepare('SELECT id FROM links WHERE project_id = ? AND test_id = ? AND feature_id = ?').get(p.id, to, fid) as any;
+    if (moved) markAiChange('links', moved.id, { test: from });
+    report.push(`${label}: link moved, with its scopes.`);
+  } catch (e) {
+    if (!(e instanceof EditError)) throw e;
+    report.push(`${label}: not moved. ${e.message}.`);
+  }
 }
 
 function skip(p: ProjectConfig, kind: Kind, ref: string | undefined, reason: string | undefined, codeFiles: string[]) {

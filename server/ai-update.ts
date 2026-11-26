@@ -11,6 +11,8 @@
  *     new text has the AI draft mark. Text that a person wrote or checked can change too: the review
  *     shows the old text with "Change back". Screenshots can get tags, lose tags, or be marked as old.
  *     A suggestion for such text goes into the feature's questions.
+ *     A linked test that the change report lists as a likely rename: the model checks the new test, and a
+ *     confirmed pair ("renames") moves the feature's link to the new test ID, with its scopes.
  *
  * Each run is a row in ai_updates, with its cost (total_cost_usd of the JSON output).
  * The AI step is separate from the sync: the fixed steps never need it.
@@ -262,11 +264,27 @@ export function queueReview(p: ProjectConfig): string {
   const add = db.prepare('INSERT INTO ai_review_pending (project_id, feature_id, from_commit) VALUES (?, ?, ?) ON CONFLICT (project_id, feature_id) DO NOTHING');
   // A feature marked "To remove" goes in the list too. runReview skips it while it has the mark, so a
   // cleared mark does not lose the review of these changes.
+  // A feature with a link to a test that is gone from the repo, also from an earlier sync: the AI moves or
+  // removes the link (buildPrompt lists them). Else its scopes stay "not covered", and no one sees why.
+  // One time only: not when an AI review of the feature finished after the test went (the AI saw it then),
+  // and not when a person changed the AI's move or remove of that link back (the person keeps the link).
+  const gone = (db
+    .prepare(
+      `SELECT DISTINCT l.feature_id AS id FROM links l LEFT JOIN tests t ON t.project_id = l.project_id AND t.id = l.test_id
+       WHERE l.project_id = ? AND l.removed = 0 AND (t.id IS NULL OR t.removed_at IS NOT NULL)
+         AND NOT EXISTS (SELECT 1 FROM ai_rejected r WHERE r.kind = 'link' AND r.row_id = l.id AND r.field IN ('test', 'removed'))
+         AND NOT EXISTS (
+           SELECT 1 FROM ai_updates u WHERE u.project_id = l.project_id AND u.feature_id = l.feature_id
+             AND u.status IN ('applied', 'no-change', 'proposed')
+             AND u.finished_at > COALESCE(t.removed_at, strftime('%Y-%m-%dT%H:%M:%fZ', l.created_at)))`,
+    )
+    .all(p.id) as any[]).map((x) => x.id as number);
+  const ids = new Set([...r.review.map((x) => x.featureId), ...gone]);
   tx(() => {
-    for (const x of r.review) add.run(p.id, x.featureId, from);
+    for (const id of ids) add.run(p.id, id, from);
     setCommit();
   });
-  return `${from.slice(0, 8)}..${to.slice(0, 8)}: ${r.review.length} features to review.`;
+  return `${from.slice(0, 8)}..${to.slice(0, 8)}: ${ids.size} features to review.`;
 }
 
 export interface PendingReview {
@@ -371,7 +389,13 @@ export interface Proposal {
   questions?: ItemOut[];
   removeItems?: number[];
   scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[]; variations?: Record<string, string>[] }[];
-  links?: { testId: string; scopes?: string[] }[];
+  links?: { testId: string; scopes?: string[]; removeScopes?: string[]; remove?: boolean }[];
+  /** Scopes (S-ids or SV-ids) that are wrong now: the plugin does not do this, or another scope says the same. */
+  deleteScopes?: string[];
+  /** Plugin code to take out of the feature: it is gone, or it does not do this feature. function "" or none: the whole-file entry. */
+  removeCode?: { file: string; function?: string }[];
+  /** Linked tests that the model confirmed as renamed: the feature's link moves from the old ID to the new one. */
+  renames?: { from: string; to: string }[];
   screenshots?: { id: string; addScopes?: string[]; removeScopes?: string[]; caption?: string; remove?: boolean; stale?: string }[];
 }
 
@@ -425,7 +449,37 @@ export const SCHEMA = {
         type: 'object',
         additionalProperties: false,
         required: ['testId'],
-        properties: { testId: { type: 'string' }, scopes: { type: 'array', items: { type: 'string' } } },
+        properties: {
+          testId: { type: 'string' },
+          scopes: { type: 'array', items: { type: 'string' }, description: 'Scopes (S-ids, SV-ids or titles) that the test checks: added to the link' },
+          removeScopes: { type: 'array', items: { type: 'string' }, description: 'Scopes on the link that the test does not check: taken off' },
+          remove: { type: 'boolean', description: 'true: the test does not check this feature. The link is removed' },
+        },
+      },
+    },
+    deleteScopes: {
+      type: 'array',
+      description: 'S-ids or SV-ids of scopes that are wrong now: the plugin does not do this any more, or another scope says the same',
+      items: { type: 'string' },
+    },
+    removeCode: {
+      type: 'array',
+      description: 'Code entries of this feature to take out: the code is gone, or it does not do this feature',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['file'],
+        properties: { file: { type: 'string' }, function: { type: 'string', description: 'Function name, or "" for the whole-file entry' } },
+      },
+    },
+    renames: {
+      type: 'array',
+      description: 'A linked test that is gone from the repo, and the new test that checks the same thing',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['from', 'to'],
+        properties: { from: { type: 'string', description: 'Old test ID' }, to: { type: 'string', description: 'New test ID' } },
       },
     },
     screenshots: {
@@ -480,7 +534,10 @@ function repoTestPath(p: ProjectConfig, framework: string, file: string) {
 
 export async function buildPrompt(p: ProjectConfig, r: ChangeReport, featureId: number): Promise<{ prompt: string; feature: any }> {
   const feature = await featureJson(p, featureId);
-  const reasons = r.review.find((x) => x.featureId === featureId)?.reasons ?? ['asked for by a person'];
+  const goneCount = (db
+    .prepare('SELECT COUNT(*) AS n FROM links l LEFT JOIN tests t ON t.project_id = l.project_id AND t.id = l.test_id WHERE l.feature_id = ? AND l.removed = 0 AND (t.id IS NULL OR t.removed_at IS NOT NULL)')
+    .get(featureId) as any).n as number;
+  const reasons = r.review.find((x) => x.featureId === featureId)?.reasons ?? (goneCount ? [`${goneCount} linked tests are gone from the repo`] : ['asked for by a person']);
 
   // Files of the feature: its code, and the test files of its links.
   const code = (db.prepare('SELECT DISTINCT file FROM feature_code WHERE feature_id = ? AND removed = 0').all(featureId) as any[]).map((x) => x.file as string);
@@ -512,7 +569,15 @@ export async function buildPrompt(p: ProjectConfig, r: ChangeReport, featureId: 
   }
   const scopesOf = (file: string, name: string) => [...(codeScopes.get(`${file}\0${name}`) ?? []), ...(codeScopes.get(`${file}\0`) ?? [])];
   const gone = r.codeGone.filter((g) => g.featureId === featureId);
-  const renames = r.renames.filter((x) => linked.has(x.from.id));
+  // Every linked test that is gone from the repo, also from an earlier sync: until the AI moves or removes
+  // the link, its scopes count as not covered. The change report gives a likely new test for some of them.
+  const likely = new Map(r.renames.map((x) => [x.from.id, x.to]));
+  const goneLinks = db
+    .prepare(
+      `SELECT l.test_id AS id, t.title FROM links l LEFT JOIN tests t ON t.project_id = l.project_id AND t.id = l.test_id
+       WHERE l.feature_id = ? AND l.removed = 0 AND (t.id IS NULL OR t.removed_at IS NOT NULL)`,
+    )
+    .all(featureId) as { id: string; title: string | null }[];
   const unlinked = r.tests.added.filter((t) => t.links === 0).slice(0, 40);
 
   const prompt = `You update one feature in a feature tracker for the WordPress plugin "${p.name}".
@@ -533,7 +598,7 @@ ${JSON.stringify(feature, null, 2)}
 
 ## Changed PHP functions in the files of this feature
 ${fns.length ? fns.map((f) => { const sc = scopesOf(f.file, f.name); return `- ${f.change}: ${f.file} ${f.name}${sc.length ? ` (code of ${sc.join(', ')})` : ''}`; }).join('\n') : '- none'}
-${gone.length ? `\n## Code of this feature that is not in the code now\n${gone.map((g) => `- ${g.file} ${g.function ?? '(whole file)'}: ${g.reason}${g.movedTo ? ' -> ' + g.movedTo : ''}`).join('\n')}\n` : ''}${renames.length ? `\n## Linked tests that were likely renamed (a person moves the links in the app)\n${renames.map((x) => `- ${x.from.id} "${x.from.title}" -> ${x.to.id} "${x.to.title}"`).join('\n')}\n` : ''}
+${gone.length ? `\n## Code of this feature that is not in the code now\n${gone.map((g) => `- ${g.file} ${g.function ?? '(whole file)'}: ${g.reason}${g.movedTo ? ' -> ' + g.movedTo : ''}`).join('\n')}\n` : ''}${goneLinks.length ? `\n## Linked tests that are gone from the repo\nThe link still points at the old ID, so its scopes count as not covered. Fix each one: move it with "renames", or remove it with "links".\n${goneLinks.map((x) => { const to = likely.get(x.id); return `- ${x.id}${x.title ? ` "${x.title}"` : ''}${to ? ` (likely renamed to ${to.id} "${to.title}")` : ''}`; }).join('\n')}\n` : ''}
 ## New tests that no feature links yet
 ${unlinked.length ? unlinked.map((t) => `- ${t.id} (${t.framework}, ${t.file}${t.tags?.length ? `, tags: ${t.tags.join(' ')}` : ''}): ${t.title}`).join('\n') : '- none'}
 
@@ -548,10 +613,12 @@ ${diff || '(no changes in these files)'}
   - You can change any text: AI draft text and text that a person wrote or checked. A person sees each change of their text in the review, with "Change back". So change a person's text only when the code proves it wrong now, never for style or wording.
   - "title", "description": a new text replaces the old one.
   - List fields (requirements, notes, outOfScope, where, settings, questions): a string adds an item. {"id", "text"} changes an item.
-  - "removeItems": IDs of AI draft items that are now wrong. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope. An item that a person wrote (aiDraft false) cannot be deleted: change its text instead.
+  - "removeItems": IDs of items that are now wrong, also items that a person wrote. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope.
   - "screenshots": you cannot see the images. Use the caption, the scopes and the code. Add a tag ("addScopes") when the caption shows that the image shows a scope. Take a tag off ("removeScopes") when the scope is gone or the image does not show it now. Fix a caption that is wrong now. When the code changed what the screen shows (a label, a field, a layout), set "stale" to the reason: a later run takes a new image. Use "remove" only when the screen is gone from the plugin.
-  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. When an existing scope has "variations" (one check in several places, for example a row for each page) and the new behavior is that check in one more place, send that scope with its "id" and title and a "variations" list with the new variation only, an object with the column names as keys (for example [{"Page": "Checkout page"}]). Write only variations that the plugin really has, not all combinations. A variation has no description and no requirements: its scope has them. A scope that is now wrong cannot be deleted here: add a question for it.
-  - "links": only for a test in "New tests that no feature links yet" that really checks this feature. Give the S-ids or the titles of the scopes it checks. For a scope with variations, give the SV-ids of the variations that the test checks, not the S-id of the scope. For a new variation of this answer, which has no SV-id yet, give its title: the scope title and the values in brackets, with commas, for example "Price shows (Checkout page)".
+  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. When an existing scope has "variations" (one check in several places, for example a row for each page) and the new behavior is that check in one more place, send that scope with its "id" and title and a "variations" list with the new variation only, an object with the column names as keys (for example [{"Page": "Checkout page"}]). Write only variations that the plugin really has, not all combinations. A variation has no description and no requirements: its scope has them. A scope that is now wrong (the plugin does not do it any more, or another scope says the same): put its S-id or SV-id in "deleteScopes". Its links and screenshots lose the tag.
+  - "renames": for each test in "Linked tests that are gone from the repo", find the test that checks the same thing now (the likely rename, or another test in the code). Send {"from": "<old ID>", "to": "<new ID>"}. The link moves with its scopes. Do not also put the new test in "links". When no test checks it now, remove the link: {"testId": "<old ID>", "remove": true} in "links".
+  - "removeCode": a code entry of the feature ("code" in the feature JSON) that is gone from the plugin, or that does not do this feature now. Give its "file" and "function" ("" for a whole-file entry). You can remove every entry, also one that a person added.
+  - "links": for a new test that checks this feature, and to correct a link that is there: "scopes" adds scopes, "removeScopes" takes off scopes that the test does not check, "remove": true removes a link whose test does not check this feature. You can change every link, also one that a person made. A person sees each change in the review, with "Change back". Give the S-ids or the titles of the scopes it checks. For a scope with variations, give the SV-ids of the variations that the test checks, not the S-id of the scope. For a new variation of this answer, which has no SV-id yet, give its title: the scope title and the values in brackets, with commas, for example "Price shows (Checkout page)".
   - A scope with "toRemove": a person decided that it must go. Do not change it, link a test to it, or add the same behavior again as a new scope.
   - Do not add a scope for the page before this feature changes it (for example "Guest sees the price by default" on a feature that hides the price). The page then shows what WooCommerce or another feature makes. One scope "turn the setting on, then off: the result comes back" is allowed.
   - Behavior that needs another plugin (Premium, Lead Capture, Order Form, Payments, or a third-party plugin) belongs to a feature in an "Integration/<plugin>" group. If this feature is not in such a group, do not add such a scope here and do not link a test from an "Integration/" folder or with an "@integration:" tag. Add a question that names the behavior or the test instead.
@@ -815,23 +882,63 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
   // It links only to a feature in an "Integration/<plugin>" group. The prompt says this too, but the model can ignore it.
   const group = db.prepare('SELECT g.title FROM features f LEFT JOIN feature_groups g ON g.id = f.group_id WHERE f.id = ?').get(featureId) as { title: string | null } | undefined;
   const integrationFeature = !!group?.title?.startsWith('Integration/');
-  const links = (pr.links ?? []).flatMap((l) => {
+  const isIntegrationTest = (row: { file: string; tags: string }) => {
+    const tags = JSON.parse(row.tags || '[]') as string[];
+    return row.file.startsWith('Integration/') || tags.some((t) => t === '@integration' || t.startsWith('@integration:'));
+  };
+  const linkOf = db.prepare('SELECT 1 FROM links WHERE project_id = ? AND feature_id = ? AND test_id = ? AND removed = 0');
+  type LinkOut = { testId: string; scopes?: string[]; removeScopes?: string[]; remove?: boolean };
+  const links = (pr.links ?? []).flatMap((l): LinkOut[] => {
+    // A remove needs only a link of this feature: its test can be gone from the repo.
+    if (l.remove) {
+      if (!linkOf.get(p.id, featureId, l.testId)) return void dropped.push(`links: F-${featureId} has no link to ${l.testId}, so there is nothing to remove`), [];
+      return [{ testId: l.testId, remove: true }];
+    }
     const row = tests.get(p.id, l.testId) as { file: string; tags: string } | undefined;
     if (!row) return void dropped.push(`links: no test ${l.testId} in the last scan`), [];
-    const tags = JSON.parse(row.tags || '[]') as string[];
-    const integrationTest = row.file.startsWith('Integration/') || tags.some((t) => t === '@integration' || t.startsWith('@integration:'));
-    if (integrationTest && !integrationFeature) {
+    if (isIntegrationTest(row) && !integrationFeature) {
       return void dropped.push(`links: ${l.testId} not linked, because it is an integration test and F-${featureId} is not in an "Integration/" group`), [];
     }
     const keys = (l.scopes ?? []).map((k) => String(k).trim()).filter(Boolean);
     const good = keys.filter((k) => known.has(norm(k)) && !varied.has(norm(k)));
     for (const k of keys.filter((k) => !good.includes(k)))
       dropped.push(varied.has(norm(k)) ? `links: ${l.testId} names the scope "${k}", which has variations. Name its variations (SV-ids) instead` : `links: ${l.testId} names the scope "${k}", which is not in F-${featureId}`);
-    // A link whose scopes are all unknown would say only "about the feature": leave it to a person.
-    if (keys.length && !good.length) return void dropped.push(`links: ${l.testId} not linked, because none of its scopes is in F-${featureId}`), [];
-    return [{ testId: l.testId, ...(good.length ? { scopes: good } : {}) }];
+    const offKeys = (l.removeScopes ?? []).map((k) => String(k).trim()).filter(Boolean);
+    const off = offKeys.filter((k) => known.has(norm(k)) && !varied.has(norm(k)));
+    for (const k of offKeys.filter((k) => !off.includes(k))) dropped.push(`links: ${l.testId} removeScopes names "${k}", which is not a scope or variation of F-${featureId}`);
+    // A new link whose scopes are all unknown would say only "about the feature".
+    if (keys.length && !good.length && !off.length) return void dropped.push(`links: ${l.testId} not linked, because none of its scopes is in F-${featureId}`), [];
+    return [{ testId: l.testId, ...(good.length ? { scopes: good } : {}), ...(off.length ? { removeScopes: off } : {}) }];
   });
   if (links.length) f.links = links;
+  // Renames: an old test that this feature links, and a new test that is in the repo. Apply checks the rest.
+  const renames = (pr.renames ?? []).flatMap((x) => {
+    const from = String(x?.from ?? '').trim();
+    const to = String(x?.to ?? '').trim();
+    if (!linkOf.get(p.id, featureId, from)) return void dropped.push(`renames: F-${featureId} has no link to ${from || '(empty)'}`), [];
+    const row = tests.get(p.id, to) as { file: string; tags: string } | undefined;
+    if (!row) return void dropped.push(`renames: no test ${to || '(empty)'} in the last scan`), [];
+    if (isIntegrationTest(row) && !integrationFeature)
+      return void dropped.push(`renames: ${from} -> ${to} not moved, because ${to} is an integration test and F-${featureId} is not in an "Integration/" group`), [];
+    return [{ from, to }];
+  });
+  if (renames.length) f.renames = renames;
+  const codeRow = db.prepare('SELECT 1 FROM feature_code WHERE feature_id = ? AND file = ? AND function = ? AND removed = 0');
+  const removeCode = (pr.removeCode ?? []).flatMap((x) => {
+    const file = String(x?.file ?? '').trim();
+    const fn = String(x?.function ?? '').trim();
+    if (!codeRow.get(featureId, file, fn)) return void dropped.push(`removeCode: F-${featureId} has no code entry ${file || '(empty)'} ${fn || '(whole file)'}`), [];
+    return [{ file, function: fn }];
+  });
+  if (removeCode.length) f.removeCode = removeCode;
+  const marked = db.prepare('SELECT 1 FROM scopes s LEFT JOIN scopes p ON p.id = s.parent_id WHERE s.id = ? AND (s.remove_reason IS NOT NULL OR p.remove_reason IS NOT NULL)');
+  const deleteScopes = (pr.deleteScopes ?? []).filter((k) => {
+    const n = Number(String(k).replace(/^.*?SV?-/i, ''));
+    if (!scopeIds.has(n)) return void dropped.push(`deleteScopes: no scope ${k} in F-${featureId}`), false;
+    if (marked.get(n)) return void dropped.push(`deleteScopes: ${k} is marked "To remove": a person deletes it`), false;
+    return true;
+  });
+  if (deleteScopes.length) f.deleteScopes = deleteScopes;
   // Screenshot changes: only screenshots of this feature, and only scopes that apply can find.
   const shotIds = new Set((db.prepare('SELECT id FROM screenshots WHERE feature_id = ? AND removed = 0').all(featureId) as any[]).map((x) => x.id as number));
   const shots = (pr.screenshots ?? []).flatMap((x) => {

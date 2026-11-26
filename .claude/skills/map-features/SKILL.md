@@ -49,13 +49,16 @@ calls). The tool keeps the rules that protect people's work:
   Change a person's text only when the code or the test site proves it wrong, or when it breaks a
   writing rule that a reader needs (for example a wrong label). Never change it only for style.
 - It does not write again a value that a person changed back. The report says so: do not send it again.
-- It deletes only AI draft list items. A person's item can get new text, but it is not deleted.
+- It can delete any list item (`removeItems`) and any scope (`deleteScopes`), also one that a person
+  wrote or checked. The review shows the delete with "Change back".
 - It can change any screenshot, also one that a person checked or uploaded: add or take off tags,
   give a new caption, replace the image, or delete it. The review shows each change with "Change back".
-- Roles, scopes, the scopes of a link and the code of a feature are only added.
+- Roles are only added. On links and code, also the ones that a person made or checked, it can add and
+  take off scopes, remove a link (`"remove": true`) and take out code (`removeCode`). The review shows
+  each change as "Changed", with the old value and "Change back".
 - It does not add again code that a person removed from a feature.
 - It does not add again or change a screenshot that a person deleted.
-- It does not add again a link that a person removed, and it does not change a link that a person made.
+- It does not add again a link that a person removed.
 - It does not add again a scope that a person deleted or moved to another feature (it matches by title or S-id).
   The report says so, and the tool skips the requirements, links and screenshots of that scope in the payload.
   Do not send the scope again. If the moved scope belongs in this unit, send it under its new feature.
@@ -193,7 +196,7 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   added (the same text again adds nothing). To correct one of your own AI
   draft items, send `{ "id": 12, "text": "…" }`. To delete one, put its ID in
   `removeItems`. For an item that a person wrote or checked, `{ "id", "text" }`
-  works (only when it is wrong), and `removeItems` is refused.
+  works (only when it is wrong), and `removeItems` deletes it (the review shows it).
 - Reuse a scope when it means the same thing: give its `id` (`S-4`). A new
   title makes a new scope, so a reworded copy makes a near copy.
 - **Before you make a scope, read the title and the requirements of each
@@ -386,11 +389,11 @@ coverage by feature (Features tab > "Code by feature"). Give:
   the screen of the feature.
 - For a test file, start from `test-code`, then read the code to check it.
   For a code area, use the files of the area.
-- The tool only adds code, with one exception: `removeCode` on a feature takes
-  out code that the AI added, to move it after a change:
+- `removeCode` on a feature takes out code that does not do the feature, also
+  code that a person added or checked (the review shows it, with "Change back"):
   `"removeCode": [{ "file": "includes/class-x.php", "function": "Class_X::old" }]`
-  (no function: the whole-file entry). Code that a person added stays. If
-  other code you added before is wrong, say so in the report: a person removes it in the app.
+  (no function: the whole-file entry). A `library` or `unused` decision takes
+  the same entry out of each feature too.
 
 **Sort the code (code units).** For each `open` or `check` item of the files
 in `unit.files`, decide (the coverage state does not matter: `tested` code
