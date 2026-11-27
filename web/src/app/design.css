@@ -358,12 +358,16 @@ button.copied svg{opacity:1}
 .shot-tags{display:flex;flex-wrap:wrap;gap:4px;padding:0 12px 10px}
 .shot-acts{position:absolute;top:8px;right:8px;display:flex;gap:6px}
 .shot-acts .shot-del{position:static}
-.lightbox{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(10,10,10,.8);border:0;cursor:zoom-out}
-.lightbox img{max-width:100%;max-height:100%;border-radius:8px}
-.scope-shots{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px}
-.scope-shot{padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface-2);cursor:zoom-in}
-.scope-shot:hover{border-color:var(--accent)}
-.scope-shot img{display:block;width:160px;aspect-ratio:16/10;object-fit:cover;object-position:top}
+.lightbox{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(10,10,10,.8);border:0;cursor:zoom-out;flex-direction:column;gap:12px}
+.lightbox img{max-width:100%;max-height:100%;min-height:0;object-fit:contain;border-radius:8px}
+.lightbox-cap{max-width:min(720px,100%);padding:8px 14px;border-radius:8px;background:rgba(0,0,0,.6);color:#fff;font-size:14px;line-height:1.5;text-align:center;text-wrap:pretty}
+.scope-shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:6px 16px;align-items:start;padding:10px 14px}
+.scope-shot{display:flex;align-items:flex-start;gap:12px;padding:4px;margin:0 -4px;border:0;border-radius:8px;background:transparent;text-align:left;color:inherit;font:inherit;cursor:zoom-in}
+.scope-shot:hover{background:var(--surface-2)}
+.scope-shot img{display:block;flex:none;width:112px;aspect-ratio:16/10;object-fit:cover;object-position:top;border:1px solid var(--line);border-radius:6px}
+.scope-shot:hover img{border-color:var(--accent)}
+.scope-shot-cap{font-size:13px;line-height:1.45;color:var(--ink-2);text-wrap:pretty}
+.scope-shot-cap.faint{color:var(--ink-3)}
 .grp-title{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .grp-title .ie{width:auto;flex:0 1 auto;margin:-4px -8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
 .check-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:0;background:transparent;padding:8px 10px;border-radius:8px;cursor:pointer}

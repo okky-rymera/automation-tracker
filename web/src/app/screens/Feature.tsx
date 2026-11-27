@@ -411,7 +411,7 @@ function RowShots({ p, shots, hasVars, onMore }: { p: string; shots: Screenshot[
       ))}
       {more > 0 && <button className="row-shot row-shot-more" onClick={onMore} title={hasVars ? 'Open the scope. The screenshots are on each variation.' : 'Open the scope to see all screenshots'}>+{more}</button>}
       {big !== null && (
-        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
+        <Lightbox src={screenshotUrl(p, big)} caption={shots.find((x) => x.id === big)?.caption} onClose={closeBig} />
       )}
     </div>
   );
@@ -627,7 +627,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
           </div>
         </div>
       {big !== null && (
-        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
+        <Lightbox src={screenshotUrl(p, big)} caption={f.screenshots.find((x) => x.id === big)?.caption} onClose={closeBig} />
       )}
       {modal === 'link' && (
         <LinkPicker t={t} have={have} title={`Link a test to S-${s.id}`} sub={`${s.title}. Tests in no feature come first.`} onClose={() => setModal(null)}
@@ -661,8 +661,9 @@ function ScopeShots({ p, shots, onBig }: { p: string; shots: Screenshot[]; onBig
       </div>
       <div className="scope-shots">
         {shots.map((sh) => (
-          <button key={sh.id} className="scope-shot" onClick={() => onBig(sh.id)} title={sh.caption || `IMG-${sh.id}: show full size`}>
+          <button key={sh.id} className="scope-shot" onClick={() => onBig(sh.id)} title={sh.caption ? `${sh.caption}\n\nIMG-${sh.id}: show full size` : `IMG-${sh.id}: show full size`}>
             <img src={screenshotUrl(p, sh.id)} alt={sh.caption || `Screenshot IMG-${sh.id}`} loading="lazy" />
+            <span className={`scope-shot-cap${sh.caption ? '' : ' faint'}`}>{sh.caption || 'No caption'}</span>
           </button>
         ))}
       </div>
@@ -849,7 +850,7 @@ function VariationDetail({ t, f, s, v, onBack }: { t: Tracker; f: FeatureX; s: S
         >Delete variation</button>
       </div>
       {big !== null && (
-        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
+        <Lightbox src={screenshotUrl(p, big)} caption={f.screenshots.find((x) => x.id === big)?.caption} onClose={closeBig} />
       )}
       {linking && (
         <LinkPicker t={t} have={new Set(links.map((l) => l.testId))} title={`Link a test to SV-${v.id}`} sub={`${v.title}. Tests in no feature come first.`} onClose={() => setLinking(false)}
@@ -1167,7 +1168,7 @@ function ShotsTab({ t, f }: { t: Tracker; f: FeatureX }) {
       <button className="shot-add" onClick={() => file.current?.click()}><IPlus s={16} />Add a screenshot (or paste one)</button>
       <input ref={file} type="file" accept="image/*" multiple hidden onChange={(e) => (void upload(e.target.files), (e.target.value = ''))} />
       {big !== null && (
-        <Lightbox src={screenshotUrl(p, big)} onClose={closeBig} />
+        <Lightbox src={screenshotUrl(p, big)} caption={f.screenshots.find((x) => x.id === big)?.caption} onClose={closeBig} />
       )}
       {tagging && (
         <ScopeTags f={f} title={`Scopes that IMG-${tagging.id} shows`} sub="No scope: the image shows the feature in general." ids={tagging.scopeIds}

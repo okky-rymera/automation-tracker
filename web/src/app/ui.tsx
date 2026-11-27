@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { reloadAll } from '../api';
 
 /* ---------------- Icons ---------------- */
@@ -351,8 +351,9 @@ export function useEscapeClose(onClose: () => void) {
  * and gives the focus back to the button that opened it. Its Escape runs before the Escape of a popup
  * under it, so only the image closes.
  */
-export function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+export function Lightbox({ src, caption, onClose }: { src: string; caption?: string; onClose: () => void }) {
   const ref = useRef<HTMLButtonElement>(null);
+  const capId = useId();
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
     ref.current?.focus();
@@ -367,7 +368,12 @@ export function Lightbox({ src, onClose }: { src: string; onClose: () => void })
       if (opener?.isConnected) opener.focus();
     };
   }, [onClose]);
-  return <button ref={ref} className="lightbox" onClick={onClose} aria-label="Close the image"><img src={src} alt="" /></button>;
+  return (
+    <button ref={ref} className="lightbox" onClick={onClose} aria-label="Close the image" aria-describedby={caption ? capId : undefined}>
+      <img src={src} alt="" />
+      {caption && <span id={capId} className="lightbox-cap">{caption}</span>}
+    </button>
+  );
 }
 
 export function Dialog({ title, sub, onClose, children, foot, filter, onFilter, wide }: {
