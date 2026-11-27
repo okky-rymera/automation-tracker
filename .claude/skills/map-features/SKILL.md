@@ -204,7 +204,7 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   other words. But a step to another scope's result can be its own scope,
   when a person sees its own result and it can fail by itself.
   Example: S-3 "Checking the hide checkbox and saving removes the column" and
-  S-10 "A checked hide checkbox stays checked after save and page reload" are
+  S-10 "The setting keeps its value after save and page reload" are
   two scopes. A save can hide the column, while the settings page shows the
   box unchecked again. Then S-10 fails and S-3 passes.
   Link a test only to the scopes whose result it asserts. A test that checks
@@ -214,10 +214,9 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   checked the scope ("tried by hand", "no test checks it"): put that in
   `unit.note` and in the chat report. The app already shows which scopes
   have no test.
-- Exception: when a linked test checks only part of a scope, say in the
-  scope `description` which part no test checks. Example: "The linked test
-  sets the value directly. No test checks the box on the settings page."
-  The app cannot show this gap in another way.
+- Do not write in a scope `description` which test checks what, or which
+  part no test checks (user rule). When a linked test checks only part of a
+  scope, say so in `unit.note` and in the chat report.
 - Use the role names that `features` lists in `labelsInUse`, so one
   role does not get two names ("Wholesale customer", not "Wholesale buyer").
 - Put a requirement that every scope shares in the feature `requirements`.
@@ -246,7 +245,7 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   - Write each variation that the plugin really has. Do not make all
     combinations of the values.
   - A fact about one variation only goes in the scope description, and names
-    the variation. Also write "which part no test checks" there.
+    the variation.
   - Use the column names that the scope has (see `columns` in
     `feature <id>`). A new key adds a column: the other variations have no
     value there. A scope has at most 6 columns.
@@ -261,6 +260,74 @@ build on what is there. An AI draft feature can be replaced by your text, so:
     scope that checks more, or for other users, is a separate scope.
   - Use the values "Shop page", "Product page", "Cart page" and "Checkout
     page" for pages.
+
+**Settings save scope.** Each feature that owns settings on a settings page
+gets one scope that checks the save of all these settings, with two
+variations. The user set this pattern on F-4/S-354. Other examples: F-6/S-1671
+(4 settings) and F-1/S-10 (1 setting).
+
+- **Title:** "The setting keeps its value after save and page reload". With
+  two or more settings: "The settings keep their values after save and page
+  reload".
+- **Description:** what the scope does, in plain words. Name the settings by
+  their labels. Do not write test steps, which test checks what, or the
+  location of the settings: the feature `where` and `settings` lists have it.
+  > "The \"Hide Price and Add to Cart button\" checkbox and the \"Price and Add
+  > to Cart Replacement Message\" field keep the values that the admin saved.
+  > After a page reload, the box shows checked or cleared, and the field shows
+  > the saved text or stays empty."
+- **Requirement:** the start state, not the steps.
+  > "The \"Hide Price and Add to Cart button\" and \"Price and Add to Cart
+  > Replacement Message\" settings have their default values."
+- **Columns:** one column for each setting, with the label as the name. A
+  scope can have at most 6 columns. When a feature has more than 6 settings,
+  make one save scope for each section of the settings page, and put the
+  section name at the end of the title, for example "The settings keep their
+  values after save and page reload: Locations".
+- **Variations:** two rows, not all combinations.
+  1. Each setting changed from its default: "Enabled" for a checkbox or switch
+     that is off by default, "Disabled" for one that is on by default, a new
+     text for a text field, another choice for a list.
+  2. Each setting changed back: "Disabled" or "Enabled", the default text (or
+     empty when the default is empty), the default choice.
+  Use "Enabled" and "Disabled" here, also for a checkbox. In other scopes, the
+  rule "Settings that turn something off" (payload.md) still applies.
+- **A row must have at least one value.** The tool refuses a row with only
+  empty values, and then saves neither row. When all values of a row are
+  empty (for example, one text field with an empty default), write "(empty)"
+  for the field whose default is empty.
+- **A field that the page hides:** when a switch hides other fields, leave
+  their values empty in the row where the switch hides them. Then the row
+  matches what the page shows.
+  When the switch is on by default, row 1 turns it off and hides the other
+  fields, so no row changes them. Then add a third row: the switch "Enabled"
+  and each other field changed from its default.
+- **Test links:** link a test that saves a setting to row 1. When a scope
+  that has tests gets its first variation, the tests go to that variation, so
+  send row 1 first.
+- **Screenshots:** one picture for each row, after save and page reload, with
+  each setting of the scope in view. A picture shows exactly the values of
+  its row: do not tag a picture of one setting to a row of two settings. For
+  row 2, set the values, save, change them back, save, and reload. When a row
+  has a test text, the caption says that it is a test text, not the default.
+- **An old save scope** ("A checked box stays checked after save and page
+  reload"): change it to this pattern. Send its `id`, its current `title` (the
+  tool refuses a scope with no `title`), `newTitle`, the new requirement
+  (replace an old step requirement with `{ "id", "text" }`), and the two
+  variations. When the scope gets its first variation, the tool moves all its
+  tests and pictures to row 1. After the apply, read the feature again. Move
+  each test or picture that shows the row 2 values to row 2 (a picture:
+  `{ "id": "IMG-n", "scopes": ["SV-<row 2>"], "removeScopes": ["SV-<row 1>"] }`;
+  a link: `scopes` and `removeScopes` in the same way). Take a new picture for
+  a row that then has none.
+- **A merge of two features** that both have a save scope gives two scopes
+  with the same title. The tool cannot change the values of a row that is
+  there, so it cannot join them. Name both scopes in the report, so that a
+  person joins them into one scope.
+- **No save scope** for product data (product editor and quick edit fields),
+  import or export choices that are not saved, code constants, dashboard
+  filters, Premium fields that are locked, and the settings of WooCommerce or
+  of another plugin.
 
 Choose the feature scope by behavior, not by test file. If the code you read
 does the same thing for several screens or REST routes, look in the sibling

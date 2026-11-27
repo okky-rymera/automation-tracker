@@ -229,8 +229,8 @@ that has them:
 - Correct each short requirement to a full sentence with `{ "id", "text" }`.
 - Clean each AI draft scope description that tells how it was checked
   ("tried by hand", "no test checks it"). Send the scope `id` with a
-  description of facts only, or with `"description": null`. Keep a sentence
-  that says a linked test checks only part of the scope.
+  description of facts only, or with `"description": null`. Also remove a
+  sentence that says which test checks what, or which part no test checks.
 
 **outOfScope**: one item for each thing it does not do, and which feature does it if one does.
 > "Minimum order quantities (see F-22)."
@@ -275,17 +275,15 @@ test. Each has a result a tester can see. One scope = one thing to check.
   this scope only. Do not repeat the feature requirements.
 - The **description** is optional. It holds facts about the behavior that do
   not fit in the title. Do not write how you checked it ("tried by hand",
-  "no test checks it"): that goes in `unit.note` and the chat report.
-  One exception: when a linked test checks only part of the scope, say which
-  part no test checks. The app shows a scope with no test, but it cannot
-  show a scope that a test checks only in part.
+  "no test checks it"), and do not write which test checks what, or which
+  part no test checks: that goes in `unit.note` and the chat report.
 
 > Title: "An empty text shows the wholesale price with no label"
 > Description: "The plugin does not put back the default \"Wholesale Price:\" text."
 > Not a description: "Tried by hand: the price shows with no label. No test checks it."
 >
 > Title: "Checking the hide checkbox and saving removes the column"
-> Description: "The linked test sets the value directly. No test checks the box on the settings page."
+> Not a description: "The linked test sets the value directly. No test checks the box on the settings page."
 
 > Title: "The column shows the role name and wholesale price of a variable product"
 > Requirements: "A variable product has a wholesale price for one wholesale role."
@@ -301,6 +299,8 @@ feature is gone", and readers misread it. So in all text:
 
 - Do not write "the setting is on" or "off".
 - Name the setting by its label, and say "checked" or "unchecked".
+  One exception: the variation values of the settings save scope are
+  "Enabled" and "Disabled" (see "Settings save scope" in SKILL.md).
 - Or say what the setting does: "the hide setting removes the column".
 - Do not make a scope for the default case, when the feature is not in use
   (see the next rule). Example: no scope "The column is visible" for a feature that
