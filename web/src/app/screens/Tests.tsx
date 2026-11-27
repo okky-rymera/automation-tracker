@@ -84,7 +84,7 @@ export function TestLinks({ t, x, backLabel }: { t: Tracker; x: TestInfo; backLa
         return l.scopeIds.map((sid) => (
           <div key={`${fid}/${sid}`}>
             <a className="linkbtn mono" href={withBack(link(t.project, 'feature', fid, { scope: sid }), backLabel)}>F-{fid}/{f ? scopeIdLabel(f, sid) : `S-${sid}`}</a>{' '}
-            <span className="faint" style={{ fontSize: 12 }}>{f?.scopes.find((s) => s.id === sid)?.title}</span>
+            <span className="faint" style={{ fontSize: 12 }}>{(() => { const s = f?.scopes.find((x) => x.id === sid); const v = (s?.values ?? []).filter(Boolean).join(', '); return s ? `${s.title}${v ? ` · ${v}` : ''}` : ''; })()}</span>
             {f && (() => { const s = f.scopes.find((x) => x.id === sid); return s ? scopeToRemove(f, s) : f.toRemove; })() && <span className="tag tag-remove" style={{ marginLeft: 6 }}>To remove</span>}
             {l.source === 'ai' && !l.checked && <span className="tag tag-new" style={{ marginLeft: 6 }}>New</span>}
           </div>
@@ -105,14 +105,14 @@ export function LinkToScope({ t, x, onClose }: { t: Tracker; x: TestInfo; onClos
       if (scopeToRemove(i.f, s)) continue; // a scope that must go takes no new test
       const code = scopeIdLabel(i.f, s.id);
       const lc = code.toLowerCase();
-      if (q && !(s.title.toLowerCase().includes(q) || i.f.title.toLowerCase().includes(q) || lc === q || `f-${i.f.id}/${lc}` === q)) continue;
+      if (q && !(s.title.toLowerCase().includes(q) || (s.values ?? []).some((v) => v.toLowerCase().includes(q)) || i.f.title.toLowerCase().includes(q) || lc === q || `f-${i.f.id}/${lc}` === q)) continue;
       // A scope with variations takes no test itself. Its row links the test to each of its variations now.
       const targets = s.columns ? variationsOf(i.f, s.id).filter((v) => !scopeToRemove(i.f, v)) : [s];
       const open = targets.filter((v) => !i.f.links.some((l) => l.testId === x.id && l.scopeIds.includes(v.id)));
       if (!open.length) continue;
       const empty = open.some((v) => !i.f.links.some((l) => !l.missing && l.scopeIds.includes(v.id)));
       rows.push({
-        key: `${i.f.id}/${s.id}`, idLabel: `F-${i.f.id}/${code}`, sub: i.f.title, empty,
+        key: `${i.f.id}/${s.id}`, idLabel: `F-${i.f.id}/${code}`, sub: [(s.values ?? []).filter(Boolean).join(', '), i.f.title].filter(Boolean).join(' · '), empty,
         title: !s.columns ? s.title : open.length === targets.length ? `${s.title} · all ${open.length} variations` : `${s.title} · the ${open.length} variations it is not linked to yet`,
         tag: empty ? 'No test yet' : undefined, tagCls: 'tag-none',
         pick: () => act(async () => {

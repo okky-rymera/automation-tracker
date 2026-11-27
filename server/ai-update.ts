@@ -34,7 +34,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { db, now, tx } from './db.ts';
 import { changeReport, type ChangeReport } from './changes.ts';
-import { ITEM_KINDS, featuresToRemove, jsonList, variationTitle, variationValues } from './features.ts';
+import { ITEM_KINDS, featuresToRemove } from './features.ts';
 import { getProject, ROOT, type ProjectConfig } from './projects.ts';
 import { childEnv, mapLoopRunning, processAlive, run, syncRunning, type Job } from './sync.ts';
 import { LIMIT_TEXT, notePlanUse, readPlanLine } from './plan-limit.ts';
@@ -388,7 +388,7 @@ export interface Proposal {
   settings?: ItemOut[];
   questions?: ItemOut[];
   removeItems?: number[];
-  scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[]; variations?: Record<string, string>[] }[];
+  scopes?: { id?: string; title: string; group?: string; description?: string; requirements?: ItemOut[]; variations?: { id?: string; title: string; newTitle?: string; values?: Record<string, string> }[] }[];
   links?: { testId: string; scopes?: string[]; removeScopes?: string[]; remove?: boolean }[];
   /** Scopes (S-ids or SV-ids) that are wrong now: the plugin does not do this, or another scope says the same. */
   deleteScopes?: string[];
@@ -437,8 +437,18 @@ export const SCHEMA = {
           requirements: items,
           variations: {
             type: 'array',
-            description: 'New variations of the scope only: each one an object with the column names as keys, for example {"Page": "Checkout page"}',
-            items: { type: 'object', additionalProperties: { type: 'string' } },
+            description: 'New variations of the scope, or a new title for one that is there. Each one has its own title (a sentence that tells what the plugin does in this case) and its values: an object with the column names as keys, for example {"title": "The checkout page shows the wholesale price", "values": {"Page": "Checkout page"}}',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['title'],
+              properties: {
+                id: { type: 'string', description: 'SV-id of a variation that is there: its title changes' },
+                title: { type: 'string' },
+                newTitle: { type: 'string', description: 'A new title for a variation title that a person wrote or checked, only when the code proves it wrong now' },
+                values: { type: 'object', additionalProperties: { type: 'string' } },
+              },
+            },
           },
         },
       },
@@ -615,10 +625,10 @@ ${diff || '(no changes in these files)'}
   - List fields (requirements, notes, outOfScope, where, settings, questions): a string adds an item. {"id", "text"} changes an item.
   - "removeItems": IDs of items that are now wrong, also items that a person wrote. For example, a question that the new code answers: remove it, and put the answer in "notes" or in a scope.
   - "screenshots": you cannot see the images. Use the caption, the scopes and the code. Add a tag ("addScopes") when the caption shows that the image shows a scope. Take a tag off ("removeScopes") when the scope is gone or the image does not show it now. Fix a caption that is wrong now. When the code changed what the screen shows (a label, a field, a layout), set "stale" to the reason: a later run takes a new image. Use "remove" only when the screen is gone from the plugin.
-  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. When an existing scope has "variations" (one check in several places, for example a row for each page) and the new behavior is that check in one more place, send that scope with its "id" and title and a "variations" list with the new variation only, an object with the column names as keys (for example [{"Page": "Checkout page"}]). Write only variations that the plugin really has, not all combinations. A variation has no description and no requirements: its scope has them. A scope that is now wrong (the plugin does not do it any more, or another scope says the same): put its S-id or SV-id in "deleteScopes". Its links and screenshots lose the tag.
+  - "scopes": a new behavior that a test can check is a new scope (a title, and its own "requirements" if it needs them). To add requirements to an existing scope, give its "id" (for example "S-4") and its title. Give a new scope the "group" of the existing scopes on the same topic, if one fits. When an existing scope has "variations" (one check in several places, for example a row for each page) and the new behavior is that check in one more place, send that scope with its "id" and title and a "variations" list with the new variation only: its own "title" and its "values", an object with the column names as keys (for example [{"title": "The checkout page shows the wholesale price", "values": {"Page": "Checkout page"}}]). A variation title is a full sentence with a subject. It tells what the plugin does in this case, for example what the user sees there, and it is different from the titles of the other variations. To fix a variation title that is wrong now, send {"id": "SV-…", "title": "<new title>"}. When a person wrote or checked that title (the variation has no "title" in "aiFields"), send {"id": "SV-…", "title": "<title now>", "newTitle": "<new title>"} instead. Write only variations that the plugin really has, not all combinations. A variation has no description and no requirements: its scope has them. A scope that is now wrong (the plugin does not do it any more, or another scope says the same): put its S-id or SV-id in "deleteScopes". Its links and screenshots lose the tag.
   - "renames": for each test in "Linked tests that are gone from the repo", find the test that checks the same thing now (the likely rename, or another test in the code). Send {"from": "<old ID>", "to": "<new ID>"}. The link moves with its scopes. Do not also put the new test in "links". When no test checks it now, remove the link: {"testId": "<old ID>", "remove": true} in "links".
   - "removeCode": a code entry of the feature ("code" in the feature JSON) that is gone from the plugin, or that does not do this feature now. Give its "file" and "function" ("" for a whole-file entry). You can remove every entry, also one that a person added.
-  - "links": for a new test that checks this feature, and to correct a link that is there: "scopes" adds scopes, "removeScopes" takes off scopes that the test does not check, "remove": true removes a link whose test does not check this feature. You can change every link, also one that a person made. A person sees each change in the review, with "Change back". Give the S-ids or the titles of the scopes it checks. For a scope with variations, give the SV-ids of the variations that the test checks, not the S-id of the scope. For a new variation of this answer, which has no SV-id yet, give its title: the scope title and the values in brackets, with commas, for example "Price shows (Checkout page)".
+  - "links": for a new test that checks this feature, and to correct a link that is there: "scopes" adds scopes, "removeScopes" takes off scopes that the test does not check, "remove": true removes a link whose test does not check this feature. You can change every link, also one that a person made. A person sees each change in the review, with "Change back". Give the S-ids or the titles of the scopes it checks. For a scope with variations, give the SV-ids of the variations that the test checks, not the S-id of the scope. For a new variation of this answer, which has no SV-id yet, give its title.
   - A scope with "toRemove": a person decided that it must go. Do not change it, link a test to it, or add the same behavior again as a new scope.
   - Do not add a scope for the page before this feature changes it (for example "Guest sees the price by default" on a feature that hides the price). The page then shows what WooCommerce or another feature makes. One scope "turn the setting on, then off: the result comes back" is allowed.
   - Behavior that needs another plugin (Premium, Lead Capture, Order Form, Payments, or a third-party plugin) belongs to a feature in an "Integration/<plugin>" group. If this feature is not in such a group, do not add such a scope here and do not link a test from an "Integration/" folder or with an "@integration:" tag. Add a question that names the behavior or the test instead.
@@ -861,23 +871,8 @@ export function toPayload(p: ProjectConfig, featureId: number, pr: Proposal, ref
   }
   for (const x of db.prepare('SELECT g.title_key FROM scope_titles_gone g JOIN scopes s ON s.id = g.scope_id WHERE g.feature_id = ? AND s.feature_id = g.feature_id AND s.columns IS NOT NULL').all(featureId) as any[])
     varied.add(String(x.title_key));
-  // A new variation of this answer has no SV-id yet: a link can name it by its title, "<scope title> (<values>)".
-  // Apply uses the new title of the answer, or the old one when a person wrote it: both are known.
-  for (const s of scopes) {
-    const cur = s.id !== undefined ? (db.prepare('SELECT title, columns FROM scopes WHERE id = ?').get(s.id) as any) : undefined;
-    for (const v of (s.variations ?? []) as unknown[]) {
-      try {
-        const cols = cur?.columns ? jsonList(cur.columns) : [];
-        if (v && typeof v === 'object' && !Array.isArray(v)) {
-          for (const k of Object.keys(v)) if (!cols.some((c) => c.toLowerCase() === k.replace(/\s+/g, ' ').trim().toLowerCase())) cols.push(k.replace(/\s+/g, ' ').trim());
-        }
-        const values = variationValues(cols, v);
-        for (const t of [s.title, cur?.title].filter(Boolean)) known.add(norm(variationTitle(String(t).trim(), values)));
-      } catch {
-        // Values that apply refuses: apply says why in its report.
-      }
-    }
-  }
+  // A new variation of this answer has no SV-id yet: a link can name it by its title.
+  for (const s of scopes) for (const v of s.variations ?? []) if (v?.title?.trim()) known.add(norm(v.title));
   const tests = db.prepare('SELECT file, tags FROM tests WHERE project_id = ? AND id = ? AND removed_at IS NULL');
   // An integration test (in an "Integration/" folder, or with an "@integration:" tag) needs another plugin.
   // It links only to a feature in an "Integration/<plugin>" group. The prompt says this too, but the model can ignore it.

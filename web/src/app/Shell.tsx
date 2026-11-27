@@ -268,8 +268,9 @@ function Palette({ t, onClose }: { t: Tracker; onClose: () => void }) {
     if (pl) {
       const ss = t.info.flatMap((i) =>
         i.f.scopes
-          .filter((s) => (idm?.[2] && String(s.id) === idm[2]) || s.title.toLowerCase().includes(pl) || s.requirements.some((r) => r.text.toLowerCase().includes(pl)))
-          .map((s) => ({ key: `s${s.id}`, idLabel: `F-${i.f.id}/${s.parentId !== null ? 'SV' : 'S'}-${s.id}`, title: s.title, sub: i.f.title, href: link(p, 'feature', i.f.id, { scope: s.id }) })),
+          .filter((s) => (idm?.[2] && String(s.id) === idm[2]) || s.title.toLowerCase().includes(pl) || (s.values ?? []).some((v) => v.toLowerCase().includes(pl)) || s.requirements.some((r) => r.text.toLowerCase().includes(pl)))
+          // A variation: its values, then the feature.
+          .map((s) => ({ key: `s${s.id}`, idLabel: `F-${i.f.id}/${s.parentId !== null ? 'SV' : 'S'}-${s.id}`, title: s.title, sub: [(s.values ?? []).filter(Boolean).join(', '), i.f.title].filter(Boolean).join(' · '), href: link(p, 'feature', i.f.id, { scope: s.id }) })),
       );
       if (ss.length) out.push({ title: 'Scopes', items: ss.slice(0, 8) });
       if (img) {

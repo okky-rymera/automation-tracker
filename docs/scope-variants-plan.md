@@ -162,3 +162,13 @@ Research: WooCommerce variable products and Shopify product variants. A product 
 
 - One shared list of values (Shop page, Product page, Cart page, Checkout page) for all features.
 - A "To remove" mark on a full set.
+
+### 10. Each variation has its own title (added on 27 Nov 2026)
+
+The scope title is the general result. Each variation needs its own title: the result in that case, for example "Logged-in customer sees the price and the button to the external site" (Product type: External product). Reason: the results for each case were in one paragraph of the scope description (S-1712), and a variation had no place for its own result.
+
+- [x] A new variation needs a title (API, edit forms, AI payloads). The title is unique in the feature. A new scope title, new values or a new or deleted column do not change it.
+- [x] The page shows the title, with the values under it as "Column: value" tags. One-line lists show "title · values".
+- [x] A deleted or renamed variation is remembered by its title and its values, so the AI does not add it again.
+- [x] The AI can give a variation a new title (`{ "id": "SV-44", "title" }`). A title that the app made before ("<scope title> (<values>)") counts as empty.
+- [x] Give the old variations their own titles (352 on 27 Nov 2026, AI draft for review), and move per-variation results out of the scope descriptions. The 2 variations of S-18 (marked "To remove") keep the old title.

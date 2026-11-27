@@ -28,7 +28,7 @@
       "scopes": [
         { "title": "…", "group": "…topic, for example Hide column setting…", "description": "…", "requirements": ["…true for this scope only…"] },
         { "id": "S-14", "title": "…", "requirements": [{ "id": 21, "text": "…corrected AI draft requirement…" }] },
-        { "title": "…sentence that is the same in each place…", "description": "…", "requirements": ["…"], "variations": [{ "Page": "Shop page" }, { "Page": "Cart page", "Product type": "Variation" }] }
+        { "title": "…sentence that is the same in each place…", "description": "…", "requirements": ["…"], "variations": [{ "title": "…what the plugin does on the shop page…", "values": { "Page": "Shop page" } }, { "title": "…", "values": { "Page": "Cart page", "Product type": "Variation" } }] }
       ],
       "links": [
         { "testId": "CY-1a2b3c4d", "scopes": ["…title of a scope above…", "S-14"] },
@@ -110,14 +110,20 @@
   feature requirement with the same text as a scope item is not added. A
   correction to such a text is not done. The report says so. A scope has no
   `rules` or `notes`.
-- Scope `variations`: one check in several places. Each item is an object
-  with the column names as keys. The tool adds the variations that the scope
-  does not have, and a column for a new key. `columns` (optional) gives the
-  column order when the scope gets its first variations.
+- Scope `variations`: one check in several places. Each item is
+  `{ "id"?, "title", "newTitle"?, "values"? }`. `title` is required: its own
+  sentence, unique in the feature. `values` is an object with the column names
+  as keys, required for a new variation. The tool adds the variations that the
+  scope does not have, and a column for a new key. A variation that is there
+  (found by `id`, else by its values, else by its title) gets the new title:
+  an AI draft title, or a title that the app made ("<scope title> (<values>)"),
+  changes; a person's title changes only with `newTitle`. `columns` (optional)
+  gives the column order when the scope gets its first variations. The old
+  form `{ "<column>": "<value>" }` is refused.
 - Link `scopes`: scope titles from this payload or the feature, or IDs like
   `S-14` (scope IDs are the same across all features; the ID must be in this
   feature). For a scope with variations, name the variations: `SV-44`, or the
-  title "<scope title> (<values>)". Leave it out only when the test checks the
+  variation title. Leave it out only when the test checks the
   feature in general.
 - Link `removeScopes`: scopes that the test does not check. They come off the link.
   Link `"remove": true`: the test does not check this feature. The link is removed.

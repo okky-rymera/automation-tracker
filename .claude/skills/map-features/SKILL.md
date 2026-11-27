@@ -232,25 +232,40 @@ build on what is there. An AI draft feature can be replaced by your text, so:
   "Checkout page".
 - When one check applies in several places or cases (pages, roles, product
   types), write one scope with `variations`: the scope has the sentence, the
-  description and the requirements. Each variation is an object with the
-  column names as keys, for example
-  `{ "Page": "Cart page", "Product type": "Variation" }`. F-5 has 3 such
-  scopes (S-733, S-734, S-735).
-  - A variation has an SV- ID (for example SV-44) and the title
-    "<scope title> (<values, in column order, with commas>)". It has no
-    description, no requirements and no group of its own.
+  description and the requirements. Each variation is
+  `{ "title": "…", "values": { "<column>": "<value>" } }`, for example
+  `{ "title": "The cart page shows the wholesale price of the variation", "values": { "Page": "Cart page", "Product type": "Variation" } }`.
+  F-5 has 3 such scopes (S-733, S-734, S-735).
+  - Each variation needs its own title. The title tells what the plugin does
+    in this case, for example what the user sees there. Use the scope title
+    rules: a full sentence with a subject, the chosen words, and one sentence
+    pattern for all variations of the scope. Do not repeat the values in
+    brackets: the page shows them under the title.
+  - The scope title is the general result. The variation title is the result
+    in this case. Example, for S-1712 "Logged-in customer still sees the price
+    and the buy controls on the product page": "Logged-in customer sees the
+    price and the button to the external site" (External product).
+  - Two variations of one feature cannot have the same title. When the result
+    is the same in each place, put the place in the title, for example "The
+    cart page shows the wholesale price".
+  - A variation has an SV- ID (for example SV-44). It has no description, no
+    requirements and no group of its own.
   - Link each test, screenshot and code entry to the variation that it
     checks: its SV- ID or its title. A scope with variations takes no link,
     screenshot or code itself: the tool refuses the payload.
   - Write each variation that the plugin really has. Do not make all
     combinations of the values.
-  - A fact about one variation only goes in the scope description, and names
-    the variation.
+  - A result of one variation only goes in the variation title, not in the
+    scope description. The scope description tells what is the same for all
+    variations.
   - Use the column names that the scope has (see `columns` in
     `feature <id>`). A new key adds a column: the other variations have no
     value there. A scope has at most 6 columns.
-  - The tool only adds variations. It does not change or delete one, and it
-    does not add again a variation that a person deleted.
+  - The tool adds variations and can change a variation title: send the
+    variation with its `id` (`SV-44`) and the new `title`. A title that a
+    person wrote or checked changes only with `newTitle`. The tool does not
+    change values or delete a variation here, and it does not add again a
+    variation that a person deleted.
   - When a scope that has tests gets its first variation, its tests,
     screenshots and code go to that first variation.
   - Do not join scopes that are there already into one scope with
@@ -292,6 +307,10 @@ variations. The user set this pattern on F-4/S-354. Other examples: F-6/S-1671
      empty when the default is empty), the default choice.
   Use "Enabled" and "Disabled" here, also for a checkbox. In other scopes, the
   rule "Settings that turn something off" (payload.md) still applies.
+  Titles of the two rows: "The settings keep the changed values after save
+  and page reload" and "The settings get their default values back after
+  save and page reload" (with one setting: "The setting keeps the changed
+  value…", "The setting gets its default value back…").
 - **A row must have at least one value.** The tool refuses a row with only
   empty values, and then saves neither row. When all values of a row are
   empty (for example, one text field with an empty default), write "(empty)"

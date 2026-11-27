@@ -538,7 +538,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
                 <div className="sp-intro">
                 <InlineText
                   id={`in-s${s.id}`} label="Scope title" className="ie-scope sp-title" value={s.title} required="A scope needs a title. The old title is back."
-                  onSave={(title) => act(() => mutate('PATCH', url, { title }), s.columns ? 'Scope renamed. Its variations have new titles. The AI still knows the old titles.' : 'Scope renamed. The AI still knows it by its old title.', () => mutate('PATCH', url, { title: s.title }, { quiet: true }))}
+                  onSave={(title) => act(() => mutate('PATCH', url, { title }), 'Scope renamed. The AI still knows it by its old title.', () => mutate('PATCH', url, { title: s.title }, { quiet: true }))}
                 />
                 <div className="sp-tags">{tags}</div>
                 {s.toRemove ? (
@@ -587,7 +587,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
                       {links.map((l) => <TestRow key={l.id} t={t} f={f} l={l} scopeId={s.id} />)}
                       {!links.length && <div className="lc-empty">None yet.</div>}
                     </section>
-                    {starting && <StartVariations nTests={links.length} nShots={shots.length} onClose={() => setStarting(false)} onAdd={(columns, values) => act(() => mutate('POST', `${url}/variations`, { columns, values }), 'Variations added. Add one more for each place.')} />}
+                    {starting && <StartVariations nTests={links.length} nShots={shots.length} onClose={() => setStarting(false)} onAdd={(columns, values, title) => act(() => mutate('POST', `${url}/variations`, { columns, values, title }), 'Variations added. Add one more for each place.')} />}
                   </>
                 )}
                 <section className="lc" aria-label="Issues of this scope">
@@ -691,8 +691,9 @@ function LinkPicker({ t, have, title, sub, onPick, onClose }: { t: Tracker; have
 }
 
 /**
- * The variations of a scope, as a table: ID with copy button, the values and the coverage. The column
- * names are edited in the table header. A click on a line opens the variation in the popup (VariationDetail).
+ * The variations of a scope, as a list: ID with copy button, the title with the values under it as
+ * "Column: value" tags, and the coverage. The "⋯" menu renames, adds and deletes columns. A click on a line
+ * opens the variation in the popup (VariationDetail).
  */
 function Variations({ t, f, s, vars, setRow }: {
   t: Tracker; f: FeatureX; s: ScopeX; vars: ScopeX[]; setRow: (id: number | null) => void;
@@ -709,6 +710,17 @@ function Variations({ t, f, s, vars, setRow }: {
         <Menu
           label="Variation actions"
           items={[
+            ...columns.map((c, i) => ({
+              label: `Rename column “${c}”…`,
+              run: () => {
+                const name = prompt(`New name of the column “${c}”:`, c);
+                if (name?.trim() && name.trim() !== c) rename(i, name.trim());
+              },
+            })),
+            ...(columns.length > 1 ? columns.map((c, i) => ({
+              label: `Delete column “${c}”…`,
+              run: () => confirm(`Delete the column “${c}”? Each variation loses its value in it. The titles stay.`) && act(() => mutate('DELETE', `${url}/columns/${i}`), 'Column deleted'),
+            })) : []),
             {
               label: 'Add column…', hidden: columns.length >= 6,
               run: () => {
@@ -729,19 +741,7 @@ function Variations({ t, f, s, vars, setRow }: {
           <thead>
             <tr>
               <th scope="col" className="set-th-id">ID</th>
-              {columns.map((c, i) => (
-                <th key={`${i}-${c}`} scope="col">
-                  <span className="set-hcell">
-                    <InlineText label={`Column name ${i + 1}`} className="ie-setcol" value={c} required="A column needs a name. The old name is back." onSave={(name) => rename(i, name)} />
-                    {columns.length > 1 && (
-                      <button
-                        className="icon-btn" aria-label={`Delete column ${c}`} title="Delete this column. Each variation loses its value here."
-                        onClick={() => confirm(`Delete the column “${c}”? Each variation loses its value in it, and the variation titles change.`) && act(() => mutate('DELETE', `${url}/columns/${i}`), 'Column deleted')}
-                      ><IX s={12} /></button>
-                    )}
-                  </span>
-                </th>
-              ))}
+              <th scope="col">Variation</th>
               <th scope="col" className="set-th-cov">Coverage</th>
               <th scope="col" aria-label="Open" />
             </tr>
@@ -753,11 +753,14 @@ function Variations({ t, f, s, vars, setRow }: {
               return (
                 <tr key={v.id} className={`set-tr${marked ? ' scope-marked' : ''}`} id={`scope-${v.id}`} onClick={() => setRow(v.id)}>
                   <td className="set-td-id" onClick={(e) => e.stopPropagation()}><IdBtn label={`SV-${v.id}`} text={`F-${f.id}/SV-${v.id}`} /></td>
-                  {columns.map((_, i) => <td key={i} className={v.values?.[i] ? '' : 'faint'}>{v.values?.[i] || '–'}</td>)}
+                  <td className="set-td-title">
+                    <span className="set-vtitle">{v.title}</span>
+                    <VarValues columns={columns} values={v.values} />
+                  </td>
                   <td className="set-th-cov">
                     <span className="set-tags">
                       {marked ? <span className="tag tag-remove" title={(v.toRemove ?? s.toRemove ?? f.toRemove)?.reason}>To remove</span> : <span className={`tag ${ST_TAG[st]}`}>{ST_LABEL[st]}</span>}
-                      {scopeChanged(f, v) && <span className="tag tag-changed">{v.aiFields.includes('title') ? 'New' : 'Changed'}</span>}
+                      {scopeChanged(f, v) && <span className="tag tag-changed">{v.aiFields.includes('title') && !(v.before && 'title' in v.before) ? 'New' : 'Changed'}</span>}
                     </span>
                   </td>
                   <td className="set-chev">
@@ -770,7 +773,7 @@ function Variations({ t, f, s, vars, setRow }: {
         </table>
       </div>
       {adding ? (
-        <VariationForm columns={columns} onAdd={(values) => act(() => mutate('POST', `${url}/variations`, { values }), 'Variation added')} onClose={() => setAdding(false)} />
+        <VariationForm columns={columns} onAdd={(title, values) => act(() => mutate('POST', `${url}/variations`, { title, values }), 'Variation added')} onClose={() => setAdding(false)} />
       ) : (
         <div><button className="btn btn-ghost btn-sm add-btn" onClick={() => setAdding(true)}><IPlus />Add variation</button></div>
       )}
@@ -778,8 +781,19 @@ function Variations({ t, f, s, vars, setRow }: {
   );
 }
 
+/** The values of a variation as small "Column: value" tags. An empty value is left out. */
+function VarValues({ columns, values }: { columns: string[]; values: string[] | null }) {
+  const tags = columns.map((c, i) => [c, values?.[i] ?? ''] as const).filter(([, x]) => x);
+  if (!tags.length) return null;
+  return (
+    <span className="var-values">
+      {tags.map(([c, x], i) => <span key={i} className="var-value"><span className="var-value-k">{c}:</span> {x}</span>)}
+    </span>
+  );
+}
+
 /**
- * One variation, shown in the scope popup in place of its scope: its values, screenshots and tests.
+ * One variation, shown in the scope popup in place of its scope: its title, values, screenshots and tests.
  * Its scope has the text, requirements, group and move.
  */
 function VariationDetail({ t, f, s, v, onBack }: { t: Tracker; f: FeatureX; s: ScopeX; v: ScopeX; onBack: () => void }) {
@@ -799,7 +813,14 @@ function VariationDetail({ t, f, s, v, onBack }: { t: Tracker; f: FeatureX; s: S
     <div className="sp-main">
       <div className="sp-intro">
         <button className="linkbtn sp-back" onClick={onBack} title={`Back to S-${s.id}`} aria-label={`Back to S-${s.id} ${s.title}`}><IPrev s={14} /><span>{s.title}</span></button>
-        <h2 className="sp-title sp-var-title">{(v.values ?? []).filter(Boolean).join(' · ') || 'No value'}</h2>
+        <InlineText
+          id={`in-s${v.id}`} label="Variation title" className="ie-scope sp-title sp-var-title" value={v.title} required="A variation needs a title. The old title is back."
+          onSave={(title) => act(() => mutate('PATCH', url, { title }), 'Variation renamed. The AI still knows it by its old title.', () => mutate('PATCH', url, { title: v.title }, { quiet: true }))}
+        />
+        <VarValues columns={columns} values={v.values} />
+        {v.before && 'title' in v.before && v.before.title && (
+          <div className="was-box"><strong>Title before the change:</strong> <span className="was-old">{v.before.title}</span></div>
+        )}
       </div>
       {v.toRemove ? (
         <div className="remove-box">
@@ -838,14 +859,14 @@ function VariationDetail({ t, f, s, v, onBack }: { t: Tracker; f: FeatureX; s: S
           <button
             className="btn btn-sm"
             onClick={() => {
-              const reason = askRemoveReason(`SV-${v.id} (${shown})`);
+              const reason = askRemoveReason(`SV-${v.id} “${v.title}” (${shown})`);
               if (reason) act(() => mutate('PATCH', url, { toRemove: reason }), `SV-${v.id} marked “To remove”`);
             }}
           >Mark “To remove”…</button>
         )}
         <button
           className="btn btn-sm btn-danger"
-          onClick={() => confirm(`Delete variation SV-${v.id} (${shown})? Its tests stay linked to the feature. The AI will not add it again.`) &&
+          onClick={() => confirm(`Delete variation SV-${v.id} “${v.title}” (${shown})? Its tests stay linked to the feature. The AI will not add it again.`) &&
             act(async () => (await mutate('DELETE', url), setQuery({ scope: s.id })), `Variation SV-${v.id} deleted. The AI will not add it again.`)}
         >Delete variation</button>
       </div>
@@ -860,28 +881,35 @@ function VariationDetail({ t, f, s, v, onBack }: { t: Tracker; f: FeatureX; s: S
   );
 }
 
-/** One field for each column. Enter or "Add" adds the variation, and the form stays for the next one. */
-function VariationForm({ columns, onAdd, onClose }: { columns: string[]; onAdd: (values: string[]) => Promise<unknown>; onClose: () => void }) {
+/** The title, and one field for each column. Enter or "Add" adds the variation, and the form stays for the next one. */
+function VariationForm({ columns, onAdd, onClose }: { columns: string[]; onAdd: (title: string, values: string[]) => Promise<unknown>; onClose: () => void }) {
+  const [title, setTitle] = useState('');
   const [typed, setVals] = useState<string[]>([]);
   // One value for each column now: a column added while the form is open gets an empty field.
   const vals = columns.map((_, i) => typed[i] ?? '');
   const first = useRef<HTMLInputElement>(null);
   useEffect(() => first.current?.focus(), []);
+  const ok = !!title.trim() && vals.some((v) => v.trim());
   const add = async () => {
-    if (!vals.some((v) => v.trim())) return;
-    await onAdd(vals.map((v) => v.trim()));
+    if (!ok) return;
+    await onAdd(title.trim(), vals.map((v) => v.trim()));
+    setTitle('');
     setVals(columns.map(() => ''));
     first.current?.focus();
   };
   return (
     <form className="set-form" onSubmit={(e) => (e.preventDefault(), void add())} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
+      <input
+        ref={first} className="input set-cell set-cell-title" aria-label="Variation title" placeholder="Title: what the plugin does in this case" value={title}
+        onChange={(e) => setTitle(e.target.value)}
+      />
       {columns.map((c, i) => (
         <input
-          key={i} ref={i === 0 ? first : undefined} className="input set-cell" aria-label={c} placeholder={c} value={vals[i]}
+          key={i} className="input set-cell" aria-label={c} placeholder={c} value={vals[i]}
           onChange={(e) => setVals(vals.map((v, k) => (k === i ? e.target.value : v)))}
         />
       ))}
-      <button className="btn btn-sm btn-ok" type="submit" disabled={!vals.some((v) => v.trim())}>Add</button>
+      <button className="btn btn-sm btn-ok" type="submit" disabled={!ok}>Add</button>
       <button className="btn btn-sm" type="button" onClick={onClose}>Close</button>
     </form>
   );
@@ -891,9 +919,10 @@ function VariationForm({ columns, onAdd, onClose }: { columns: string[]; onAdd: 
  * Turns a scope into a scope with variations: the name of the first column and the value of the first
  * variation. The scope's tests and screenshots go to that first variation.
  */
-function StartVariations({ nTests, nShots, onAdd, onClose }: { nTests: number; nShots: number; onAdd: (columns: string[], values: string[]) => Promise<unknown>; onClose: () => void }) {
+function StartVariations({ nTests, nShots, onAdd, onClose }: { nTests: number; nShots: number; onAdd: (columns: string[], values: string[], title: string) => Promise<unknown>; onClose: () => void }) {
   const [col, setCol] = useState('Page');
   const [val, setVal] = useState('');
+  const [title, setTitle] = useState('');
   const first = useRef<HTMLInputElement>(null);
   useEffect(() => first.current?.focus(), []);
   const moves = [nTests ? `${nTests} test${nTests === 1 ? '' : 's'}` : '', nShots ? `${nShots} screenshot${nShots === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
@@ -902,21 +931,22 @@ function StartVariations({ nTests, nShots, onAdd, onClose }: { nTests: number; n
       className="lc start-vars" onKeyDown={(e) => e.key === 'Escape' && onClose()}
       onSubmit={async (e) => {
         e.preventDefault();
-        if (!col.trim() || !val.trim()) return;
-        await onAdd([col.trim()], [val.trim()]);
+        if (!col.trim() || !val.trim() || !title.trim()) return;
+        await onAdd([col.trim()], [val.trim()], title.trim());
         onClose();
       }}
     >
       <div className="lc-head">
         <div className="lc-titlerow"><span className="lc-title">Add variations</span></div>
         <span className="lc-sub">
-          One check in several places, for example on 4 pages. Name the column, then the first place. {moves ? `The ${moves} of this scope go to this first variation.` : ''} You can add more columns later.
+          One check in several places, for example on 4 pages. Name the column, then the first place, and give it a title: what the plugin does there. {moves ? `The ${moves} of this scope go to this first variation.` : ''} You can add more columns later.
         </span>
       </div>
       <div className="set-form">
         <label className="set-value"><span className="faint">Column</span><input ref={first} className="input set-cell" aria-label="Column name" value={col} onChange={(e) => setCol(e.target.value)} /></label>
         <label className="set-value"><span className="faint">First variation</span><input className="input set-cell" aria-label="Value of the first variation" placeholder="For example “Shop page”" value={val} onChange={(e) => setVal(e.target.value)} /></label>
-        <button className="btn btn-sm btn-ok" type="submit" disabled={!col.trim() || !val.trim()}>Add</button>
+        <label className="set-value set-value-title"><span className="faint">Title</span><input className="input set-cell" aria-label="Title of the first variation" placeholder="For example “The shop page shows the wholesale price”" value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+        <button className="btn btn-sm btn-ok" type="submit" disabled={!col.trim() || !val.trim() || !title.trim()}>Add</button>
         <button className="btn btn-sm" type="button" onClick={onClose}>Cancel</button>
       </div>
     </form>
@@ -947,7 +977,7 @@ function TestRow({ t, f, l, scopeId }: { t: Tracker; f: FeatureX; l: FeatureLink
   const pickRows: PickRow[] = [];
   for (const s of f.scopes.filter((y) => y.parentId === null)) {
     const vars = s.columns ? variationsOf(f, s.id) : [];
-    const hit = (y: { id: number; title: string }) => !q || y.title.toLowerCase().includes(q) || code(y.id).toLowerCase() === q;
+    const hit = (y: { id: number; title: string; values?: string[] | null }) => !q || y.title.toLowerCase().includes(q) || (y.values ?? []).some((v) => v.toLowerCase().includes(q)) || code(y.id).toLowerCase() === q;
     if (s.columns) {
       if (vars.length && (hit(s) || vars.some(hit)))
         pickRows.push({
@@ -956,7 +986,7 @@ function TestRow({ t, f, l, scopeId }: { t: Tracker; f: FeatureX; l: FeatureLink
         });
       for (const v of vars.filter((y) => hit(s) || hit(y)))
         pickRows.push({
-          key: String(v.id), idLabel: `SV-${v.id}`, title: v.title, tag: scopeLinks(f, v.id).length ? undefined : 'No test yet', tagCls: 'tag-none',
+          key: String(v.id), idLabel: `SV-${v.id}`, title: v.title, sub: (v.values ?? []).filter(Boolean).join(', '), tag: scopeLinks(f, v.id).length ? undefined : 'No test yet', tagCls: 'tag-none',
           pick: () => act(async () => (await mutate('PATCH', `${base}/links/${l.id}`, { scopeIds: [v.id] }), setPick(false)), `${l.testId} put on SV-${v.id}`),
         });
     } else if (hit(s))

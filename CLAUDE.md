@@ -38,8 +38,8 @@ The routes are in `server/index.ts`. The code for each route is in `edits` in `s
 | Change or delete a scope | `PATCH` or `DELETE .../scopes/:sid`. `{ "groupId": <id> }` puts it in a scope group, `null` takes it out |
 | Add a scope group to a feature | `POST .../features/:fid/scope-groups` with `{ "title" }` |
 | Rename or delete a scope group | `PATCH .../scope-groups/:gid` with `{ "title" }`, or `DELETE`. A delete keeps the scopes, with no group |
-| Add variations to a scope, or one more variation | `POST .../scopes/:sid/variations` with `{ "values", "columns"? }`. `values`: a list in column order, or `{ "<column>": "<value>" }`. The first call sets the columns (default: the keys of `values`, or `["Page"]`) |
-| Change a variation, or rename the columns | `PATCH .../scopes/:sid` with `{ "values" }` on a variation, or `{ "columns" }` on its scope (same number, same order) |
+| Add variations to a scope, or one more variation | `POST .../scopes/:sid/variations` with `{ "title", "values", "columns"? }`. `title` is required: the variation's own sentence. `values`: a list in column order, or `{ "<column>": "<value>" }`. The first call sets the columns (default: the keys of `values`, or `["Page"]`) |
+| Change a variation, or rename the columns | `PATCH .../scopes/:sid` with `{ "title" }` or `{ "values" }` on a variation, or `{ "columns" }` on its scope (same number, same order) |
 | Add or delete a column | `POST .../scopes/:sid/columns` with `{ "name", "value"? }`, or `DELETE .../scopes/:sid/columns/:index` (0 is the first) |
 | End the variations of a scope | `DELETE .../scopes/:sid/variations`. Only with one variation (or none) left: its tests go back to the scope |
 | Move a scope to another feature | `POST .../scopes/:sid/move` with `{ "featureId": <id> }` |
@@ -81,9 +81,11 @@ A scope can have variations: one check in several places, for example the 4 page
 - The scope keeps the sentence (its title), the description, the requirements, the group and "Move to feature".
 - The scope has 1 to 6 columns with names that a person or the AI chooses, for example "Page" and "Product type".
 - A person or the AI types each variation. The app does not make combinations.
-- Each variation has an SV- ID (for example `SV-44`), its values, its test links, screenshots, code and coverage. S- and SV- IDs share one number series.
+- Each variation has an SV- ID (for example `SV-44`), its own title, its values, its test links, screenshots, code and coverage. S- and SV- IDs share one number series.
 - A scope with variations takes no test link, screenshot or code itself, and does not count in the coverage counts: each variation counts.
-- The title of a variation is "<scope title> (<values, with commas>)". An empty value is left out. A new scope title, new values or a deleted column change the titles. The old titles are remembered, as in a rename.
+- Each variation needs its own title: a sentence that tells what the plugin does in this case, for example what the user sees there. The scope title is the general result. A title is unique in the feature. The page shows the values under the title, as "Column: value" tags.
+- A new scope title, new values or a deleted column do not change the variation titles. A renamed variation is remembered by its old title and its old values, as in a rename.
+- Variations from before 27 Nov 2026 can still have the title that the app made: "<scope title> (<values>)". The AI replaces such a title, and the review shows the change.
 - A variation has no description, requirements or group, and cannot move alone. It moves with its scope.
 - A scope that is already there cannot become a variation of another scope.
 - When a scope with tests gets its first variation, its tests, screenshots and code go to that variation. "Remove variations" (only with one variation left) puts them back on the scope.

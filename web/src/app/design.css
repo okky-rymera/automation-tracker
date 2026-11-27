@@ -409,6 +409,15 @@ button.copied svg{opacity:1}
 .set-value .ie-setval{font-size:14px;font-weight:500}
 .set-form{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .set-form .set-cell{width:200px}
+.set-form .set-cell-title{flex:1 1 100%;width:auto}
+.start-vars .set-value-title{flex:1 1 100%}
+/* A variation: its title, with its values under it as "Column: value" tags. */
+.set-td-title{padding-top:7px!important;padding-bottom:7px!important}
+.set-vtitle{display:block;font-weight:500;line-height:1.35}
+.var-values{display:flex;flex-wrap:wrap;gap:4px 6px;margin-top:4px}
+.var-value{display:inline-flex;gap:3px;padding:0 6px;border-radius:5px;background:var(--surface-2);border:1px solid var(--line);font-size:12px;line-height:18px;color:var(--ink-2)}
+.var-value-k{color:var(--ink-3, var(--ink-2));font-weight:400}
+.sp-intro .var-values{margin:2px 0 4px}
 .start-vars{border:1px dashed var(--line);border-radius:10px;padding:10px 12px}
 .start-vars .set-form{align-items:flex-end}
 .check-sub{padding-left:34px}

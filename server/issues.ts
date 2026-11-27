@@ -233,7 +233,7 @@ function buildPrompt(repo: string, f: any, units: Unit[]): string {
       description: u.scope.description,
       requirements: u.scope.requirements.map((r: any) => r.text),
       ...(u.scope.columns
-        ? { variations: u.variations.map((v: any) => ({ id: `SV-${v.id}`, ...Object.fromEntries(u.scope.columns.map((c: string, i: number) => [c, v.values?.[i] ?? ''])) })) }
+        ? { variations: u.variations.map((v: any) => ({ id: `SV-${v.id}`, title: v.title, values: Object.fromEntries(u.scope.columns.map((c: string, i: number) => [c, v.values?.[i] ?? ''])) })) }
         : {}),
     })),
   };
@@ -257,7 +257,7 @@ ${units.length === 1
     : `- Title: "Automation: <the feature or flow>", from the facts below. Keep it short.
 - Automation Description: 1 or 2 sentences: what plugin area or flow to automate, and what the tests must verify. No bullet list.`}
 - After the Automation Description, before the Test Plan block, add a section "## Scopes to cover" with one bullet for each scope:
-  "<scope sentence> (<scope ID>)". For a scope with variations, add one sub-bullet for each variation: its values and its SV- ID.
+  "<scope sentence> (<scope ID>)". For a scope with variations, add one sub-bullet for each variation: "<variation title> (<values>, <SV- ID>)".
   These IDs come from the automation tracker. The person who writes the plan uses them.
 - Leave out "Related Issues".
 - Use only the facts below. Do not read the plugin code.
@@ -524,7 +524,7 @@ function planFacts(p: ProjectConfig, r: any, dir: string) {
       sentence: s.title,
       description: s.description,
       requirements: items(s.requirements),
-      ...(s.columns ? { variations: vars.map((v: any) => ({ id: `SV-${v.id}`, ...Object.fromEntries(s.columns.map((c: string, i: number) => [c, v.values?.[i] ?? ''])), tests: tests(v.id) })) } : { tests: tests(s.id) }),
+      ...(s.columns ? { variations: vars.map((v: any) => ({ id: `SV-${v.id}`, title: v.title, values: Object.fromEntries(s.columns.map((c: string, i: number) => [c, v.values?.[i] ?? ''])), tests: tests(v.id) })) } : { tests: tests(s.id) }),
     };
   });
   const facts = {

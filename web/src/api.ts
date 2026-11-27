@@ -129,7 +129,7 @@ export interface Scope {
    * no tests, screenshots or code: its variations have them, and only they count. Null: no variations.
    */
   columns: string[] | null;
-  /** A variation (ID SV-<id>): the scope it belongs to. Its title is "<scope title> (<values>)". */
+  /** A variation (ID SV-<id>): the scope it belongs to. It has its own title; its values are in "values". */
   parentId: number | null;
   /** A variation: one value for each column of its scope. Empty: the column does not apply. */
   values: string[] | null;

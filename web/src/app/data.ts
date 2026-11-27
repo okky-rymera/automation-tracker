@@ -479,7 +479,7 @@ function changesOf(
     const backFields = s.aiFields.filter((k) => k in b && !(k === 'title' && !b[k]));
     out.push({
       key: `s:${s.id}`, sec: 'Scopes', kind: isNew ? 'new' : 'changed', text: s.title, before: 'title' in b ? (b.title ?? '') : null,
-      ctx: `${scopeIdLabel(f, s.id)} · ${isNew ? (s.parentId !== null ? 'New variation.' : 'New scope.') : `Changed: ${s.aiFields.map((k) => (FIELD_LABEL[k] ?? k).toLowerCase()).join(', ')}.`}`,
+      ctx: `${scopeIdLabel(f, s.id)}${(s.values ?? []).some(Boolean) ? ` (${(s.values ?? []).filter(Boolean).join(', ')})` : ''} · ${isNew ? (s.parentId !== null ? 'New variation.' : 'New scope.') : `Changed: ${s.aiFields.map((k) => (FIELD_LABEL[k] ?? k).toLowerCase()).join(', ')}.`}`,
       tab: 'scopes', scopeId: s.id,
       ...(isNew
         ? { removeLbl: s.parentId !== null ? 'Remove variation' : 'Remove scope', confirm: `Delete ${s.parentId !== null ? 'variation' : 'scope'} ${scopeIdLabel(f, s.id)} “${s.title}”${s.columns ? ', all its variations,' : ''} and its requirements? The AI will not add it again.`, remove: () => mutate('DELETE', `${base}/scopes/${s.id}`, {}, quiet) }
