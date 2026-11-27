@@ -626,8 +626,9 @@ ${diff || '(no changes in these files)'}
 
 ## Writing style
 Plain, simple English: short sentences, active voice, common words. Write about behavior that a store owner or tester sees, not about tests.
-"settings": one item for each setting of this feature: its label and place, its choices, and its default value, for example 'Wholesale > Settings > Price tab > "Hide Retail Price" checkbox. Choices: checked, unchecked. Default: unchecked.' A setting of another feature that changes a scope goes in that scope's requirements, with the feature ID.
-Put code names (hooks, option keys, classes) only in "where", "settings" or "requirements", and only when they help a tester find the thing.
+"settings": one item for each setting of this feature: its label and place, its choices, and its default value, for example 'Wholesale > Settings > Price tab > "Hide Retail Price" checkbox. Choices: checked, unchecked. Default: unchecked.' Add the option key at the end when you know it: "Option key: <key>." A setting of another feature that changes a scope goes in that scope's requirements, with the feature ID.
+"where": the pages, admin screens and API routes where the feature shows or where a person or a program uses it. Do not put the settings of this feature in "where": "settings" has them. Code facts (AJAX actions, cron events, files, filters) go in "notes".
+Put code names (hooks, option keys, classes) only in "where" (page addresses, API routes), "settings" (the option key), "notes" (code facts) or "requirements", and only when they help a tester find the thing.
 For a setting that turns something off, quote its label and say "checked" or "unchecked". Do not write "on" or "off".
 `;
   return { prompt, feature };

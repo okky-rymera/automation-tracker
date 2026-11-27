@@ -198,15 +198,19 @@ and the feature that owns the setting. Do not copy the setting into the
 > F-5 scope "Wholesale customer sees the wholesale price with the regular price crossed out":
 > "The \"Hide Retail Price\" checkbox is unchecked (the default, see F-7)."
 
-**where**: one item for each place a tester finds it.
-> "Product edit screen > General tab > Wholesale Prices fields"
+**where**: one item for each page, admin screen or API route where the
+feature shows or where a person or a program uses it. Do not put the settings
+of this feature here: `settings` has them. Code facts (AJAX actions, cron
+events, files, filters) go in `notes`.
 > "Shop page, product page and cart"
+> "REST API: GET /wp-json/wholesale/v1/products with the query option wholesale_role"
 
 **settings**: one item for each setting that this feature owns. Give its
 place and label, its choices, and its default value. A reader must know the
 choices without the test site. Give a free text or number field its default
-value and its limits. Put a long list of choices in short form.
-> "Wholesale > Settings > Price tab > \"Hide Retail Price\" checkbox. Choices: checked, unchecked. Default: unchecked."
+value and its limits. Put a long list of choices in short form. When you
+know the option key, add it at the end: "Option key: <key>."
+> "Wholesale > Settings > Price tab > \"Hide Retail Price\" checkbox. Choices: checked, unchecked. Default: unchecked. Option key: wwpp_settings_hide_original_price."
 > "Wholesale > Settings > Price tab > \"Wholesale Price Text\" field. Free text. Default: \"Wholesale Price:\"."
 > "Product edit screen > \"Discount type\" list for each role. Choices: Fixed, Percentage. Default: Fixed."
 
@@ -357,7 +361,7 @@ This feature is made up. It shows the form only: do not copy its facts.
       "priority": "low",
       "roles": ["Admin", "Shop manager"],
       "requirements": ["WooCommerce is active.", "A wholesale role exists."],
-      "where": ["Plugin settings > Orders tab > \"Order note\" field", "WooCommerce > Orders > order screen"],
+      "where": ["WooCommerce > Orders > order screen"],
       "settings": ["Plugin settings > Orders tab > \"Order note\" field. Free text. Default: empty (no note)."],
       "notes": ["Staff asked for the note, so they can find wholesale orders without opening each customer."],
       "outOfScope": ["Emails to the customer (see F-30)."],

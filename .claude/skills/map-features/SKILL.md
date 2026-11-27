@@ -271,7 +271,7 @@ variations. The user set this pattern on F-4/S-354. Other examples: F-6/S-1671
   reload".
 - **Description:** what the scope does, in plain words. Name the settings by
   their labels. Do not write test steps, which test checks what, or the
-  location of the settings: the feature `where` and `settings` lists have it.
+  location of the settings: the feature `settings` list has it.
   > "The \"Hide Price and Add to Cart button\" checkbox and the \"Price and Add
   > to Cart Replacement Message\" field keep the values that the admin saved.
   > After a page reload, the box shows checked or cleared, and the field shows
@@ -350,8 +350,8 @@ What goes in each field, in short (details and examples in `references/payload.m
 | priority | high / medium / low: how many people use it and how bad a failure is. Integration groups are always low. Always choose one (see references/payload.md) |
 | roles | Labels: who uses or sees it ("Admin", "Wholesale customer") |
 | requirements | List: what must be true for every scope: plugins, settings, data, the logged-in user |
-| where | List: admin screens, settings tabs, shop pages, REST routes |
-| settings | List: each setting that the feature owns: place and label, choices, default value |
+| where | List: the pages, admin screens and API routes where the feature shows or where a person or a program uses it. Do not put the settings of the feature here: `settings` has them. Code facts (AJAX actions, cron events, files, filters) go in `notes` |
+| settings | List: each setting that the feature owns: place and label, choices, default value. When you know the option key, add it at the end: "Option key: <key>." |
 | notes | List: only what no test can check: reasons, code facts, limits. A testable rule is a scope |
 | outOfScope | List: what it does not do; name the feature that does it if there is one |
 | questions | List: only what a person must decide, or what you tried and could not prove |
@@ -665,10 +665,12 @@ install that plugin to test it, so it must not hide inside a core feature.
 ## Writing style
 
 Write all feature text in plain, simple English, as the user's CLAUDE.md asks:
-short sentences, active voice, common words, no internal code names. A person
+short sentences, active voice, common words, no internal code names except
+in the fields below. A person
 who does not read code must understand each feature. Put code names (hooks,
-option keys, class names) only in `where` or `requirements`, and only when
-they help a tester find the thing.
+option keys, class names) only in `where` (page addresses, API routes),
+`settings` (the option key), `notes` (code facts) or `requirements`, and only
+when they help a tester find the thing.
 
 Write about behavior, not about tests: do not name spec files or test IDs in
 feature text. The links show which tests check what.

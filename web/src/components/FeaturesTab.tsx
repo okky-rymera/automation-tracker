@@ -580,7 +580,7 @@ const FIELDS: ({ kind: 'label'; key: LabelField; label: string; hint: string } |
     kind: 'items',
     key: 'where',
     label: 'Where',
-    hint: '+ add a screen, settings page or shop page',
+    hint: '+ add a page, screen or API route where the feature shows or is used',
   },
   {
     kind: 'items',

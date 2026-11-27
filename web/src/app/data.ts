@@ -378,7 +378,7 @@ export function metrics(f: Feature, byId: Map<string, TestInfo>): Metrics {
 
 export const LISTS: { key: ItemField; label: string; hint: string; noun: string }[] = [
   { key: 'requirements', label: 'Requirements', hint: 'What must be true before you check any scope: a setting, data, the user.', noun: 'requirement' },
-  { key: 'where', label: 'Where', hint: 'The screens and settings that show this feature.', noun: 'screen or setting' },
+  { key: 'where', label: 'Where', hint: 'The pages, screens and API routes where this feature shows or is used. Not its settings: the Settings list has them.', noun: 'page, screen or API route' },
   { key: 'settings', label: 'Settings', hint: 'The settings of this feature: where each one is, its choices and its default value.', noun: 'setting' },
   { key: 'notes', label: 'Notes', hint: 'Only what no test can check: a reason, a code fact, a limit.', noun: 'note' },
   { key: 'outOfScope', label: 'Out of scope', hint: 'What this feature does not do.', noun: 'out-of-scope item' },
