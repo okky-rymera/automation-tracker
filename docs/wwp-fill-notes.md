@@ -1,32 +1,9 @@
-# Notes for features that are not filled yet
+# WWP: open items from the fill-feature-gaps job
 
-Earlier fill runs found these facts for OTHER features. They did not write them.
-The skill passes the section `## F-<id>` to the run for that feature. A run can find a fact wrong or already done.
-After a feature is filled, delete its section. Add new findings under the target feature (make the section if needed).
-Items for a person (decisions, bugs) go under "## For a person": the skill does not pass them to a run.
-
-## F-104
-- Add a scope (customer abilities, F-99): a customer with two wholesale roles; with a role filter, the list reports the filtered role. (from F-99)
-- F-21 S-228 ("Choosing another default role hides the role link note") needs a second wholesale role, which only Premium adds. Own it here, or F-21 S-228 gets the requirement "A second wholesale role exists (Premium)". (from F-21)
-- Add a scope: "the default wholesale role was deleted between the preview and the import": the row fails with "The default wholesale role no longer exists…". Only Premium can delete a role. (from F-19)
-- Add a scope for the customer export with 2 or more wholesale roles: "Selected roles" gives only the chosen roles; a customer with two wholesale roles gets only the first one in the role column (code only). F-18 S-176 cannot test this with the free plugin. (from F-18)
-
-
-## F-101
-- The admin delete of a variation uses the same code (variation_deletion), so the parent product probably loses its wholesale mark when another variation still has a wholesale price (code only). (from F-68)
-
-## F-19
-- S-1074 (no WooCommerce New account email) can add "(see F-70)" for the invitation email. Optional: its description already names F-70. (from F-70)
-
-## F-17
-- Open question (F-23, seen on the site): a shop manager that "Allowed roles" does not let open the Wholesale menu still sees the WooCommerce Home task "Set up wholesale pricing" and the notice link "Finish setup on your dashboard"; both open "Sorry, you are not allowed to access this page." After a person answers, F-17 can get a scope. (from F-23)
-- The Wholesale dashboard data route checks only "can manage WooCommerce" and ignores the "Allowed roles" list: a shop manager removed from the list still gets all dashboard data through the route. Add a scope or a question. (from F-80)
-
-## F-27
-- Checkout also saves the customer's wholesale role on the order; the dashboard needs it on the old order storage. Add a scope "The checkout saves the wholesale role on the order". (from F-80)
-
-## F-103
-- Without Premium, the product editor and each variation show the link "Add additional wholesale price levels." It opens an upgrade popup; the link goes away when Premium is active. No feature has a scope for it. Add it here, or tell which Upsells feature must have it. (from F-55)
+The fill-feature-gaps job (2026-11-27) filled all 101 wwp features in the tracker.
+The helpers found these items for a person: bugs, questions, decisions and text fixes.
+Each item names its feature (F-) and scope (S-, SV-) IDs. "(from F-x)" tells which run found it.
+Delete an item when it is done.
 
 ## For a person
 - No feature owns the Price tab setting "Variable Product Price Display" (Price Range / Minimum Price (Premium) / Maximum Price (Premium)). F-13 S-1048 names it with no feature ID.
@@ -193,3 +170,22 @@ Items for a person (decisions, bugs) go under "## For a person": the skill does 
 - F-107 (filled): S-1318, S-1319, S-1645 to S-1647 need WOOCS on the test site. The code converts fixed wholesale prices too: rename F-107 to "Wholesale prices in WOOCS currencies"? F-30 note #555 is now scope F-107 S-1647 and F-64 S-1575: make it an out-of-scope line that points to them. (from F-107)
 - F-102 (filled): all 13 scopes need Premium, Order Form or Lead Capture on the test site; S-699, S-700, S-1657, S-1658 can be shown with a placeholder plugin folder ("(simulated)"). 5 questions on what Premium replaces (Reports item, Roles page, Upgrade tab, License offer, F-87 tax fields). (from F-102)
 - From F-102, for filled features: F-66 S-1416 = F-102 S-699 (remove or mark To remove). F-29 note 547 can point to F-102 S-1648/S-1649 or go. F-72 has no scope for the "Learn more" link in the License Activation Status box (shows only when no paid plugin is installed). (from F-102)
+- (from F-103) No feature has a scope for the "Add additional wholesale price levels" link without Premium (simple product and variation). Decide: make a new Upsells feature, for example "Price levels upsell in the product editor", with 2 scopes: the link opens the upgrade popup, and the popup button opens the Premium page in a new tab. Code: the two functions that print the price fields, and js/backend/wwp-backend-product-page-upsell.js.
+- (from F-103) F-101 has an out-of-scope line about this link that names no feature. Point it to F-103 S-1676 and the new Upsells feature.
+- (from F-103) Question: can Premium be active but not start? Then the price-levels link hides, but the placeholder sale price fields and their popups still show (two different checks). Is this intended?
+- (from F-104) F-21 S-228 ("Choosing another default role hides the role link note") needs a second wholesale role (Premium). Decide: move it to F-104, or give it the requirement "A second wholesale role exists (Premium)".
+- (from F-104) F-18 S-176 says it cannot show a difference with one role. Point it to F-104 S-1686.
+- (from F-104) F-104 title: it now also has export and AI customer list scopes. Suggested: "Customers with Premium wholesale roles: import, export and AI customer list". A person wrote the title, so it was not renamed.
+- (from F-104) F-104 S-706 has the requirement "Wholesale Prices Premium is active.", which the new feature requirement repeats. It can be deleted.
+- (from F-104) The helper put S-231 into the group "Entry points" by mistake. I took it out again with the API (no group, as a person left it). The review may show both changes.
+- (from F-104) Questions: "View customers" after the import filters the Users list only by the default role: intended? The export role column and the AI customer list report a customer with two roles differently: intended? Which screen gives one account two wholesale roles?
+- (from F-105) F-45 (Usage tracking permission) is not in an Integration group, but S-554 and S-557 need a paid plugin. Decide: move them to an Integration feature?
+- (from F-105) Possible bug in F-52 (review popup): without Premium, the code also prints the popup text as loose paragraphs on the page (script loader, about lines 170-185). S-607 "The popup text shows only in the popup" can fail.
+- (from F-105) Questions (need Premium): does Premium remove the classic Getting Started notice, as a code comment says? With Premium 1.27.11+, does Premium replace the "Currently using: Free Version" offer on the License page with its license key form (fits F-102 or F-46)?
+- (from F-106) Questions (need Premium): which Premium settings make a product hidden from a role? Does Premium treat a variation of a hidden variable product as hidden? If not, a customer can read each variation's price through the AI price ability.
+- (from F-106) F-106 S-512 has no group; the 5 new scopes are in "Get wholesale price". Decide if S-512 goes there too.
+- F-101 (filled; no run read this): The admin delete of a variation uses the same code (variation_deletion), so the parent product probably loses its wholesale mark when another variation still has a wholesale price (code only). (from F-68)
+- F-19 (filled; no run read this): S-1074 (no WooCommerce New account email) can add "(see F-70)" for the invitation email. Optional: its description already names F-70. (from F-70)
+- F-17 (filled; no run read this): Open question (F-23, seen on the site): a shop manager that "Allowed roles" does not let open the Wholesale menu still sees the WooCommerce Home task "Set up wholesale pricing" and the notice link "Finish setup on your dashboard"; both open "Sorry, you are not allowed to access this page." After a person answers, F-17 can get a scope. (from F-23)
+- F-17 (filled; no run read this): The Wholesale dashboard data route checks only "can manage WooCommerce" and ignores the "Allowed roles" list: a shop manager removed from the list still gets all dashboard data through the route. Add a scope or a question. (from F-80)
+- F-27 (filled; no run read this): Checkout also saves the customer's wholesale role on the order; the dashboard needs it on the old order storage. Add a scope "The checkout saves the wholesale role on the order". (from F-80)

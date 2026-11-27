@@ -100,3 +100,7 @@ Format: `- F-<id> <date> <one short line: what the run did>`
 - F-98 2026-11-27 0 settings, 3 new scopes, 4 variations on S-968, 6 out-of-scope lines, 7 questions, 0 screenshots (Integration feature, code only; needs WPML)
 - F-107 2026-11-27 0 settings, 3 new scopes, 2 scopes regrouped, 3 notes, 3 out-of-scope lines, 4 questions (1 corrected), 0 screenshots (Integration feature, code only; needs WOOCS)
 - F-102 2026-11-27 0 settings, 7 new scopes (4 variations), 6 scope descriptions, 10 out-of-scope lines, 5 questions, 15 code tags, 0 screenshots (Integration feature, code only; needs Premium/Order Form/Lead Capture)
+- F-103 2026-11-27 F-103 from the code: 1 new scope (2 variations), 2 variations on S-353, 2 descriptions, 8 out-of-scope lines, 2 notes, 2 questions, 5 code entries, 0 screenshots (Premium not on site)
+- F-104 2026-11-27 F-104: 0 settings, 10 new scopes (1 with 2 variations), 10 code entries, 3 questions, 0 screenshots (all need Premium)
+- F-105 2026-11-27 F-105 from code: 2 new scopes, 2 scope descriptions, 3 notes, 8 out-of-scope lines, 2 questions, 0 screenshots (needs Premium)
+- F-106 2026-11-27 0 settings, 4 requirements, 5 new scopes, S-512 description, 6 out-of-scope, 3 notes, 2 questions, no screenshots (API only)
