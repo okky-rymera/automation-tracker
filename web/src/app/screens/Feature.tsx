@@ -513,12 +513,11 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
     <>
         <div className="overlay scope-pop" ref={popRef}>
           <button className="backdrop" onClick={close} aria-label="Close scope" tabIndex={-1} />
-          <div className="panel scope-pop-panel" role="dialog" aria-modal="true" aria-label={`S-${s.id} ${s.title}`} tabIndex={-1} onKeyDown={keepTab}>
+          <div className="panel scope-pop-panel" role="dialog" aria-modal="true" aria-label={openVar ? `SV-${openVar.id} ${openVar.title}` : `S-${s.id} ${s.title}`} tabIndex={-1} onKeyDown={keepTab}>
             {openVar ? (
             <div className="sp-head">
-              <button className="icon-btn" onClick={() => setRow(null)} aria-label={`Back to S-${s.id}`} title={`Back to S-${s.id}`}><IPrev s={16} /></button>
               <IdBtn label={`SV-${openVar.id}`} text={`F-${f.id}/SV-${openVar.id}`} />
-              <span className="sp-head-title">{(openVar.values ?? []).filter(Boolean).join(' · ') || 'No value'}</span>
+              <span style={{ flex: 1 }} />
               <button className="icon-btn" onClick={close} aria-label="Close scope" title="Close (Esc)"><IX s={16} /></button>
             </div>
             ) : (
@@ -533,7 +532,7 @@ function ScopePopup({ t, f, s, openRow, setOpen, setRow }: {
             </div>
             )}
             {openVar ? (
-              <VariationDetail key={openVar.id} t={t} f={f} s={s} v={openVar} />
+              <VariationDetail key={openVar.id} t={t} f={f} s={s} v={openVar} onBack={() => (setRow(null), requestAnimationFrame(() => popRef.current?.querySelector<HTMLElement>('.scope-pop-panel')?.focus({ preventScroll: true })))} />
             ) : (
             <div className="sp-main">
                 <div className="sp-intro">
@@ -782,7 +781,7 @@ function Variations({ t, f, s, vars, setRow }: {
  * One variation, shown in the scope popup in place of its scope: its values, screenshots and tests.
  * Its scope has the text, requirements, group and move.
  */
-function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v: ScopeX }) {
+function VariationDetail({ t, f, s, v, onBack }: { t: Tracker; f: FeatureX; s: ScopeX; v: ScopeX; onBack: () => void }) {
   const p = t.project;
   const base = `/api/projects/${p}`;
   const url = `${base}/scopes/${v.id}`;
@@ -797,6 +796,10 @@ function VariationDetail({ t, f, s, v }: { t: Tracker; f: FeatureX; s: ScopeX; v
   const setValue = (i: number, x: string) => act(() => mutate('PATCH', url, { values: columns.map((_, k) => (k === i ? x : (v.values?.[k] ?? ''))) }), 'Value changed');
   return (
     <div className="sp-main">
+      <div className="sp-intro">
+        <button className="linkbtn sp-back" onClick={onBack} title={`Back to S-${s.id}`} aria-label={`Back to S-${s.id} ${s.title}`}><IPrev s={14} /><span>{s.title}</span></button>
+        <h2 className="sp-title sp-var-title">{(v.values ?? []).filter(Boolean).join(' · ') || 'No value'}</h2>
+      </div>
       {v.toRemove ? (
         <div className="remove-box">
           <strong>To remove:</strong> <span>{v.toRemove.reason}</span>
